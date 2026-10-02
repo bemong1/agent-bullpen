@@ -1,0 +1,58 @@
+{
+ "schema": 1,
+ "when": "2026-10-01T20:15:13",
+ "loadavg": [
+  [
+   4.24,
+   8.23,
+   10.13
+  ],
+  [
+   4.83,
+   7.91,
+   9.95
+  ],
+  [
+   5.39,
+   7.66,
+   9.77
+  ]
+ ],
+ "python": "3.10.12",
+ "cpus": 32,
+ "home": "synthetic",
+ "manifest": {
+  "sessions": 300,
+  "mains": 100,
+  "subagents": 186,
+  "children": 200,
+  "bash_calls": 24766,
+  "codex_threads": 40,
+  "codex_exec_calls": 40,
+  "bytes": 396782164,
+  "busy_agents": 120,
+  "scale": 1.0
+ },
+ "metrics": {
+  "background_cpu": 0.0,
+  "gzip_wall": 0.0024377969093620777,
+  "http_busy_lock_wait_p95": 1.6330741345882416e-06,
+  "http_busy_p50": 0.014778189826756716,
+  "http_busy_p95": 0.017008858965709805,
+  "http_quiet_p95": 0.017399831907823682,
+  "json_wall": 0.003983122995123267,
+  "link_scan_first_cpu": 0.514795864,
+  "ready_cpu": 0.775623042,
+  "ready_wall": 0.7757246198598295,
+  "rss_mb": 54.7734375,
+  "scan_grow_p95_cpu": 0.015371445000000206,
+  "scan_grow_p95_wall": 0.015368685824796557,
+  "scan_idle_p95_cpu": 0.008425307999999965,
+  "scan_idle_p95_wall": 0.008422571001574397,
+  "scan_sessions_p50_cpu": 0.004122418999999988,
+  "state_p50_cpu": 0.007407914999999932,
+  "state_p95_wall": 0.013669863808900118
+ },
+ "label": "baseline",
+ "runs": 3
+}

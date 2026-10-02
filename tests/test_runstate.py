@@ -1,0 +1,1308 @@
+"""Run and turn boundaries, error classification, the status judgment and the torn-line recovery (board/runstate.py, board/util.py).
+
+The judgment is checked against the scenario generator: every `sta` case (and the state part of every `cpl` case) is built into a synthetic HOME, its record files are
+read with the collectors of runstate (no board server, no Session), the process table of the last observation becomes a Proc, and `judge` is compared with the
+status / reason / resets_at of the oracle. Six mutations each switch one piece off and must break a named case.
+
+    python3 -m unittest tests.test_runstate
+"""
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import compat  # noqa: E402,F401  (puts the repo root first on sys.path)
+
+from board import runstate as rs, util  # noqa: E402
+from board.facts import ErrInfo  # noqa: E402
+from tools.scenarios import axes, build, oracle, run  # noqa: E402
+from tools.scenarios.scene_aff import toolu  # noqa: E402
+
+NOW = 1790000000.0
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# small record builders (the generator is used for the big matrix; these are for the pieces it does not make)
+# ---------------------------------------------------------------------------------------------------------------------
+def iso(t):
+    return build.iso(t)
+
+
+def line(typ, t, **kw):
+    d = {'type': typ, 'timestamp': iso(t), 'sessionId': 's1', 'uuid': 'u%d' % int(t * 10), 'version': '2.1.284', 'entrypoint': 'sdk-cli'}
+    d.update(kw)
+    return d
+
+
+def sdk(t, text='Please review the folder and report.', idx=1):
+    return line('user', t, message={'role': 'user', 'content': text}, promptSource='sdk', turnPosition={'promptIndex': 0, 'turnIndex': idx})
+
+
+def tool(t, tid, name='Bash', **inp):
+    return line('assistant', t, message={'role': 'assistant', 'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': tid, 'name': name, 'input': inp}]})
+
+
+def result(t, tid, **tur):
+    return line('user', t, message={'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': tid, 'content': 'ok'}]}, toolUseResult=tur)
+
+
+def say(t, text='done', stop='end_turn'):
+    return line('assistant', t, message={'role': 'assistant', 'stop_reason': stop, 'content': [{'type': 'text', 'text': text}]})
+
+
+def api_err(t, status=429, kind='rate_limit', resets=None):
+    d = line('assistant', t, message={'role': 'assistant', 'model': '<synthetic>', 'stop_reason': 'stop_sequence', 'content': [{'type': 'text', 'text': 'err'}]},
+             error=kind, isApiErrorMessage=True, apiErrorStatus=status)
+    if resets:
+        d['quotaLimits'] = {'status': 'rejected', 'resetsAt': resets, 'rateLimitType': 'five_hour'}
+    return d
+
+
+def cost(total=1000):
+    return {'type': 'cost-state', 'sessionId': 's1', 'totalDuration': total}
+
+
+def tracker(*lines):
+    t = rs.RunTracker()
+    for d in lines:
+        t.feed(d)
+    return t
+
+
+def facts(t, kind='cli', **kw):
+    return rs.facts_of(t, kind, **kw)
+
+
+ALIVE, GONE, UNSEEN = rs.Proc(True, (1,)), rs.Proc(False), rs.Proc(None)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the generator -> facts adapter (what the board's wiring does with its own readers)
+# ---------------------------------------------------------------------------------------------------------------------
+def read_lines(path):
+    with open(path, 'rb') as f:
+        return f.read().split(b'\n')
+
+
+def feed_file(tr, path):
+    for raw in read_lines(path):
+        tr.feed_raw(raw)
+    return tr
+
+
+def proc_of(b, case, sid=None, rollout=None, tid=None):
+    """The Proc a wiring would build from the process table of the last observation of the case."""
+    ph = b.phases[-1]
+    if case.v.get('os') == 'mac_nops':
+        return rs.Proc(None)
+    entries = []
+    for p in ph.procs:
+        s = p.get('session')
+        if sid and s and s.get('sessionId') == sid:
+            entries.append((p['pid'], True, s.get('status'), (s.get('statusUpdatedAt') or 0) / 1000.0 or None))
+        elif rollout and (rollout in p['fds'] or (tid and any(tid in a for a in p['argv']))):
+            entries.append((p['pid'], True, None, None))
+    return rs.proc_snapshot(entries)
+
+
+class Judged:
+    """One generator case read back through runstate: verdicts, orchestrator verdict, limit groups, diagnostics."""
+
+    def __init__(self, case):
+        self.case = case
+        self.root = tempfile.mkdtemp(prefix='runstate-')
+        try:
+            self.b = build.build_case(case, self.root)
+            self._judge()
+        finally:
+            shutil.rmtree(self.root, ignore_errors=True)
+
+    def _ledger(self, path):
+        led = rs.Ledger()
+        for raw in read_lines(path):
+            led.feed_raw(raw)
+        return led
+
+    def _judge(self):
+        b, case = self.b, self.case
+        v = case.v
+        self.verdict = self.orch = None
+        self.groups = []
+        self.diag = set()
+        now = b.phases[-1].now
+        if case.bundle == 'cpl':
+            sk, launcher = 'cli', {'main': b.main_path, 'sub': b.paths.get('launcher'), 'grand': b.paths.get('mid')}[v['spawner']]
+        else:
+            sk = v['skind']
+            launcher = b.paths['parent'] if sk == 'grandsub' else b.main_path
+        verdicts = {}
+        if sk == 'main':
+            tr = feed_file(rs.RunTracker(), b.main_path)
+            self.orch = rs.orch_state(tr, proc_of(b, case, sid=b.sid('orch')), now)
+            self.diag |= {c for c, _ in self.orch.diag}
+        child = b.paths.get('child')
+        led = self._ledger(launcher) if launcher else None
+        if child is None:                                       # the orchestrator alone (no agent has stopped yet)
+            return
+        if sk == 'codex':
+            tr = rs.CodexTracker(b.ids['child'])
+            for raw in read_lines(child):
+                for d in util.parse_records(raw)[0]:
+                    tr.feed(d)
+            calls = [toolu(b, 'cx-launch-child')] + ([toolu(b, 'cx-resume-child')] if v['at'] == 'after_resume' else [])
+            f = rs.facts_of(tr, 'codex', led, launch_calls=calls, spawn_ts=None)
+            self.verdict = rs.judge(f, proc_of(b, case, rollout=child, tid=b.ids['child']), now)
+        elif sk in ('cli',) or case.bundle == 'cpl':
+            tr = feed_file(rs.RunTracker(b.ids['child']), child)
+            calls = [toolu(b, 'launch-child')] + ([toolu(b, 'resume-child')] if v.get('at') in ('after_resume', 'resume_stopped') else [])
+            f = rs.facts_of(tr, 'cli', led, launch_calls=calls)
+            self.verdict = rs.judge(f, proc_of(b, case, sid=b.ids['child']), now)
+        else:                                                   # a sub-agent: the process is the session it lives in
+            tr = feed_file(rs.RunTracker(), child)
+            parent_sid = b.sid('orch')
+            f = rs.facts_of(tr, 'subagent', led, agent_id=b.ids['child'], tool_use_id=toolu(b, 'spawn-child'))
+            self.verdict = rs.judge(f, proc_of(b, case, sid=parent_sid), now)
+        if self.verdict is not None:
+            verdicts['child'] = self.verdict
+            self.diag |= self.verdict.codes()
+        if self.orch is not None or verdicts:
+            self.groups = rs.group_limits(verdicts, self.orch)
+            self.diag |= {c for c, _ in rs.group_diag(self.groups)}
+
+
+def resolved(case, b, subject, field):
+    truth = oracle.truth(case)
+    want = truth.subjects.get(subject, {}).get(field)
+    return run.resolve(want, b)
+
+
+def state_cases():
+    return [c for c in run.select() if c.bundle in ('sta', 'cpl')]
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+class TornLines(unittest.TestCase):
+    """A record cut in half with the next record glued to it on the same line (seen in real records): the complete record behind the half is not lost."""
+    A = {'parentUuid': None, 'type': 'assistant', 'uuid': 'u1', 'sessionId': 's1', 'message': {'content': [{'type': 'text', 'text': 'first words of an answer'}], 'stop_reason': 'end_turn'}}
+    B = {'parentUuid': 'u1', 'type': 'assistant', 'uuid': 'u2', 'sessionId': 's1', 'message': {'content': [{'type': 'text', 'text': 'the end'}], 'stop_reason': 'end_turn'}}
+
+    @staticmethod
+    def raw(d):
+        return json.dumps(d, separators=(',', ':')).encode()
+
+    def test_every_cut_gives_back_the_next_record(self):
+        a, b = self.raw(self.A), self.raw(self.B)
+        for cut in range(1, len(a)):
+            got, torn = util.parse_record(a[:cut] + b)
+            self.assertEqual(got, self.B, cut)
+            self.assertTrue(torn)
+
+    def test_a_good_line_is_unchanged(self):
+        a = self.raw(self.A)
+        self.assertEqual(util.parse_record(a), (self.A, False))
+        self.assertEqual(util.load_json_line(a), self.A)
+        self.assertEqual(util.parse_records(b'  \n'), ([], False))
+
+    def test_two_whole_records_on_one_line_are_both_returned(self):
+        recs, torn = util.parse_records(self.raw(self.A) + self.raw(self.B))
+        self.assertEqual(recs, [self.A, self.B])
+        self.assertTrue(torn)
+
+    def test_garbage_and_a_half_record_alone_give_nothing(self):
+        self.assertEqual(util.parse_records(b'not json at all'), ([], True))
+        self.assertEqual(util.parse_records(self.raw(self.A)[:40]), ([], True))
+
+    def test_a_content_block_inside_the_half_is_not_a_record(self):
+        # the half ends right after a complete inner object: it must not be taken for a record
+        half = b'{"parentUuid":null,"type":"assistant","uuid":"u1","sessionId":"s1","message":{"content":[{"type":"text","text":"x"}'
+        got, torn = util.parse_record(half + self.raw(self.B))
+        self.assertEqual(got, self.B)
+        self.assertEqual(util.parse_records(half)[0], [])
+
+    def test_attachments_are_skipped_unread_as_before(self):
+        att = b'{"parentUuid":null,"type":"attachment","uuid":"a1","sessionId":"s1","attachment":{"type":"file","content":"' + b'x' * 500 + b'"}}'
+        self.assertEqual(util.parse_records(att), ([], False))
+        qc = b'{"type":"attachment","uuid":"a2","sessionId":"s1","attachment":{"type":"queued_command","commandMode":"task-notification","prompt":"p"}}'
+        self.assertEqual(len(util.parse_records(qc)[0]), 1)
+
+    def test_a_second_record_glued_behind_an_attachment_is_found(self):
+        att = b'{"parentUuid":null,"type":"attachment","uuid":"a1","sessionId":"s1","attachment":{"type":"file","content":"abcdefghij'
+        got, torn = util.parse_record(att + self.raw(self.B))
+        self.assertEqual(got, self.B)
+        self.assertTrue(torn)
+
+    def test_the_generator_tear_keeps_the_end_turn(self):
+        case = axes.normalize(axes.Case('sta', {'skind': 'cli', 'life': 'normal_end', 'flaw': 'torn', 'at': 'just_ended'}))
+        j = Judged(case)
+        self.assertEqual((j.verdict.status, j.verdict.reason), ('done', None))
+        self.assertIn('torn_lines', j.verdict.codes())
+
+    def test_a_torn_error_line_still_gives_the_limit(self):
+        # the generator's tear also hits the API error line: half of the line before it, then the error record on the same line
+        before, err = tool(2, 'c1'), api_err(5, resets=NOW + 7200)
+        a, b = self.raw(before), self.raw(err)
+        t = rs.RunTracker()
+        for raw in (self.raw(sdk(1)), a[:len(a) // 2] + b, self.raw(cost())):
+            t.feed_raw(raw)
+        self.assertEqual((t.torn, t.lost), (1, 0))
+        v = rs.judge(rs.facts_of(t, 'cli'), GONE, NOW)
+        self.assertEqual((v.status, v.reason, v.resets_at), ('interrupted', 'limit', NOW + 7200))
+        self.assertIn('torn_lines', v.codes())
+        with mock.patch.object(util, '_recover', lambda raw: []):                         # mutation: the error line is lost with the half
+            m = rs.RunTracker()
+            for raw in (self.raw(sdk(1)), a[:len(a) // 2] + b, self.raw(cost())):
+                m.feed_raw(raw)
+        self.assertEqual(rs.judge(rs.facts_of(m, 'cli'), GONE, NOW).reason, 'exited')
+
+    def test_tear_line_of_the_generator_loses_a_record_without_recovery(self):
+        case = axes.normalize(axes.Case('sta', {'skind': 'cli', 'life': 'normal_end', 'flaw': 'torn', 'at': 'just_ended'}))
+        root = tempfile.mkdtemp(prefix='runstate-')
+        try:
+            b = build.build_case(case, root)
+            tr = rs.RunTracker()
+            with mock.patch.object(util, '_recover', lambda raw: []):          # mutation: no recovery
+                feed_file(tr, b.paths['child'])
+            self.assertNotEqual(tr.runs[-1].end_kind, 'end_turn')
+            self.assertEqual(tr.lost, 1)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_tail_still_returns_whole_lines_only(self):
+        d = tempfile.mkdtemp(prefix='runstate-')
+        try:
+            p = os.path.join(d, 'x.jsonl')
+            with open(p, 'wb') as f:
+                f.write(self.raw(self.A) + b'\n' + self.raw(self.B)[:30])
+            t = util.Tail(p)
+            self.assertEqual(t.read(), [self.raw(self.A)])
+            with open(p, 'ab') as f:
+                f.write(self.raw(self.B)[30:] + b'\n')
+            self.assertEqual(t.read(), [self.raw(self.B)])
+        finally:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_a_huge_torn_line_is_not_searched(self):
+        raw = b'{"type":"x"' + b' ' * (util._TORN_MAX + 10)
+        self.assertEqual(util.parse_records(raw), ([], True))
+
+
+class Boundaries(unittest.TestCase):
+    """Which lines start a turn, and a run is a process lifetime closed by cost-state."""
+
+    def test_sdk_prompt_is_a_turn_and_notices_are_not(self):
+        self.assertEqual(rs.turn_source(sdk(1)), 'sdk')
+        notice = line('user', 2, message={'role': 'user', 'content': '<task-notification>\n<task-id>b1</task-id>\n</task-notification>'}, promptSource='system',
+                      origin={'kind': 'task-notification'})
+        self.assertIsNone(rs.turn_source(notice))
+        legacy_notice = line('user', 2, message={'role': 'user', 'content': '<task-notification>\n<task-id>b1</task-id>\n</task-notification>'})
+        self.assertIsNone(rs.turn_source(legacy_notice))
+        peer = line('user', 3, message={'role': 'user', 'content': 'hello from another session'}, origin={'kind': 'peer'}, isMeta=True)
+        self.assertIsNone(rs.turn_source(peer))
+        summary = line('user', 4, message={'role': 'user', 'content': 'This session is being continued ...'}, isCompactSummary=True)
+        self.assertIsNone(rs.turn_source(summary))
+        self.assertIsNone(rs.turn_source(result(5, 't1')))
+
+    def test_other_sources(self):
+        typed = line('user', 1, message={'role': 'user', 'content': 'fix it'}, promptSource='typed', origin={'kind': 'human'})
+        auto = line('user', 1, message={'role': 'user', 'content': 'Continue.'}, isMeta=True, origin={'kind': 'auto-continuation'}, promptSource='system')
+        old = line('user', 1, message={'role': 'user', 'content': 'review the folder'})
+        meta = line('user', 1, message={'role': 'user', 'content': 'image note'}, isMeta=True)
+        self.assertEqual([rs.turn_source(x) for x in (typed, auto, old, meta)], ['user', 'system', 'legacy', None])
+        self.assertEqual(rs.turn_of(sdk(1, idx=3)).idx, 3)
+        self.assertEqual(rs.turn_of(old).source, 'legacy')
+
+    def test_turn_head_is_short(self):
+        self.assertLessEqual(len(rs.turn_of(sdk(1, text='x' * 5000)).prompt_head), 80)
+
+    def test_runs_are_closed_by_cost_state(self):
+        t = tracker(sdk(1, idx=1), tool(2, 'c1'), say(3), cost(9000), sdk(10, idx=2), say(11), cost(15000))
+        self.assertEqual([(r.epoch, r.exited, r.end_kind, len(r.turns)) for r in t.runs], [(1, True, 'end_turn', 1), (2, True, 'end_turn', 1)])
+        self.assertEqual([r.dur_ms for r in t.runs], [9000, 6000])
+
+    def test_a_turn_echo_is_not_a_second_turn(self):
+        t = tracker(sdk(1, idx=1), sdk(1.5, idx=1), say(2))
+        self.assertEqual(len(t.runs), 1)
+        self.assertEqual(len(t.runs[0].turns), 1)
+
+    def test_resume_with_the_same_turn_index_is_a_new_run(self):
+        t = tracker(sdk(1, idx=1), say(2), cost(), sdk(9, idx=1), tool(10, 'c2'))
+        self.assertEqual([r.epoch for r in t.runs], [1, 2])
+        self.assertEqual((t.runs[0].exited, t.runs[1].exited, t.runs[1].end_kind), (True, False, 'mid_turn'))
+
+    def test_enqueue_lines_do_not_open_a_run(self):
+        enq = {'type': 'queue-operation', 'operation': 'enqueue', 'timestamp': iso(5), 'sessionId': 's1', 'content': 'queued text'}
+        self.enqueue_scene(enq)
+
+    def enqueue_scene(self, enq):
+        t = tracker(sdk(1), tool(2, 'c1'), enq, result(6, 'c1'), say(7), cost())
+        self.assertEqual(len(t.runs), 1)
+        self.assertEqual(len(t.runs[0].turns), 1)
+
+    def test_mutation_enqueue_as_run_start_breaks_the_boundary_test(self):
+        real = rs.turn_source
+
+        def mutated(d):
+            return 'user' if d.get('type') == 'queue-operation' and d.get('operation') == 'enqueue' else real(d)
+
+        enq = {'type': 'queue-operation', 'operation': 'enqueue', 'timestamp': iso(5), 'sessionId': 's1', 'content': 'queued text'}
+        with mock.patch.object(rs, 'turn_source', mutated):
+            with self.assertRaises(AssertionError):
+                self.enqueue_scene(enq)
+
+    def test_end_kinds(self):
+        self.assertEqual(tracker(sdk(1)).runs[0].end_kind, 'none')
+        self.assertEqual(tracker(sdk(1), tool(2, 'c')).runs[0].end_kind, 'mid_turn')
+        self.assertEqual(tracker(sdk(1), tool(2, 'c'), result(3, 'c')).runs[0].end_kind, 'mid_turn')
+        self.assertEqual(tracker(sdk(1), say(2)).runs[0].end_kind, 'end_turn')
+        thinking = line('assistant', 2, message={'role': 'assistant', 'stop_reason': 'end_turn', 'content': [{'type': 'thinking', 'thinking': 'hm'}]})
+        self.assertEqual(tracker(sdk(1), tool(1.5, 'c'), result(1.7, 'c'), thinking).runs[0].end_kind, 'mid_turn')   # a thinking block is not the end of the turn
+        synth = line('assistant', 2, message={'role': 'assistant', 'model': '<synthetic>', 'stop_reason': 'stop_sequence', 'content': [{'type': 'text', 'text': 'No response requested.'}]})
+        self.assertEqual(tracker(sdk(1), synth).runs[0].end_kind, 'none')
+        r = tracker(sdk(1), api_err(2, resets=NOW)).runs[0]
+        self.assertEqual((r.end_kind, r.err.status, r.err.type, r.err.resets_at), ('error', 429, 'rate_limit', NOW))
+
+    def test_an_error_is_cleared_by_what_follows(self):
+        t = tracker(sdk(1), api_err(2, resets=NOW), sdk(3, idx=2), tool(4, 'c'))
+        self.assertEqual((t.runs[0].end_kind, t.runs[0].err), ('mid_turn', None))
+
+    def test_cost_state_without_a_run_opens_nothing(self):
+        t = tracker(cost(100))
+        self.assertEqual(t.runs, [])
+
+    def test_resets_at_is_taken_as_written(self):
+        self.assertEqual(rs.error_of(api_err(1, resets=1790007200)).resets_at, 1790007200)
+        self.assertIsNone(rs.error_of(api_err(1)).resets_at)
+        self.assertEqual(rs.error_of(api_err(1, resets=1790007200000)).resets_at, 1790007200)        # milliseconds
+
+    def test_classify_error(self):
+        c = lambda st, typ: rs.classify_error(ErrInfo(status=st, type=typ))
+        self.assertEqual(c(429, 'rate_limit'), ('interrupted', 'limit'))
+        self.assertEqual(c(429, None), ('interrupted', 'limit'))
+        self.assertEqual(c(529, 'server_error'), ('interrupted', 'api_error'))
+        self.assertEqual(c(None, 'server_error'), ('interrupted', 'api_error'))
+        self.assertEqual(c(None, 'overloaded'), ('interrupted', 'api_error'))
+        self.assertEqual(c(400, 'invalid_request'), ('failed', 'api_error'))
+        self.assertEqual(c(None, 'authentication_failed'), ('failed', 'api_error'))
+        self.assertEqual(c(None, None), ('failed', 'api_error'))
+
+    def test_dedicated_notice_kinds(self):
+        n = lambda text: rs.notice_kind(line('system', 1, subtype='informational', content=text))
+        self.assertEqual(n('Usage limit reached · continuing automatically at 5:30pm · esc or type to cancel'), 'auto')
+        self.assertEqual(n('Usage limit reset · continuing automatically'), 'reset')
+        self.assertEqual(n('Usage limit reached · resets at 5pm'), 'limit')
+        self.assertIsNone(n('Something else'))
+        self.assertIsNone(rs.notice_kind(line('system', 1, subtype='turn_duration')))
+
+
+class Notes(unittest.TestCase):
+    def test_parse_note(self):
+        text = '<task-notification>\n<task-id>a0123456789abcdef</task-id>\n<tool-use-id>toolu_1</tool-use-id>\n<status>failed</status>\n' \
+               '<summary>Agent "x" failed (error type rate_limit, HTTP 429)</summary>\n</task-notification>'
+        n = rs.parse_note(text, 5.0)
+        self.assertEqual((n.task, n.tool_use_id, n.status, n.err_status, n.err_type, n.is_agent), ('a0123456789abcdef', 'toolu_1', 'failed', 429, 'rate_limit', True))
+        t = '<task-notification>\n<task-id>bk3p9x2lq</task-id>\n<status>killed</status>\n<summary>Background command "x" was stopped after reaching its background time limit</summary>\n</task-notification>'
+        n = rs.parse_note(t)
+        self.assertEqual((n.is_agent, n.reason), (False, 'time_limit'))
+        t = '<task-notification>\n<task-id>bk3p9x2lq</task-id>\n<status>failed</status>\n<summary>Background command "x" failed with exit code 137</summary>\n</task-notification>'
+        self.assertEqual(rs.parse_note(t).exit_code, 137)
+        self.assertIsNone(rs.parse_note('no tags here'))
+
+    def test_ids(self):
+        self.assertTrue(rs.is_agent_id('a0123456789abcdef'))
+        self.assertFalse(rs.is_agent_id('bk3p9x2lq'))
+        self.assertFalse(rs.is_agent_id('a0123456789abcdefg'))
+        self.assertFalse(rs.is_agent_id(None))
+
+    def test_ledger_chain_tool_use_to_background_task_to_notice(self):
+        led = rs.Ledger()
+        led.feed(tool(1, 'toolu_L', run_in_background=True, command='claude -p x'))
+        led.feed(result(1.4, 'toolu_L', backgroundTaskId='bk1'))
+        led.feed(line('user', 9, message={'role': 'user', 'content': '<task-notification>\n<task-id>bk1</task-id>\n<tool-use-id>toolu_L</tool-use-id>\n<status>killed</status>\n'
+                                         '<summary>Background command "x" was stopped after reaching its background time limit</summary>\n</task-notification>'},
+                      promptSource='system', origin={'kind': 'task-notification'}))
+        self.assertEqual(led.bg_ids(['toolu_L']), {'bk1'})
+        self.assertEqual([n.reason for n in led.bg_notes({'bk1'})], ['time_limit'])
+        self.assertEqual(led.strays(), [])
+        led.feed(line('user', 10, message={'role': 'user', 'content': '<task-notification>\n<task-id>other</task-id>\n<status>completed</status>\n<summary>x</summary>\n</task-notification>'}))
+        self.assertEqual([n.task for n in led.strays()], ['other'])
+
+    def test_taskstop_and_agent_notice(self):
+        led = rs.Ledger()
+        led.feed(tool(5, 'ts1', 'TaskStop', task_id='a0123456789abcdef'))
+        self.assertEqual(led.stops_of({'a0123456789abcdef'}), [build.T_BASE * 0 + led.stops[0][0]])
+        att = line('attachment', 7, attachment={'type': 'queued_command', 'commandMode': 'task-notification', 'timestamp': iso(7),
+                                                'prompt': '<task-notification>\n<task-id>a0123456789abcdef</task-id>\n<status>completed</status>\n<summary>fin</summary>\n</task-notification>'})
+        led.feed(att)
+        led.feed(att)                                                    # the same notice twice counts once
+        self.assertEqual(len(led.agent_notes('a0123456789abcdef')), 1)
+
+    def test_foreground_agent_result_is_a_completion_but_the_async_launch_is_not(self):
+        led = rs.Ledger()
+        led.feed(tool(1, 'toolu_A', 'Agent', description='d', prompt='p'))
+        led.feed(result(2, 'toolu_A', isAsync=True, status='async_launched', agentId='a0123456789abcdef'))
+        self.assertEqual(led.notes, [])
+        led.feed(tool(3, 'toolu_B', 'Agent', description='d', prompt='p'))
+        led.feed(result(9, 'toolu_B', status='completed', agentId='a0123456789abcdee'))
+        self.assertEqual([(n.task, n.status) for n in led.notes], [('a0123456789abcdee', 'completed')])
+
+
+class Judgments(unittest.TestCase):
+    """judge on hand-built facts: the order of evidence."""
+
+    def j(self, t, proc, now, kind='cli', **kw):
+        return rs.judge(facts(t, kind, **kw), proc, now)
+
+    def test_error_before_process(self):
+        t = tracker(sdk(1), api_err(5, resets=NOW + 7200), cost())
+        for p in (ALIVE, GONE, UNSEEN):
+            v = self.j(t, p, NOW)
+            self.assertEqual((v.status, v.reason, v.resets_at), ('interrupted', 'limit', NOW + 7200), p)
+
+    def test_the_error_of_an_earlier_run_does_not_cover_the_new_run(self):
+        t = tracker(sdk(1), api_err(5, resets=NOW + 7200), cost(), sdk(NOW - 100), tool(NOW - 95, 'c'))
+        self.assertEqual(self.j(t, ALIVE, NOW - 90).status, 'running')
+        t = tracker(sdk(1), api_err(5, resets=NOW + 7200), cost(), sdk(NOW - 100), say(NOW - 95), cost(20000))
+        self.assertEqual(self.j(t, GONE, NOW).status, 'done')
+
+    def test_exit_marker(self):
+        self.assertEqual((self.j(tracker(sdk(1), say(2), cost()), GONE, 100).status), 'done')
+        v = self.j(tracker(sdk(1), tool(2, 'c'), cost()), GONE, 100)
+        self.assertEqual((v.status, v.reason), ('interrupted', 'exited'))              # nobody is blamed
+        self.assertEqual(self.j(tracker(sdk(1), tool(2, 'c'), cost()), UNSEEN, 100).status, 'interrupted')   # the marker needs no process view
+
+    def test_record_that_just_stops(self):
+        t = tracker(sdk(1), tool(2, 'c'))
+        v = self.j(t, GONE, 200)
+        self.assertEqual((v.status, v.reason), ('ended', 'crash'))
+        self.assertEqual(self.j(t, UNSEEN, 20).status, 'running')                       # recently written: no reason to doubt
+        self.assertEqual(self.j(t, UNSEEN, 200).status, 'unknown')                      # quiet and no process view
+        self.assertEqual(self.j(t, ALIVE, 20).status, 'running')
+
+    def test_a_sub_agent_never_waits_for_a_process_view(self):
+        t = tracker(sdk(1), say(2, stop='tool_use'))
+        self.assertEqual(self.j(t, UNSEEN, 2000, kind='subagent').status, 'stalled')
+
+    def test_stalled_after_silence_and_a_waiting_tool_keeps_it_running(self):
+        t = tracker(sdk(1), say(2, 'x', stop='tool_use'))
+        self.assertEqual(self.j(t, ALIVE, 2 + rs.STALL_SEC + 5).status, 'stalled')
+        t = tracker(sdk(1), tool(2, 'c'))
+        self.assertEqual(self.j(t, ALIVE, 2 + rs.STALL_SEC + 5).status, 'running')
+        self.assertEqual(self.j(t, ALIVE, 2 + rs.TOOL_STALL_SEC + 5).status, 'stalled')
+
+    def test_overload_is_interrupted_and_a_refusal_failed(self):
+        v = self.j(tracker(sdk(1), api_err(2, 529, 'server_error')), GONE, 50)
+        self.assertEqual((v.status, v.reason, v.resets_at), ('interrupted', 'api_error', None))
+        v = self.j(tracker(sdk(1), api_err(2, 400, 'invalid_request')), GONE, 50)
+        self.assertEqual((v.status, v.reason), ('failed', 'api_error'))
+
+    def test_bash_time_limit_needs_the_notice(self):
+        led = rs.Ledger()
+        led.feed(tool(0, 'L', run_in_background=True))
+        led.feed(result(0.5, 'L', backgroundTaskId='bk1'))
+        t = tracker(sdk(1), tool(2, 'c'), cost(1800000))
+        v = rs.judge(rs.facts_of(t, 'cli', led, launch_calls=['L']), GONE, 1900)
+        self.assertEqual((v.status, v.reason), ('interrupted', 'exited'))                 # a run as long as the limit is no proof
+        led.feed(line('user', 1803, message={'role': 'user', 'content': '<task-notification>\n<task-id>bk1</task-id>\n<status>killed</status>\n'
+                                             '<summary>Background command "x" was stopped after reaching its background time limit</summary>\n</task-notification>'},
+                      promptSource='system', origin={'kind': 'task-notification'}))
+        v = rs.judge(rs.facts_of(t, 'cli', led, launch_calls=['L']), GONE, 1900)
+        self.assertEqual((v.status, v.reason), ('interrupted', 'time_limit'))
+        self.assertEqual(rs.judge(rs.facts_of(t, 'cli', led, launch_calls=[]), GONE, 1900).reason, 'exited')       # the chain needs the launch call
+
+    def test_task_stop_is_killed_not_time_limit(self):
+        led = rs.Ledger()
+        led.feed(tool(0, 'L', run_in_background=True))
+        led.feed(result(0.5, 'L', backgroundTaskId='bk1'))
+        led.feed(tool(59, 'S', 'TaskStop', task_id='bk1'))
+        t = tracker(sdk(1), tool(2, 'c'), cost(60000))
+        t.last_ts = 2.0
+        v = rs.judge(rs.facts_of(t, 'cli', led, launch_calls=['L']), GONE, 100)
+        self.assertEqual((v.status, v.reason), ('killed', 'stopped'))
+
+    def test_a_stop_before_the_new_run_does_not_cover_it(self):
+        led = rs.Ledger()
+        led.feed(tool(0, 'L', run_in_background=True))
+        led.feed(result(0.5, 'L', backgroundTaskId='bk1'))
+        led.feed(tool(59, 'S', 'TaskStop', task_id='bk1'))
+        t = tracker(sdk(1), tool(2, 'c'), cost(60000), sdk(500), tool(501, 'd'))
+        self.assertEqual(rs.judge(rs.facts_of(t, 'cli', led, launch_calls=['L']), ALIVE, 510).status, 'running')
+
+    def test_a_finished_run_stays_done_after_a_late_stop(self):
+        led = rs.Ledger()
+        led.feed(tool(0, 'L', run_in_background=True))
+        led.feed(result(0.5, 'L', backgroundTaskId='bk1'))
+        led.feed(tool(30, 'S', 'TaskStop', task_id='bk1'))
+        t = tracker(sdk(1), say(5), cost(6000))
+        self.assertEqual(rs.judge(rs.facts_of(t, 'cli', led, launch_calls=['L']), GONE, 100).status, 'done')
+
+    def test_sub_agent_notices(self):
+        aid = 'a0123456789abcdef'
+
+        def led_with(status, summary):
+            led = rs.Ledger()
+            led.feed(line('user', 20, message={'role': 'user', 'content': '<task-notification>\n<task-id>%s</task-id>\n<status>%s</status>\n<summary>%s</summary>\n</task-notification>'
+                                               % (aid, status, summary)}, promptSource='system', origin={'kind': 'task-notification'}))
+            return led
+
+        t = tracker(sdk(1), tool(2, 'c'), result(3, 'c'))
+        f = lambda s, m: rs.judge(rs.facts_of(t, 'subagent', led_with(s, m), agent_id=aid), ALIVE, 50)
+        self.assertEqual(f('completed', 'fin').status, 'done')
+        self.assertEqual((f('killed', 'x').status, f('killed', 'x').reason), ('killed', 'stopped'))
+        v = f('failed', 'Agent "x" failed (error type rate_limit, HTTP 429)')
+        self.assertEqual((v.status, v.reason, v.resets_at), ('interrupted', 'limit', None))                 # the notice has no reset time and none is made up
+        self.assertEqual((f('failed', 'it broke').status, f('failed', 'it broke').reason), ('failed', None))
+        self.assertEqual(f('failed', 'Agent failed (error type invalid_request_error, HTTP 400)').status, 'failed')
+
+    def test_old_notice_does_not_cover_a_later_message(self):
+        aid = 'a0123456789abcdef'
+        led = rs.Ledger()
+        led.feed(line('user', 20, message={'role': 'user', 'content': '<task-notification>\n<task-id>%s</task-id>\n<status>failed</status>\n<summary>x</summary>\n</task-notification>' % aid},
+                      promptSource='system', origin={'kind': 'task-notification'}))
+        t = tracker(sdk(1), say(2), line('user', 900, message={'role': 'user', 'content': 'The coordinator sent a message while you were working: go on'}), tool(901, 'c'))
+        self.assertEqual(rs.judge(rs.facts_of(t, 'subagent', led, agent_id=aid), ALIVE, 910).status, 'running')
+
+    def test_parent_over_applies_to_sub_agents_only(self):
+        t = tracker(sdk(1), say(2, 'x', stop='tool_use'))
+        self.assertEqual(self.j(t, ALIVE, 100, kind='subagent', parent_over=True).status, 'ended')
+        self.assertEqual(self.j(t, ALIVE, 100, kind='cli', parent_over=True).status, 'running')           # a detached `claude -p` grand-child keeps running
+
+    def test_not_resumed_and_diagnostics(self):
+        t = tracker(sdk(1), api_err(5, resets=1000), cost())
+        self.assertNotIn('not_resumed', self.j(t, GONE, 1100).codes())
+        self.assertIn('not_resumed', self.j(t, GONE, 1000 + rs.UNRESUMED_LIMIT_SEC + 1).codes())
+        t = tracker(sdk(1), api_err(5, 529, 'server_error'), cost())
+        self.assertNotIn('not_resumed', self.j(t, GONE, 5 + rs.UNRESUMED_OTHER_SEC - 5).codes())
+        v = self.j(t, GONE, 5 + rs.UNRESUMED_OTHER_SEC + 5)
+        self.assertEqual(dict(v.diag)['not_resumed'], {'reason': 'api_error'})
+        # a run that stopped for another reason is not waiting on a limit or an error to pass: "not resumed" would say something that is not true of it
+        for t in (tracker(sdk(1), tool(2, 'c'), cost(1000)),                                      # exited (nobody is blamed)
+                  tracker(sdk(1), tool(2, 'c'), cost(1800000))):
+            v = self.j(t, GONE, 2 + 10 * rs.UNRESUMED_OTHER_SEC)
+            self.assertEqual((v.status, v.reason), ('interrupted', 'exited'))
+            self.assertNotIn('not_resumed', v.codes())
+        led = rs.Ledger()
+        led.feed(tool(0, 'L', run_in_background=True))
+        led.feed(result(0.5, 'L', backgroundTaskId='bk1'))
+        led.feed(line('user', 1803, message={'role': 'user', 'content': '<task-notification>\n<task-id>bk1</task-id>\n<status>killed</status>\n'
+                                             '<summary>Background command "x" was stopped after reaching its background time limit</summary>\n</task-notification>'},
+                      promptSource='system', origin={'kind': 'task-notification'}))
+        v = rs.judge(rs.facts_of(tracker(sdk(1), tool(2, 'c'), cost(1800000)), 'cli', led, launch_calls=['L']), GONE, 1803 + 10 * rs.UNRESUMED_OTHER_SEC)
+        self.assertEqual((v.status, v.reason), ('interrupted', 'time_limit'))
+        self.assertNotIn('not_resumed', v.codes())
+
+    def test_proc_diagnostics(self):
+        t = tracker(sdk(1), tool(2, 'c'))
+        self.assertIn('proc_unknown', self.j(t, UNSEEN, 5).codes())
+        self.assertIn('multi_process', self.j(t, rs.Proc(True, (4, 5)), 5).codes())
+        silent = rs.Proc(True, (4,), 'idle', 1.0)
+        t = tracker(sdk(1), say(2, 'x', stop='tool_use'))
+        self.assertIn('silent_live', self.j(t, silent, 2 + rs.STALL_SEC + 5).codes())
+        self.assertNotIn('silent_live', self.j(t, rs.Proc(True, (4,), 'busy', 1.0), 2 + rs.STALL_SEC + 5).codes())
+
+    def test_proc_snapshot_picks_the_busy_process(self):
+        p = rs.proc_snapshot([(10, True, 'idle', 5.0), (11, True, 'busy', 1.0), (12, False, None, None)])
+        self.assertEqual((p.alive, p.pids, p.status), (True, (10, 11), 'busy'))
+        p = rs.proc_snapshot([(10, True, 'idle', 5.0), (11, True, 'shell', 9.0)])
+        self.assertEqual(p.status, 'shell')                                                          # the latest status when none is busy
+        self.assertEqual(rs.proc_snapshot([(10, False, None, None), (11, None, None, None)]).alive, None)
+        self.assertEqual(rs.proc_snapshot([]).alive, False)
+
+    def test_same_input_same_output(self):
+        t = tracker(sdk(1), api_err(5, resets=NOW + 10), cost())
+        f = facts(t)
+        self.assertEqual(rs.judge(f, GONE, NOW), rs.judge(f, GONE, NOW))
+        t2 = tracker(sdk(1), api_err(5, resets=NOW + 10), cost())
+        self.assertEqual(rs.judge(facts(t2), GONE, NOW), rs.judge(f, GONE, NOW))
+
+    def test_format_drift(self):
+        # an unknown kind of line is not drift (a real session has twenty or so) and never changes the verdict
+        t = tracker(sdk(1), {'type': 'mystery-event', 'sessionId': 's1', 'timestamp': iso(1.5)}, say(2), cost())
+        v = self.j(t, GONE, 100)
+        self.assertNotIn('format_drift', v.codes())
+        self.assertEqual(v.status, 'done')
+        # a known marker missing from a record whose version is inside its window
+        t = tracker(sdk(1), say(2))                                                              # a clean end without cost-state in 2.1.284
+        v = self.j(t, GONE, 100)
+        self.assertIn('format_drift', v.codes())
+        self.assertEqual(v.status, 'done')                                                       # ... and the judgment falls back to the process
+        self.assertEqual(dict(v.diag)['format_drift']['what'], ['marker_missing:cost-state'])
+        legacy = line('user', 1, message={'role': 'user', 'content': 'Please review the folder and report.'})
+        self.assertIn('marker_missing:promptSource', dict(self.j(tracker(legacy, say(2), cost()), GONE, 100).diag)['format_drift']['what'])
+        nopos = dict(sdk(1))
+        del nopos['turnPosition']
+        nopos['promptSource'] = 'sdk'
+        side = dict(legacy, isSidechain=True, agentId='a0123456789abcdef')                     # a sub-agent of a `claude -p` parent: no promptSource, and that is normal
+        self.assertNotIn('format_drift', self.j(tracker(side, say(2)), GONE, 100, kind='subagent').codes())
+        self.assertIn('marker_missing:turnPosition', dict(self.j(tracker(nopos, say(2), cost()), GONE, 100).diag)['format_drift']['what'])
+        # a field of a known line is gone inside the window
+        gone = cost()
+        del gone['totalDuration']
+        v = self.j(tracker(dict(sdk(1), version='2.1.285'), dict(say(2), version='2.1.285'), gone), GONE, 100)
+        self.assertEqual(dict(v.diag)['format_drift']['what'], ['marker_missing:cost-state.totalDuration'])
+        self.assertEqual(v.status, 'done')                                                       # the exit marker itself still counts
+        q = api_err(2, resets=NOW)
+        del q['quotaLimits']['resetsAt']
+        self.assertIn('marker_missing:quotaLimits.resetsAt', dict(self.j(tracker(sdk(1), q, cost()), GONE, 100).diag)['format_drift']['what'])
+        # a real limit record without quotaLimits (credit exhausted) is not a lost field
+        self.assertNotIn('format_drift', self.j(tracker(sdk(1), api_err(2), cost()), GONE, 100).codes())
+        # before the marker existed: nothing is missing, but the version is outside everything that was checked
+        old = tracker(dict(sdk(1), version='2.1.230'), dict(say(2), version='2.1.230'))
+        self.assertEqual(dict(self.j(old, GONE, 100).diag)['format_drift']['what'], ['out_of_range:2.1.230'])
+        # a version outside everything that was checked
+        for ver in ('2.1.290', '2.1.200'):
+            t = tracker(dict(sdk(1), version=ver), dict(say(2), version=ver), cost())
+            v = self.j(t, GONE, 100)
+            self.assertEqual(dict(v.diag)['format_drift']['what'], ['out_of_range:' + ver], ver)
+            self.assertEqual(v.status, 'done')
+        self.assertFalse(rs.out_of_range('2.1.286'))
+        self.assertFalse(rs.out_of_range('2.1.235'))
+        self.assertTrue(rs.out_of_range('2.1.234'))
+        self.assertFalse(rs.out_of_range(None))
+        self.assertTrue(rs.in_window('cost-state', '2.1.284'))
+        self.assertFalse(rs.in_window('cost-state', '2.1.200'))
+        self.assertFalse(rs.in_window('cost-state', '2.1.300'))
+        self.assertFalse(rs.in_window('cost-state', None))
+
+    def test_stray_background_notice_in_a_child_record(self):
+        att = line('attachment', 3, attachment={'type': 'queued_command', 'commandMode': 'task-notification', 'timestamp': iso(3),
+                                                'prompt': '<task-notification>\n<task-id>bk77</task-id>\n<status>completed</status>\n<summary>watch done</summary>\n</task-notification>'})
+        t = tracker(sdk(1), tool(2, 'c'), att)
+        self.assertEqual(t.stray, 1)
+        self.assertIn('stray_notice', self.j(t, ALIVE, 5).codes())
+        self.assertEqual(self.j(t, ALIVE, 5).status, 'running')
+
+
+class Codex(unittest.TestCase):
+    @staticmethod
+    def feed(*items):
+        t = rs.CodexTracker('t1')
+        for ts, typ, pt, p in items:
+            t.feed_cx(ts, typ, pt, p)
+        return t
+
+    def j(self, t, proc, now, **kw):
+        return rs.judge(rs.facts_of(t, 'codex', **kw), proc, now)
+
+    def test_turn_ends(self):
+        start = (1, 'event_msg', 'task_started', {})
+        self.assertEqual(self.j(self.feed(start, (5, 'event_msg', 'task_complete', {'last_agent_message': 'x'})), GONE, 100).status, 'done')
+        v = self.j(self.feed(start, (5, 'event_msg', 'task_complete', {'error': {'codex_error_info': 'server_overloaded', 'message': 'busy'}})), GONE, 100)
+        self.assertEqual((v.status, v.reason), ('interrupted', 'api_error'))
+        v = self.j(self.feed(start, (5, 'event_msg', 'task_complete', {'error': {'codex_error_info': 'other', 'message': 'HTTP 400 bad request'}})), GONE, 100)
+        self.assertEqual((v.status, v.reason), ('failed', 'api_error'))
+        v = self.j(self.feed(start, (5, 'event_msg', 'turn_aborted', {'reason': 'interrupted'})), GONE, 100)
+        self.assertEqual((v.status, v.reason), ('killed', 'stopped'))
+
+    def test_open_turn(self):
+        t = self.feed((1, 'event_msg', 'task_started', {}))
+        self.assertEqual(self.j(t, ALIVE, 10).status, 'running')
+        self.assertEqual(self.j(t, GONE, 10).status, 'running')                                  # the process may not have opened the rollout yet
+        self.assertEqual((self.j(t, GONE, 200).status, self.j(t, GONE, 200).reason), ('ended', 'crash'))
+        self.assertEqual(self.j(t, UNSEEN, 200).status, 'unknown')
+
+    def test_next_turn_without_an_end_closes_the_old_one_as_aborted(self):
+        t = self.feed((1, 'event_msg', 'task_started', {}), (5, 'event_msg', 'task_started', {}))
+        self.assertEqual([(r.exited, r.aborted) for r in t.runs], [(True, True), (False, False)])
+        self.assertEqual(self.j(t, ALIVE, 10).status, 'running')
+
+    def test_error_info_shapes(self):
+        self.assertEqual(rs.codex_error({'codex_error_info': {'http_connection_failed': {'http_status_code': 502}}}).status, 502)
+        self.assertEqual(rs.codex_error({'codex_error_info': 'usage_limit_exceeded'}).type, 'usage_limit_exceeded')
+        self.assertEqual(rs.classify_error(rs.codex_error({'codex_error_info': 'usage_limit_exceeded'})), ('interrupted', 'limit'))
+
+
+class OrchestratorAndGroups(unittest.TestCase):
+    def test_limit_wait_and_resume(self):
+        t = tracker(sdk(1), api_err(5, resets=NOW + 7200), line('system', 5.1, subtype='informational', content='Usage limit reached · continuing automatically at 05:30'),
+                    line('system', 5.2, subtype='turn_duration'))
+        o = rs.orch_state(t, ALIVE, NOW)
+        self.assertEqual((o.state, o.resets_at, o.auto), ('limit_wait', NOW + 7200, True))
+        t = tracker(sdk(1), api_err(5, resets=NOW + 7200), line('system', 5.2, subtype='turn_duration'))
+        self.assertEqual((rs.orch_state(t, ALIVE, NOW).state, rs.orch_state(t, ALIVE, NOW).auto), ('limit_wait', False))
+        t.feed(line('system', NOW, subtype='informational', content='Usage limit reset · continuing automatically'))
+        t.feed(line('user', NOW + 1, message={'role': 'user', 'content': 'Continue.'}, isMeta=True, origin={'kind': 'auto-continuation'}, promptSource='system'))
+        t.feed(tool(NOW + 3, 'c'))
+        self.assertEqual(rs.orch_state(t, ALIVE, NOW + 5).state, 'working')
+
+    def test_not_waiting_when_the_process_is_gone_or_the_error_is_not_a_limit(self):
+        t = tracker(sdk(1), api_err(5, resets=NOW + 7200))
+        self.assertNotEqual(rs.orch_state(t, GONE, NOW).state, 'limit_wait')
+        t = tracker(sdk(1), api_err(5, 529, 'server_error'))
+        self.assertNotEqual(rs.orch_state(t, ALIVE, NOW).state, 'limit_wait')
+        self.assertEqual(rs.orch_state(tracker(sdk(1), say(5), line('system', 5.5, subtype='turn_duration')), ALIVE, NOW).state, 'idle')
+
+    def test_the_orchestrator_without_a_process_view_says_so(self):
+        t = tracker(sdk(1), tool(2, 'c'))
+        self.assertEqual(rs.orch_state(t, UNSEEN, 5).diag, (('proc_unknown', {}),))
+        self.assertEqual(rs.orch_state(t, ALIVE, 5).diag, ())
+        self.assertEqual(rs.orch_state(t, GONE, 5).diag, ())
+        t = tracker(sdk(1), api_err(5, resets=NOW + 7200))
+        o = rs.orch_state(t, UNSEEN, NOW)
+        self.assertEqual((o.state, o.diag), ('limit_wait', (('proc_unknown', {}),)))               # still waiting for the reset: a process nobody can see is not a gone one
+
+    def test_repeated_errors_in_a_row_stay_one_wait_with_one_notice(self):
+        t = tracker(sdk(1), api_err(5, resets=NOW + 7200), line('system', 5.1, subtype='informational', content='Usage limit reached · continuing automatically at 05:30'),
+                    api_err(40, resets=NOW + 7200), api_err(70, resets=NOW + 7200))
+        o = rs.orch_state(t, ALIVE, NOW)
+        self.assertEqual((o.state, o.auto), ('limit_wait', True))
+
+    def test_group_limits(self):
+        V = lambda st, why, r: rs.Verdict(st, why, r)
+        g = rs.group_limits({'a': V('interrupted', 'limit', 100.0), 'b': V('interrupted', 'limit', 100.0), 'c': V('interrupted', 'limit', 200.0),
+                             'd': V('interrupted', 'api_error', None), 'e': V('interrupted', 'limit', None), 'f': V('interrupted', 'limit', None)},
+                            rs.OrchVerdict('limit_wait', 100.0, True))
+        self.assertEqual([(x.resets_at, x.agents, x.orch, x.auto) for x in g],
+                         [(100.0, ['a', 'b'], True, True), (200.0, ['c'], False, False), (None, ['e', 'f'], False, False)])
+        self.assertEqual([c for c, _ in rs.group_diag(g)], ['limit_group', 'limit_group'])
+        self.assertEqual(rs.group_limits({}, rs.OrchVerdict('working')), [])
+
+
+class Resume(unittest.TestCase):
+    """A sub-agent has no cost-state; the coordinator's message that resumes it opens its next run."""
+
+    def coord(self, t, text='The coordinator sent a message while you were working: go on'):
+        return line('user', t, message={'role': 'user', 'content': text}, isMeta=True, origin={'kind': 'coordinator'}, entrypoint='cli')
+
+    def sub_first(self, t):
+        return line('user', t, message={'role': 'user', 'content': 'Review the folder and write the report.'}, entrypoint='cli')
+
+    def test_coordinator_line_is_a_turn_and_opens_a_run(self):
+        self.assertEqual(rs.turn_source(self.coord(5)), 'system')
+        self.assertEqual(rs.turn_source(self.sub_first(1)), 'legacy')                    # a sub-agent's first line carries neither promptSource nor origin
+        t = tracker(self.sub_first(1), tool(2, 'c1'), result(3, 'c1'), api_err(4, resets=NOW), self.coord(100), tool(101, 'c2'))
+        self.assertEqual([(r.epoch, r.start_kind, r.end_kind, len(r.turns)) for r in t.runs], [(1, 'first', 'error', 1), (2, 'coordinator', 'mid_turn', 1)])
+        f = rs.facts_of(t, 'subagent')
+        self.assertEqual(rs.judge(f, ALIVE, 110).status, 'running')                      # the old error does not cover the resumed run
+
+    def test_a_first_coordinator_line_does_not_split_an_empty_run(self):
+        t = tracker(self.coord(1), tool(2, 'c'))
+        self.assertEqual(len(t.runs), 1)
+
+    def test_process_runs_say_how_they_started(self):
+        t = tracker(sdk(1, idx=1), say(2), cost(), sdk(9, idx=2), tool(10, 'c'))
+        self.assertEqual([r.start_kind for r in t.runs], ['first', 'process'])
+
+
+class CrashThenResume(unittest.TestCase):
+    """A `claude -p` that died without a `cost-state` (a crash, a kill) and was resumed: the resumed process is a run of its own. Without it the resumed call has no run
+    to belong to, so its TaskStop and its time-limit notice never reach the status, and the link cannot say who handed the resumed process its instruction.
+    The record carries the one sign there is: a new sdk turn while the turn before it is in the middle of its work (a process cannot take a prompt in the middle of a turn)."""
+
+    def crashed(self, *rest):
+        return tracker(sdk(1, idx=1), tool(2, 'c1'), sdk(500, 'Continue where you stopped.', idx=2), tool(501, 'c2'), *rest)
+
+    def test_a_new_sdk_turn_after_an_unfinished_one_opens_a_run(self):
+        t = self.crashed()
+        self.assertEqual([(r.epoch, r.start_kind, r.exited, r.end_kind, [x.idx for x in r.turns]) for r in t.runs],
+                         [(1, 'first', False, 'mid_turn', [1]), (2, 'process', False, 'mid_turn', [2])])
+        self.assertEqual((t.runs[0].end_ts, t.runs[0].last_ts, t.runs[1].start_ts), (2.0, 2.0, 500.0))
+        self.assertEqual(t.runs[1].turns[0].prompt_head, 'Continue where you stopped.')
+
+    def test_a_tool_result_without_the_next_step_is_in_the_middle_too(self):
+        t = tracker(sdk(1, idx=1), tool(2, 'c1'), result(3, 'c1'), sdk(500, idx=2), say(510))
+        self.assertEqual([(r.epoch, r.end_kind) for r in t.runs], [(1, 'mid_turn'), (2, 'end_turn')])
+
+    def test_the_exit_marker_and_the_length_belong_to_the_resumed_run(self):
+        t = self.crashed(say(520), cost(60000))
+        self.assertEqual([(r.exited, r.dur_ms) for r in t.runs], [(False, None), (True, 60000)])
+        self.assertEqual(rs.judge(facts(t), GONE, 600).status, 'done')
+
+    def test_the_dead_process_leaves_no_call_waiting(self):
+        self.assertEqual(self.crashed().waiting(), [501.0])                                     # only the resumed process's own call
+        self.assertEqual(tracker(sdk(1), tool(2, 'c1'), sdk(500, idx=2)).waiting(), [])
+
+    def test_the_resumed_calls_stop_reaches_the_status(self):
+        led = rs.Ledger()
+        for t, tid, bg in ((0, 'L1', 'bk1'), (499, 'L2', 'bk2')):
+            led.feed(tool(t, tid, run_in_background=True))
+            led.feed(result(t + 0.5, tid, backgroundTaskId=bg))
+        led.feed(tool(560, 'S', 'TaskStop', task_id='bk2'))
+        t = self.crashed()
+        self.assertEqual(len(t.runs), 2)                                                        # the link hands one call to each run
+        for calls in (['L1', 'L2'], ['L2']):
+            v = rs.judge(rs.facts_of(t, 'cli', led, launch_calls=calls), GONE, 600)
+            self.assertEqual((v.status, v.reason), ('killed', 'stopped'), calls)
+        # and the first call's stop is older than the resumed run's records: it does not cover it
+        led2 = rs.Ledger()
+        led2.feed(tool(0, 'L1', run_in_background=True))
+        led2.feed(result(0.5, 'L1', backgroundTaskId='bk1'))
+        led2.feed(tool(30, 'S', 'TaskStop', task_id='bk1'))
+        self.assertEqual(rs.judge(rs.facts_of(t, 'cli', led2, launch_calls=['L1']), ALIVE, 510).status, 'running')
+
+    def test_a_reader_of_only_the_user_lines_gives_the_same_runs(self):
+        """affil.RunStarts feeds a tracker only the user and cost-state lines (it never sees an assistant line). A crash after a tool result is the shape both can see."""
+        from board import affil
+        seq = (sdk(1, idx=1), tool(2, 'c1'), result(3, 'c1'), sdk(500, 'Continue where you stopped.', idx=2), tool(501, 'c2'))
+        rsx = affil.RunStarts()
+        full = tracker(*seq)
+        for d in seq:
+            rsx.feed(json.dumps(d).encode())
+        self.assertEqual([(i.idx, i.ts) for i in rsx.runs], [(1, 1.0), (2, 500.0)])
+        self.assertEqual(len(full.runs), len(rsx.runs))
+        # a crash in the middle of a tool call leaves no result, so the reader only sees two instructions; once it passes the assistant lines to the tracker (what the rule reads)
+        # it has the two runs as well
+        rsz = affil.RunStarts()
+        for d in seq[:2] + seq[3:]:
+            if d['type'] == 'assistant':
+                rsz.tracker.feed(d)
+            else:
+                rsz.feed(json.dumps(d).encode())
+        self.assertEqual([(i.idx, i.ts) for i in rsz.runs], [(1, 1.0), (2, 500.0)])
+        # nothing but instructions (no reply seen, none lost): the same process taking more turns, for both
+        only = (sdk(1, idx=1), sdk(5, idx=2), sdk(9, idx=3))
+        rsy = affil.RunStarts()
+        for d in only:
+            rsy.feed(json.dumps(d).encode())
+        self.assertEqual((len(rsy.runs), len(tracker(*only).runs)), (1, 1))
+
+    def test_turns_that_are_the_same_process_are_not_split(self):
+        # a clean end of the turn, then another prompt: the process was alive to take it (stream-json); the old boundary stands
+        self.assertEqual(len(tracker(sdk(1, idx=1), say(2), sdk(9, idx=2), tool(10, 'c')).runs), 1)
+        # an error line is not an unfinished turn (it is cleared by what follows, test_an_error_is_cleared_by_what_follows)
+        self.assertEqual(len(tracker(sdk(1), api_err(2, resets=NOW), sdk(3, idx=2), tool(4, 'c')).runs), 1)
+        # the same turn written again is one turn
+        self.assertEqual(len(tracker(sdk(1, idx=1), tool(2, 'c'), sdk(2.5, idx=1)).runs), 1)
+        # a person typing during a tool call, an automatic continue, a notice: no sdk turn, no new process
+        typed = line('user', 3, message={'role': 'user', 'content': 'wait, also check the tests'}, promptSource='typed', origin={'kind': 'human'}, entrypoint='cli')
+        auto = line('user', 4, message={'role': 'user', 'content': 'Continue.'}, isMeta=True, origin={'kind': 'auto-continuation'}, promptSource='system')
+        self.assertEqual(len(tracker(sdk(1), tool(2, 'c'), typed, auto, tool(5, 'd')).runs), 1)
+        # a sub-agent's coordinator message keeps its own rule (a run per message, the same process)
+        coord = line('user', 100, message={'role': 'user', 'content': 'go on'}, isMeta=True, origin={'kind': 'coordinator'}, entrypoint='cli')
+        self.assertEqual([r.start_kind for r in tracker(sdk(1), tool(2, 'c'), coord, tool(101, 'd')).runs], ['first', 'coordinator'])
+        # the first sdk turn of a file is not a split of anything
+        self.assertEqual(len(tracker(sdk(1, idx=5), tool(2, 'c')).runs), 1)
+
+    def test_a_resumed_print_run_of_an_old_format_is_a_run_of_its_own(self):
+        """An old record has no `cost-state` and no `promptSource`: its instructions are `legacy` turns. A `claude -p` process (entrypoint sdk-cli) takes one prompt, so a
+        second instruction in such a record is a process that was resumed, whatever the first one ended with (an error, a tool call, an answer). The user lines alone say so,
+        which is all the link reader is fed."""
+        def old(t, text):
+            return line('user', t, message={'role': 'user', 'content': text}, version='2.1.230')
+
+        for name, mid in (('an error', [api_err(5, resets=NOW)]), ('a tool call', [tool(5, 'c')]), ('an answer', [say(5)])):
+            seq = [old(1, 'Review the folder and report.')] + mid + [old(500, 'Continue the review where you stopped.'), tool(501, 'd')]
+            t = tracker(*seq)
+            self.assertEqual([(r.epoch, r.start_kind, r.exited, len(r.turns)) for r in t.runs], [(1, 'first', False, 1), (2, 'process', False, 1)], name)
+            self.assertEqual([r.turns[0].prompt_head[:8] for r in t.runs], ['Review t', 'Continue'], name)
+            from board import affil
+            rsx = affil.RunStarts()
+            for d in seq:
+                rsx.feed(json.dumps(d).encode())
+            self.assertEqual([i.ts for i in rsx.runs], [1.0, 500.0], name)                        # the reader that sees only the user lines says the same
+        # an interactive record has many instructions in one process; a sub-agent's first line is not a prompt of the print process
+        typed = lambda t, text: line('user', t, message={'role': 'user', 'content': text}, entrypoint='cli')
+        self.assertEqual(len(tracker(typed(1, 'first thing'), tool(2, 'c'), typed(30, 'and another thing'), say(31)).runs), 1)
+        side = lambda t, text: dict(line('user', t, message={'role': 'user', 'content': text}), isSidechain=True, agentId='a0123456789abcdef')
+        self.assertEqual(len(tracker(side(1, 'Review the folder.'), tool(2, 'c'), side(30, 'And the tests.')).runs), 1)
+        # the same line written twice is one turn
+        self.assertEqual(len(tracker(old(1, 'Review the folder and report.'), old(1.5, 'Review the folder and report.'), tool(2, 'c')).runs), 1)
+
+    def test_a_slash_command_start_is_not_split_from_its_expansion(self):
+        cmd = line('user', 10, message={'role': 'user', 'content': '<command-message>init is running…</command-message>\n<command-name>/init</command-name>'},
+                   turnPosition={'promptIndex': 0, 'turnIndex': 1})
+        expansion = line('user', 10.1, message={'role': 'user', 'content': 'Analyse the repository.'}, isMeta=True)
+        self.assertEqual(len(tracker(cmd, expansion, tool(12, 'c')).runs), 1)
+
+
+class VersionShape(unittest.TestCase):
+    """The version a record claims is read as numbers or not at all. A text that is not a version (a record is data from outside the board) never reaches a diagnostic."""
+    BAD = ('2.1.290 /SYNTH/private_note', '/SYNTH/private_note', '2.1', '2.1.290-beta', '2.1.x', 'v2.1.290', '2.1.290\n', ' 2.1.290', '2.1.290 ', '2.1.290.4',
+           '9' * 40 + '.1.1', '\uff12.\uff11.\uff12\uff19\uff10', '2.1.290\x00')
+
+    def drift_of(self, version, now=100):
+        t = tracker(dict(sdk(1), version=version), dict(say(2), version=version), cost())
+        v = rs.judge(facts(t), GONE, now)
+        return t, v
+
+    def test_a_text_that_is_not_a_version_is_a_fixed_code(self):
+        for bad in self.BAD:
+            t, v = self.drift_of(bad)
+            self.assertIsNone(t.version, repr(bad))
+            fd = dict(v.diag)['format_drift']
+            self.assertEqual((fd['what'], fd['version']), (['invalid:version'], None), repr(bad))
+            self.assertNotIn('SYNTH', repr(v))
+            self.assertEqual(v.status, 'done')                                                    # the verdict is not touched by it
+
+    def test_a_good_version_is_kept_and_a_later_garbled_one_does_not_replace_it(self):
+        t = tracker(dict(sdk(1), version='2.1.284'), dict(say(2), version='2.1.284 /SYNTH/x'), cost())
+        self.assertEqual(t.version, '2.1.284')
+        self.assertIn(('invalid', 'version'), t.drift)
+        self.assertEqual(t.drift.count(('invalid', 'version')), 1)                                # once, however many lines say it
+        self.assertEqual(rs.norm_version('2.1.0284'), '2.1.284')
+        for good in ('2.1.284', '2.1.290', '2.1.234', '0.9.1'):
+            self.assertEqual(rs.norm_version(good), good)
+        for bad in self.BAD + (None, 2.1, 284, [], {}, ''):
+            self.assertIsNone(rs.norm_version(bad), repr(bad))
+
+    def test_the_window_functions_read_nothing_out_of_a_text_that_is_not_a_version(self):
+        for bad in self.BAD:
+            self.assertFalse(rs.out_of_range(bad), repr(bad))
+            self.assertFalse(rs.in_window('cost-state', bad), repr(bad))
+
+    def test_a_version_outside_what_was_checked_still_names_itself(self):
+        t, v = self.drift_of('2.1.290')
+        self.assertEqual(dict(v.diag)['format_drift'], {'what': ['out_of_range:2.1.290'], 'version': '2.1.290'})
+
+    def test_the_orchestrator_page_says_the_same(self):
+        from types import SimpleNamespace
+        from board import diag
+        t = tracker(dict(sdk(1), version='2.1.290 /SYNTH/private_note'), dict(say(2), version='2.1.290 /SYNTH/private_note'))
+        s = SimpleNamespace(agents={}, id='s1', provider='codex', runs=t, parse_errors=0, debate_diag=())
+        out = diag.collect(s, NOW, {}, [])
+        (e,) = [x for x in out if x['code'] == 'format_drift']
+        self.assertEqual(e['params'], {'what': ['invalid:version'], 'version': None})
+        self.assertNotIn('SYNTH', json.dumps(out))
+
+
+class RealShapes(unittest.TestCase):
+    """The shapes of real records: not the ones the builder used to write."""
+
+    def test_real_failed_notice_of_a_limit(self):
+        aid = 'a0123456789abcdef'
+        summary = "Agent \"x\" failed: Agent terminated early due to an API error: You've hit your session limit · resets 7:30am (Asia/Seoul) (error type rate_limit, HTTP 429"
+        led = rs.Ledger()
+        led.feed(line('user', 20, message={'role': 'user', 'content': '<task-notification>\n<task-id>%s</task-id>\n<tool-use-id>toolu_x</tool-use-id>\n<output-file>/tmp/o</output-file>\n'
+                                           '<status>failed</status>\n<summary>%s</summary>\n</task-notification>' % (aid, summary)}, promptSource='system', origin={'kind': 'task-notification'}))
+        n = led.agent_notes(aid)[0]
+        self.assertEqual((n.status, n.err_status, n.err_type), ('failed', 429, 'rate_limit'))
+        # the sub-agent's own record decides first, and only it knows when the limit resets
+        t = tracker(line('user', 1, message={'role': 'user', 'content': 'Review the folder'}, entrypoint='cli'), tool(2, 'c'), api_err(10, resets=NOW + 7200))
+        v = rs.judge(rs.facts_of(t, 'subagent', led, agent_id=aid), ALIVE, 30)
+        self.assertEqual((v.status, v.reason, v.resets_at, v.basis), ('interrupted', 'limit', NOW + 7200, 'error_line'))
+        # the notice alone (the record not read yet) still says it was a limit, with no time
+        t = tracker(line('user', 1, message={'role': 'user', 'content': 'Review the folder'}, entrypoint='cli'), tool(2, 'c'))
+        v = rs.judge(rs.facts_of(t, 'subagent', led, agent_id=aid), ALIVE, 30)
+        self.assertEqual((v.status, v.reason, v.resets_at, v.basis), ('interrupted', 'limit', None, 'notice'))
+
+    def test_failed_notice_without_a_type(self):
+        aid = 'a0123456789abcdef'
+        for summary, want in (('Agent "x" failed: Agent terminated early due to an API error: boom', ('failed', 'api_error')), ('Agent "x" failed: it crashed', ('failed', None))):
+            led = rs.Ledger()
+            led.feed(line('user', 20, message={'role': 'user', 'content': '<task-notification>\n<task-id>%s</task-id>\n<status>failed</status>\n<summary>%s</summary>\n</task-notification>'
+                                               % (aid, summary)}, promptSource='system', origin={'kind': 'task-notification'}))
+            t = tracker(line('user', 1, message={'role': 'user', 'content': 'go'}, entrypoint='cli'), tool(2, 'c'))
+            v = rs.judge(rs.facts_of(t, 'subagent', led, agent_id=aid), ALIVE, 30)
+            self.assertEqual((v.status, v.reason), want)
+
+    def test_status_decides_before_the_error_name(self):
+        c = lambda st, typ: rs.classify_error(ErrInfo(status=st, type=typ))
+        self.assertEqual(c(529, 'server_error'), ('interrupted', 'api_error'))
+        self.assertEqual(c(400, 'invalid_request'), ('failed', 'api_error'))
+        self.assertEqual(c(429, 'whatever'), ('interrupted', 'limit'))
+        self.assertEqual(c(400, 'rate_limit'), ('failed', 'api_error'))                      # the status wins over the name
+
+    def test_turn_index_keeps_rising_after_a_resume(self):
+        t = tracker(sdk(1, idx=1), say(2), cost(), sdk(9, idx=2), say(10), cost(), sdk(20, idx=3), tool(21, 'c'))
+        self.assertEqual([(r.epoch, [x.idx for x in r.turns]) for r in t.runs], [(1, [1]), (2, [2]), (3, [3])])
+
+    def test_crash_without_a_process_view_is_ended_when_the_launch_call_has_ended(self):
+        led = rs.Ledger()
+        led.feed(tool(0, 'L', run_in_background=True))
+        led.feed(result(0.5, 'L', backgroundTaskId='bk1'))
+        t = tracker(sdk(1), tool(2, 'c'))
+        f = lambda: rs.judge(rs.facts_of(t, 'cli', led, launch_calls=['L']), UNSEEN, 200)
+        self.assertEqual(f().status, 'unknown')                                              # nothing says the process is over
+        led.feed(line('user', 9, message={'role': 'user', 'content': '<task-notification>\n<task-id>bk1</task-id>\n<status>failed</status>\n'
+                                          '<summary>Background command "x" failed with exit code 137</summary>\n</task-notification>'}, promptSource='system', origin={'kind': 'task-notification'}))
+        v = f()
+        self.assertEqual((v.status, v.reason), ('ended', 'crash'))                           # a failed exit code is a Bash fact, never `failed`
+        self.assertIn('proc_unknown', v.codes())
+        c = rs.Ledger()                                                                      # a Codex crash has no such notice
+        self.assertEqual(rs.judge(rs.facts_of(rs.CodexTracker(), 'codex', c), UNSEEN, 200).status, 'unknown')
+
+
+class NoteDedup(unittest.TestCase):
+    """Two notices are one only when nothing tells them apart (usage, then the time between them)."""
+    AID = 'a0123456789abcdef'
+
+    def notice(self, t, usage=None, status='completed', summary='Agent "x" finished'):
+        text = '<task-notification>\n<task-id>%s</task-id>\n<tool-use-id>toolu_s</tool-use-id>\n<status>%s</status>\n<summary>%s</summary>\n' % (self.AID, status, summary)
+        if usage:
+            text += '<usage><subagent_tokens>%d</subagent_tokens><tool_uses>%d</tool_uses><duration_ms>%d</duration_ms></usage>\n' % usage
+        return line('user', t, message={'role': 'user', 'content': text + '</task-notification>'}, promptSource='system', origin={'kind': 'task-notification'})
+
+    def queued(self, t, usage=None, **kw):
+        d = self.notice(t, usage, **kw)
+        text = d['message']['content']
+        att = line('attachment', t, attachment={'type': 'queued_command', 'commandMode': 'task-notification', 'timestamp': iso(t), 'prompt': text})
+        if usage:
+            att['attachment']['usage'] = {'totalTokens': usage[0], 'toolUses': usage[1], 'durationMs': usage[2]}
+        return att
+
+    def ledger(self, *lines):
+        led = rs.Ledger()
+        for d in lines:
+            led.feed(d)
+        return led
+
+    def test_a_resumed_agent_that_ends_with_the_same_words_gives_a_second_notice(self):
+        led = self.ledger(self.notice(100, (1000, 3, 5000)), self.notice(500, (2500, 7, 9000)))
+        self.assertEqual([(n.ts, n.usage) for n in led.agent_notes(self.AID)], [(100.0, (1000, 3, 5000)), (500.0, (2500, 7, 9000))])
+        # the agent worked again after the first notice: the first is old, the second says it is over
+        t = tracker(sdk(1), say(2), line('user', 300, message={'role': 'user', 'content': 'The coordinator sent a message while you were working: go on'}, isMeta=True,
+                                         origin={'kind': 'coordinator'}), tool(301, 'c'), result(302, 'c'), say(495))
+        self.assertEqual(rs.judge(rs.facts_of(t, 'subagent', led, agent_id=self.AID), ALIVE, 510).status, 'done')
+        self.assertNotEqual(rs.judge(rs.facts_of(t, 'subagent', self.ledger(self.notice(100, (1000, 3, 5000))), agent_id=self.AID), ALIVE, 510).status, 'done')
+
+    def test_the_same_words_without_usage_are_two_notices_when_far_apart(self):
+        led = self.ledger(self.notice(100), self.notice(130), self.notice(500), self.notice(520))
+        self.assertEqual([n.ts for n in led.agent_notes(self.AID)], [100.0, 500.0])               # 130 and 520 are the same notice recorded again
+
+    def test_one_notice_recorded_twice_is_one(self):
+        led = self.ledger(self.notice(100, (1000, 3, 5000)), self.queued(100, (1000, 3, 5000)), self.queued(190, (1000, 3, 5000)))      # even when the second record is late
+        self.assertEqual(len(led.agent_notes(self.AID)), 1)
+        led = self.ledger(self.queued(100), self.notice(160))
+        self.assertEqual(len(led.agent_notes(self.AID)), 1)
+
+    def test_other_status_or_words_are_other_notices(self):
+        led = self.ledger(self.notice(100), self.notice(105, status='failed'), self.notice(110, summary='Agent "x" finished again'))
+        self.assertEqual(len(led.agent_notes(self.AID)), 3)
+
+    def test_usage_is_read_from_the_text_and_from_the_attachment(self):
+        self.assertEqual(rs.parse_note(self.notice(1, (11, 2, 33))['message']['content']).usage, (11, 2, 33))
+        self.assertIsNone(rs.parse_note(self.notice(1)['message']['content']).usage)
+        d = self.queued(1, (11, 2, 33))
+        d['attachment']['prompt'] = d['attachment']['prompt'].split('<usage>')[0] + '</task-notification>'        # a notice whose text has no usage but whose attachment has
+        led = self.ledger(d)
+        self.assertEqual(led.notes[0].usage, (11, 2, 33))
+
+    def test_mutation_the_old_key_loses_the_second_notice(self):
+        def old_add(self, note):
+            key = (note.task, note.tool_use_id, note.status, note.summary)
+            if key not in self._seen:
+                self._seen[key] = [note.ts]
+                self.notes.append(note)
+
+        with mock.patch.object(rs.Ledger, '_add', old_add):
+            led = self.ledger(self.notice(100, (1000, 3, 5000)), self.notice(500, (2500, 7, 9000)))
+        self.assertEqual(len(led.agent_notes(self.AID)), 1)
+
+
+class VersionMemo(unittest.TestCase):
+    def test_a_version_is_read_once(self):
+        rs._vkey.cache_clear()
+        trs = [tracker(dict(sdk(1), version=v)) for v in ('2.1.284', '2.1.290', '2.1.234') * 40]
+        before = rs._vkey.cache_info().misses
+        got = [dict(rs.judge(rs.facts_of(t, 'cli'), GONE, 100).diag).get('format_drift', {}).get('what') for t in trs]
+        self.assertEqual(got[1], ['out_of_range:2.1.290'])
+        self.assertEqual(got[2], ['out_of_range:2.1.234'])
+        self.assertNotIn('out_of_range', ' '.join(got[0] or []))
+        info = rs._vkey.cache_info()
+        self.assertLessEqual(info.misses - before, 8)                                           # a few distinct strings (and the window bounds), not one read per agent
+        self.assertGreater(info.hits, 100)
+
+    def test_same_answers_as_before(self):
+        for v, inside, rng in (('2.1.235', True, False), ('2.1.286', True, False), ('2.1.234', False, True), ('2.1.287', False, True), (None, False, False), ('x', False, False)):
+            self.assertEqual(rs.in_window('cost-state', v), inside, v)
+            self.assertEqual(rs.out_of_range(v), rng, v)
+
+
+class SlashCommand(unittest.TestCase):
+    """The line that opens a run. A run opens at its first line; an instruction line (a turn) is the first line of an sdk run, and a slash command's expansion is
+    that line when it is marked as an sdk turn: its instruction is unknown."""
+    CMD = '<command-message>init is running…</command-message>\n<command-name>/init</command-name>'
+
+    def cmd(self, t, **kw):
+        d = line('user', t, message={'role': 'user', 'content': self.CMD}, turnPosition={'promptIndex': 0, 'turnIndex': 1})
+        d.update(kw)
+        return d
+
+    def expansion(self, t):
+        return line('user', t, message={'role': 'user', 'content': 'Analyse the repository and write the notes.'}, isMeta=True)
+
+    def test_the_expansion_line_opens_the_run(self):
+        for marked in (self.cmd(10), self.cmd(10, promptSource='sdk')):                        # the real shape (a turnPosition only) and the one with promptSource
+            t = tracker(marked, self.expansion(10.1), tool(12, 'c'), result(13, 'c'), say(14), cost())
+            r = t.runs[0]
+            self.assertEqual((len(t.runs), r.start_ts, r.start_kind, r.exited, r.end_kind), (1, 10.0, 'first', True, 'end_turn'))
+            self.assertEqual([(x.source, x.idx, x.ts, x.prompt_head) for x in r.turns], [('sdk', 1, 10.0, '')])
+            self.assertEqual(rs.prompt_text(marked), '')                                         # the instruction is unknown: nothing to match by content
+            self.assertEqual(rs.judge(rs.facts_of(t, 'cli'), GONE, 100).status, 'done')
+
+    def test_next_run_after_a_slash_command_is_a_normal_one(self):
+        t = tracker(self.cmd(10), self.expansion(10.1), say(14), cost(), sdk(40, 'Now continue with the notes.', idx=2), say(45), cost(9000))
+        self.assertEqual([(r.epoch, r.start_ts, r.start_kind, [x.prompt_head for x in r.turns]) for r in t.runs],
+                         [(1, 10.0, 'first', ['']), (2, 40.0, 'process', ['Now continue with the notes.'])])
+
+    def test_a_slash_command_that_is_not_marked_is_no_turn(self):
+        typed = line('user', 5, message={'role': 'user', 'content': '<command-name>/model</command-name>'}, promptSource='typed', origin={'kind': 'human'})
+        old = line('user', 5, message={'role': 'user', 'content': self.CMD})                    # an older record: no promptSource, no turnPosition
+        out = line('user', 5, message={'role': 'user', 'content': '<local-command-stdout>ok</local-command-stdout>'}, turnPosition={'turnIndex': 1})
+        self.assertEqual([rs.turn_source(x) for x in (typed, old, out)], [None, None, None])
+        # an older record still has a run: its first line of activity (the command line itself) opens it, with no turn
+        t = tracker(old, self.expansion(5.1), say(8), cost())
+        self.assertEqual([(r.start_ts, r.turns, r.end_kind) for r in t.runs], [(5.0, [], 'end_turn')])
+
+    def test_a_command_text_inside_a_sentence_is_a_plain_instruction(self):
+        d = sdk(5, 'Run `<command-name>` handling over the folder.')
+        self.assertEqual(rs.turn_source(d), 'sdk')
+        self.assertTrue(rs.prompt_text(d).startswith('Run'))
+
+
+class Mutations(unittest.TestCase):
+    """Switch one piece off and a named case must differ from the oracle (and it does not when the piece is on)."""
+
+    def verdict_mismatch(self, **v):
+        c = case_of(**v)
+        j = Judged(c)
+        return compare(c, j), diag_diff(c, j)
+
+    def assert_breaks(self, patcher, **v):
+        base_status, base_diag = self.verdict_mismatch(**v)
+        self.assertEqual((base_status, base_diag), ([], None), 'the case must be right with the piece on')
+        with patcher:
+            status, diag = self.verdict_mismatch(**v)
+        self.assertTrue(status or diag, 'switching the piece off must break the case')
+        return status, diag
+
+    def test_1_ignore_cost_state(self):
+        status, _ = self.assert_breaks(mock.patch.object(rs, 'is_exit_marker', lambda d: False), skind='cli', life='time_limit_silent', at='just_ended')
+        self.assertEqual(status[0][1], 'status')                                              # interrupted/exited becomes ended/crash
+
+    def test_2_enqueue_as_run_start_is_in_Boundaries(self):
+        self.assertTrue(hasattr(Boundaries, 'test_mutation_enqueue_as_run_start_breaks_the_boundary_test'))
+
+    def test_3_error_line_of_the_own_record(self):
+        status, _ = self.assert_breaks(mock.patch.object(rs, 'error_of', lambda d: None), skind='cli', life='limit_exit', at='just_ended')
+        self.assertIn('reason', {m[1] for m in status})
+
+    def test_4_agent_id_filter(self):
+        _, diag = self.assert_breaks(mock.patch.object(rs, 'is_agent_id', lambda s: True), skind='cli', life='running', flaw='child_bg', at='live')
+        self.assertIsNotNone(diag)                                                            # the child's own background notice is no longer told from an agent's
+
+    def test_5_torn_line_recovery(self):
+        status, _ = self.assert_breaks(mock.patch.object(util, '_recover', lambda raw: []), skind='cli', life='normal_end', flaw='torn', at='just_ended')
+        self.assertEqual(status[0][1], 'status')
+
+    def test_6_background_id_chain(self):
+        self.assert_breaks(mock.patch.object(rs.Ledger, 'bg_ids', lambda self, calls: set()), skind='cli', life='time_limit_kill', at='just_ended')
+        self.assert_breaks(mock.patch.object(rs.Ledger, 'bg_ids', lambda self, calls: set()), skind='cli', life='taskstop_kill', at='just_ended')
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the matrix
+# ---------------------------------------------------------------------------------------------------------------------
+# Where the oracle and runstate may differ. The oracle agrees with runstate on everything now, so the allowance is empty; it stays so that any other
+# difference still fails. It is an allowance, not a requirement: a difference listed here disappears once the oracle is corrected, and
+# these tests still pass.
+def diag_objection(c):
+    """(codes the oracle expects that runstate may not give, codes runstate may give that the oracle does not expect). The oracle now agrees with runstate on
+    everything: nothing is allowed."""
+    return set(), set()
+
+
+CODES = ('torn_lines', 'multi_process', 'format_drift', 'stray_notice', 'proc_unknown', 'not_resumed', 'limit_group', 'silent_live')
+
+
+def compare(c, j):
+    """[(case id, field, oracle, runstate)] where the verdict of the child differs from the oracle (status, reason, resets_at), """
+    out = []
+    if j.verdict is None:
+        return out
+    truth = oracle.truth(c)
+    for f in ('status', 'reason', 'resets_at'):
+        if f not in truth.subjects.get('child', {}):
+            continue
+        want = resolved(c, j.b, 'child', f)
+        got = getattr(j.verdict, f)
+        ok = (got is None and want is None) or (got == want) or (isinstance(want, (int, float)) and isinstance(got, (int, float)) and abs(got - want) < 1)
+        if not ok:
+            out.append((c.id, f, want, got))
+    return out
+
+
+DRIFT_FLAWS = ('old_format', 'future_version', 'field_gone')
+
+
+def diag_diff(c, j):
+    """(oracle codes, runstate codes) when they differ beyond the allowances, else None. `format_drift` is told apart: it is given exactly for a version outside the
+    observed range (an old format, a future version) or a known field lost inside it; an unknown kind of line is not drift. That is checked here whatever the oracle says."""
+    want = {code for code, _ in oracle.truth(c).diag if code in CODES and code != 'format_drift'}
+    got = {code for code in j.diag if code in CODES and code != 'format_drift'}
+    missing, extra = diag_objection(c)
+    if not (want - got <= missing and got - want <= extra) or ('format_drift' in j.diag) != (c.bundle == 'sta' and c.v['flaw'] in DRIFT_FLAWS):
+        return sorted(want), sorted(got | ({'format_drift'} if 'format_drift' in j.diag else set()))
+    return None
+
+
+def case_of(**v):
+    return axes.normalize(axes.Case('sta', v))
+
+
+class ScenarioMatrix(unittest.TestCase):
+    """Every sta case and the state part of every cpl case: judge against the oracle."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.cases = state_cases()
+        cls.judged = {c.id: Judged(c) for c in cls.cases}
+
+    def mismatches(self):
+        return [m for c in self.cases for m in compare(c, self.judged[c.id])]
+
+    def test_there_are_many_cases(self):
+        self.assertGreater(len(self.cases), 150)
+
+    def test_status_reason_and_resets_at_match_the_oracle(self):
+        bad = self.mismatches()
+        self.assertEqual(bad, [], '\n'.join(map(str, bad[:20])))
+
+    def test_orchestrator_state_matches_the_oracle(self):
+        n = 0
+        for c in self.cases:
+            j = self.judged[c.id]
+            if j.orch is None:
+                continue
+            n += 1
+            want = resolved(c, j.b, 'orch', 'orch_state')
+            self.assertEqual(j.orch.state, want, c.id)
+            if want == 'limit_wait':
+                self.assertEqual(j.orch.resets_at, resolved(c, j.b, 'orch', 'resets_at'), c.id)
+            self.assertEqual(j.orch.auto, c.v['life'] in ('limit_auto', 'limit_repeat') and want == 'limit_wait', c.id)
+        self.assertGreater(n, 5)
+
+    def test_limit_group_and_the_hidden_turn_notice(self):
+        n = 0
+        for c in self.cases:
+            j = self.judged[c.id]
+            if c.bundle != 'sta' or c.v['skind'] != 'main' or j.orch is None:
+                continue
+            truth = oracle.truth(c)
+            n += 1
+            if c.v['at'] == 'after_resume':                                                    # the orchestrator went on: only its agent is still on the limit
+                self.assertEqual([(g.orch, g.agents) for g in j.groups], [(False, ['child'])], c.id)
+                continue
+            self.assertEqual('limit_group' in j.diag, ('limit_group', 'orch') in truth.diag, c.id)
+            for g in j.groups:
+                self.assertTrue(g.orch and g.agents, c.id)                                    # one notice for the orchestrator and its stopped agent
+                self.assertEqual(g.auto, ('orch', 'alert', 'turn') in [(r, f, v) for r, f, v in truth.forbid], c.id)    # the "next instruction" notice is hidden only when it continues by itself
+        self.assertGreater(n, 5)
+
+    def test_state_diagnostics_match_the_oracle(self):
+        bad = [(c.id,) + d for c in self.cases for d in [diag_diff(c, self.judged[c.id])] if d]
+        self.assertEqual(bad, [], '\n'.join(map(str, bad[:20])))
+
+    def test_a_crash_is_ended_with_the_launch_notice_and_unknown_without_a_view(self):
+        """A `claude -p` that crashed (no cost-state), seen without a process table: ended/crash when the launcher's record holds the end notice of the launching
+        call (the process is over), unknown for a Codex thread (no such notice). The two cases are made here, not taken from the sampled ones: which pairs the
+        generator samples is its own business."""
+        for skind, want in (('cli', ('ended', 'crash')), ('codex', ('unknown', None))):
+            c = case_of(skind=skind, life='crash', os='mac_nops', at='just_ended')
+            self.assertEqual((c.v['skind'], c.v['life'], c.v['os'], c.v['at']), (skind, 'crash', 'mac_nops', 'just_ended'))
+            got = Judged(c).verdict
+            self.assertEqual((got.status, got.reason), want, skind)
+
+    def test_restart_gives_the_same_verdicts(self):
+        again = {c.id: Judged(c) for c in self.cases[:60]}
+        for cid, j in again.items():
+            self.assertEqual(j.verdict, self.judged[cid].verdict, cid)
+            self.assertEqual(j.orch, self.judged[cid].orch, cid)
+
+
+if __name__ == '__main__':
+    unittest.main()

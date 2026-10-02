@@ -1,0 +1,87 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    # The macOS job has not been run yet (the author checks macOS by hand): its result is shown but does not fail the workflow.
+    # Delete this line after the first green macOS run.
+    continue-on-error: ${{ matrix.os == 'macos-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, python: '3.9' }
+          - { os: ubuntu-latest, python: '3.12' }
+          - { os: macos-latest, python: '3.12' }
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests (standard library only)
+        run: python -m unittest discover -s tests
+      - name: Dictionaries (en and ko have the same keys, placeholders, plurals; no stray Korean in the pages)
+        run: python tools/regress/i18n_check.py --strict
+
+  ui:
+    # The real server on a synthetic HOME (tools/synth_home.py), its API answers saved as a fixture, then the page checks that run without a browser.
+    name: page checks on a synthetic HOME (Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      LANG: C.UTF-8          # not a Korean locale: the tools and tests that start the server pin the terminal language themselves (AGENT_BULLPEN_LANG=ko)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Synthetic HOME -> server -> API snapshot
+        run: python tools/make_synth_fixture.py "$RUNNER_TEMP/fx"
+      - name: Dashboard and office checks
+        run: node tools/regress/ui_checks.js static "$RUNNER_TEMP/fx/synth"
+      - name: Lounge checks
+        run: node tools/regress/lounge_checks.js static "$RUNNER_TEMP/fx/synth"
+      # The checks below run in both languages: each one boots the pages in ko and in en itself (no AB_LANG needed)
+      - name: Language runtime and the HTML fallback text (i18n.js)
+        run: |
+          node tools/regress/i18n_checks.js static
+          node tools/regress/i18n_apply_checks.js static
+      - name: Office texts (ko, en)
+        run: node tools/regress/office_checks.js static "$RUNNER_TEMP/fx/synth"
+      - name: Diagnosis card (ko, en)
+        run: node tools/regress/diag_i18n_checks.js static
+      - name: English dashboard and office page
+        run: node tools/regress/ui_checks_en.js static "$RUNNER_TEMP/fx/synth"
+      # The new states (a usage limit wait, interrupted runs, grandchildren, system lines, diagnostics) in ko and en, from the second fixture that make_synth_fixture.py writes (synth_stopped_*); a missing fixture fails here (CI is set)
+      - name: New states (ko, en)
+        env:
+          REQUIRE_FIXTURES: '1'
+        run: node tools/regress/state_checks.js static "$RUNNER_TEMP/fx/synth"
+      - name: Keep the snapshot when a check fails
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: synthetic-fixture
+          path: ${{ runner.temp }}/fx/synth_*.json
+          retention-days: 3

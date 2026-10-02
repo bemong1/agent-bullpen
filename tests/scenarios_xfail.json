@@ -1,0 +1,7 @@
+{
+"version": 1,
+"about": "Red cells of tools/scenarios today: every one is expected to stay red until the board is fixed, and fails the test if it turns green or changes. cells[case][\"subject.field\"] = [result, what the truth wants, what the board shows, reason id]. Regenerate with python3 -m tools.scenarios.run --write-xfail.",
+"reasons": {},
+"cells": {
+}
+}

@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en" class="i18n-wait">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-i18n="page.title.dashboard">Agent Bullpen · Dashboard</title>
+<link rel="stylesheet" href="fonts/galmuri.css">
+<link rel="stylesheet" href="board.css">
+<style>html.i18n-wait body { visibility: hidden; animation: i18n-show 0s 12s forwards; } @keyframes i18n-show { to { visibility: visible; } }</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="5" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="18" r="2.5"/><path d="M12 7.5v4M12 11.5l-5.5 4.5M12 11.5l5.5 4.5"/></svg><span data-i18n="page.brand">Agent Bullpen</span></div>
+  <select id="sessionSel" class="sel" title="Session" data-i18n-title="page.session"></select>
+  <span id="sessionLive" class="live"></span>
+  <span class="spacer"></span>
+  <div id="counters" class="counters"></div>
+  <span id="updated" class="live"></span>
+  <select id="langSel" class="sel"></select>
+  <button id="themeBtn" class="icon-btn" title="Light/dark" data-i18n-title="page.theme">◐</button>
+</header>
+
+<section class="card alerts" id="alerts" hidden></section>
+<div class="wrap">
+  <section class="diag" id="diag" hidden aria-live="polite"></section>
+  <section class="now">
+    <div class="card" id="orchCard"></div>
+    <div class="card" id="tokCard"></div>
+    <div class="card scrollcard"><div class="label" data-i18n="page.now.title">Progress</div><div class="scroll" id="summaryBox"><ul class="summary-list" id="summary"></ul></div></div>
+    <div class="card scrollcard" id="talkCard"><div class="label"><span data-i18n="page.talk.title">You ↔ Orchestrator</span> <span id="talkTime" class="faint" style="text-transform:none"></span><span class="spacer"></span><button class="icon-btn" id="talkBig" title="View the whole conversation in a wide window" data-i18n="page.viewAll" data-i18n-title="page.viewAll.title">View all</button></div><div class="scroll talk" id="talkList"></div><button class="talk-new" id="talkNew" hidden data-i18n="page.talk.new">New messages ↓</button></div>
+  </section>
+
+  <div class="office-row" id="officeRow">
+    <section class="card game-card" id="gameCard">
+      <div class="sec-head"><h2 data-i18n="page.game.title">Agent office</h2><span class="faint" style="font-size:12px" id="gameHint" data-i18n="page.game.hint">Click a person for details · bubbles quote the transcript</span><span class="spacer"></span>
+        <button class="tab" id="gameDemo" title="Pick a demo scenario; it plays on this screen only (your real transcripts are left alone)" data-i18n="common.demo" data-i18n-title="page.game.demo.title">▶ Demo</button><a class="tab" id="gameFull" href="game" target="_blank" rel="noopener" data-i18n="page.game.full">Full screen ↗</a><button class="tab" id="gameToggle" data-i18n="common.collapse">Collapse</button></div>
+      <div id="gameBox"></div>
+      <div class="ag-legend" id="gameLegend"></div>
+    </section>
+    <section class="card atalk-card" id="atalkCard"><div class="atalk-in">
+      <div class="label"><span data-i18n="page.atalk.title">Agent talk</span> <span id="atalkTime" class="faint" style="text-transform:none"></span><span class="spacer"></span><button class="icon-btn" id="atalkBig" title="View the whole conversation in a wide window" data-i18n="page.viewAll" data-i18n-title="page.viewAll.title">View all</button></div>
+      <div class="tabs atalk-tabs" id="atalkTabs"></div>
+      <div class="talk atalk" id="atalkList"></div><button class="talk-new" id="atalkNew" hidden data-i18n="page.atalk.new">New ↓</button>
+    </div></section>
+  </div>
+
+  <div class="main">
+    <section>
+      <div class="sec-head"><h2 data-i18n="page.debates.title">Debates</h2><div class="tabs" id="debateTabs"></div></div>
+      <div class="debate-meta" id="debateMeta"></div>
+      <div class="topics" id="topics"></div>
+    </section>
+    <aside class="agents">
+      <div class="sec-head"><h2 data-i18n="page.agents.title">Agents</h2><div class="tabs" id="agentFilter"></div></div>
+      <div class="list" id="agentList"></div>
+    </aside>
+  </div>
+
+  <div class="lower">
+    <section class="card tl">
+      <div class="sec-head"><h2 data-i18n="page.timeline.title">Activity timeline</h2><div class="tabs" id="tlWin"></div></div>
+      <div id="tlBox"></div>
+      <div class="legend">
+        <span><i style="background:var(--blue)"></i><span data-i18n="page.legend.read">Read</span></span><span><i style="background:var(--green)"></i><span data-i18n="page.legend.write">Write</span></span>
+        <span><i style="background:var(--amber)"></i><span data-i18n="page.legend.run">Run command</span></span><span><i style="background:var(--purple)"></i><span data-i18n="page.legend.web">Web</span></span>
+        <span><i style="background:var(--orange)"></i><span data-i18n="page.legend.instruction">Instruction · report</span></span><span><i style="background:var(--red)"></i><span data-i18n="page.legend.error">Tool error</span></span>
+        <span><i style="background:var(--green);border-radius:50%"></i><span data-i18n="page.legend.report">Report saved</span></span>
+      </div>
+    </section>
+    <section class="card feed">
+      <div class="sec-head"><h2 data-i18n="page.feed.title">Message flow</h2><div class="tabs" id="feedFilter"></div></div>
+      <div class="items" id="feedItems"></div>
+    </section>
+  </div>
+</div>
+
+<aside class="drawer" id="drawer">
+  <div class="d-head">
+    <div class="d-title" id="dTitle"></div>
+    <div class="d-sub" id="dSub"></div>
+    <div class="d-tabs tabs" id="dTabs"></div>
+  </div>
+  <div class="d-body" id="dBody"></div>
+</aside>
+<div class="modal-bg" id="modalBg"><div class="modal">
+  <div class="m-head"><b id="mTitle"></b><span id="mSub" class="muted" style="font-size:12.5px"></span><span class="spacer"></span><button class="icon-btn" id="mClose" data-i18n="common.closeEsc">Close (Esc)</button></div>
+  <div class="m-body md" id="mBody"></div>
+</div></div>
+<div class="tip" id="tip"></div>
+
+<script src="i18n.js"></script>
+<script src="common.js"></script>
+<script src="game-art.js"></script>
+<script src="game.js"></script>
+<script src="game-demo.js"></script>
+<script src="board.js"></script>
+<div id="planBar" class="planbar"></div>
+</body>
+</html>

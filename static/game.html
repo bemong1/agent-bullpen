@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en" class="i18n-wait">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title data-i18n="office.page.title">Agent Bullpen · Office</title>
+<link rel="stylesheet" href="fonts/galmuri.css">
+<style>
+:root { --bg: #0f0e1d; --text: #ecebff; --muted: #9a98b5; --line: #2c2a48; --red: #f85149; --amber: #e3b341; --green: #3fb950; }
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Galmuri11', 'Galmuri9', ui-monospace, monospace; font-size: 12px; }
+header { display: flex; align-items: center; gap: 12px; height: 44px; overflow: hidden; white-space: nowrap; padding: 0 16px; border-bottom: 2px solid var(--line); font-variant-numeric: tabular-nums; }
+#sess { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#upd { min-width: 150px; text-align: right; }
+header b { font-size: 14px; }
+header a { color: #9ecbff; }
+.spacer { flex: 1; }
+.chip { padding: 2px 8px; border: 1px solid var(--line); border-radius: 4px; white-space: nowrap; }
+main { padding: 12px 16px 20px; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); margin-top: 10px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i { width: 10px; height: 10px; display: inline-block; }
+#err { color: var(--red); display: none; margin: 8px 0; }
+#langSel { font: inherit; color: inherit; background: none; border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+#langSel option { background: #1b1930; color: var(--text); }
+/* below 800px the one-line header would cut off the language selector and the link back: it wraps, the session text goes last */
+@media (max-width: 800px) {
+  header { height: auto; min-height: 44px; flex-wrap: wrap; row-gap: 6px; padding: 6px 16px; }
+  .spacer { display: none; }
+  #sess { flex: 1 1 100%; order: 9; }
+}
+html.i18n-wait body { visibility: hidden; animation: i18n-show 0s 12s forwards; } @keyframes i18n-show { to { visibility: visible; } }
+</style>
+</head>
+<body>
+<header>
+  <b data-i18n="office.page.heading">🏢 Agent office</b>
+  <span id="sess" style="color:var(--muted)"></span>
+  <span class="spacer"></span>
+  <span id="alerts"></span>
+  <span id="cost" class="chip"></span>
+  <button id="demoBtn" class="chip" style="cursor:pointer;background:none;color:inherit;font:inherit" data-i18n="common.demo">▶ Demo</button>
+  <span id="upd" style="color:var(--muted)"></span>
+  <select id="langSel"></select>
+  <a id="back" href="./" data-i18n="office.page.back">Dashboard ↩</a>
+</header>
+<main>
+  <div class="diag" id="diag" hidden aria-live="polite"></div>
+  <div id="err"></div>
+  <div id="game"></div>
+  <div class="legend ag-legend" id="legend"></div>
+</main>
+<script src="i18n.js"></script>
+<script src="common.js"></script>
+<script src="game-art.js"></script>
+<script src="game.js"></script>
+<script src="game-demo.js"></script>
+<script>
+'use strict';
+const qs = new URLSearchParams(location.search);
+let SESSION = qs.get('session') || '', S = null, lastOk = 0, ticking = false;
+let game = null;     // mounted by start() once the dictionary is here: t() must be able to answer before anything is drawn
+const mountGame = () => AgentGame.mount(document.getElementById('game'), {
+  mode: 'full',
+  onAgent: id => { location.href = I18N.link('./' + (SESSION ? '?session=' + encodeURIComponent(SESSION) : '') + '#agent=' + id); },
+});
+// First-screen diagnosis (common.js): when there is no session to open or the server cannot be reached, it shows the reason in one box, rechecks every 5 s and opens through tick once a session appears
+const diag = makeDiag(document.getElementById('diag'), { session: () => SESSION, retry: () => tick(),
+  status: (kind, text) => { document.getElementById('upd').textContent = text; } });   // The header is narrow, so "every 5 s" is written in the box only
+async function tick() {
+  if (ticking || diag.on) return;    // The next request goes out only after the previous one ends (so responses arriving out of order cannot take the screen back to an old state). While the diagnosis box is up, its 5 s recheck starts tick again
+  ticking = true;
+  const ctl = new AbortController(), guard = setTimeout(() => ctl.abort(), 30000);   // So that a request with no answer never blocks polling for ever
+  try {
+    // At first, check whether there is a session to open: if there is none, there are no records rather than a broken server, so the diagnosis box is shown and /api/state (404) is not called
+    if (!S) { const sess = await diag.probe(); if (!sess) return; if (!SESSION) SESSION = sess.default || ''; }
+    const q = `v=${S ? S.version : ''}&t=${S ? S.now : ''}` + (SESSION ? '&session=' + encodeURIComponent(SESSION) : '');
+    const r = await fetch('api/state?' + q, { signal: ctl.signal });
+    if (!r.ok) throw await httpError(r, 'api/state');
+    const st = await r.json();
+    lastOk = Date.now();
+    document.getElementById('err').style.display = 'none';
+    if (!st.unchanged) {
+      S = st; SESSION = SESSION || st.session.id;
+      game.update(S);
+      document.getElementById('sess').textContent = (S.session.title || '') + ' · ' + S.session.id.slice(0, 8) + (S.session.alive === null ? ' · ' + t('status.session.unknown') : S.session.alive ? '' : ' · ' + t('status.session.off'));   // null: cannot be told for a standalone Codex session
+      document.getElementById('back').href = I18N.link('./?session=' + encodeURIComponent(SESSION));
+      document.getElementById('cost').textContent = t('office.header.cost', { cost: usd(sessionCost(S)) });
+      // With Codex, adds the same explanation as the dashboard chip (the value is the same total). With Claude only, it stays as it is now
+      document.getElementById('cost').title = hasCodex(S) ? t('office.header.costTip', { codex: usd(codexCost(S)) }) : '';
+      const dismissed = dismissedIds();
+      const al = (S.alerts || []).filter(a => !dismissed.has(a.id)), dec = al.filter(a => a.level === 'decide').length;
+      document.getElementById('alerts').innerHTML = al.length
+        ? `<a class="chip" href="${document.getElementById('back').href}" style="color:${dec ? 'var(--red)' : 'var(--amber)'};border-color:currentColor;text-decoration:none">${esc(t(dec ? 'office.header.alertsDecide' : 'office.header.alerts', { count: al.length, decide: dec }))}</a>` : '';
+      document.title = (al.length ? `(${al.length}) ` : '') + t('office.page.title');
+    }
+    showCodexLegend();
+    document.getElementById('upd').textContent = t('office.header.live', { time: I18N.date(new Date(), 'timeSec') });
+  } catch (e) {
+    if (!S) { await diag.fail(e); return; }      // A failure before the first state: "session not found", "server refused" or "connection failed" goes to the diagnosis box
+    const el = document.getElementById('err');
+    el.style.display = 'block';
+    el.textContent = t('office.err.noResponse', { message: e.message });
+  } finally { clearTimeout(guard); ticking = false; }
+}
+// One legend line, only when Codex is on screen (a real record, or the demo's T9 C slot)
+function showCodexLegend() {   // game.js builds the legend (same text as the dashboard's office card)
+  const html = AgentGame.legendHtml(hasCodex(S) || game.demoOn), el = document.getElementById('legend');
+  if (el.innerHTML !== html) el.innerHTML = html;
+}
+// ▶ Demo: scenario menu. In the address: ?demo=basic|new|round2|trouble|talk|all (1 = basic)
+const demoKey = qs.get('demo'), demoBtn = document.getElementById('demoBtn');
+const playDemo = k => { game.demo(k, { onEnd: showCodexLegend }); showCodexLegend(); };
+demoBtn.onclick = ev => { ev.stopPropagation(); if (game.demoOn) { game.stopDemo(); showCodexLegend(); } else AgentGame.demoMenu(demoBtn, playDemo); };
+async function start() {
+  await I18N.ready;                        // start once the dictionary is here (i18n.js)
+  game = mountGame();
+  I18N.mountPicker(document.getElementById('langSel'));
+  await tick();
+  if (demoKey && S) playDemo(demoKey === '1' ? 'basic' : demoKey);
+  setInterval(tick, 3000);
+}
+start();
+</script>
+</body>
+</html>
