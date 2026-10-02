@@ -7,6 +7,7 @@ way/evidence tables in axes.py, so "the environment was cleared" means the same 
 
 import json
 import os
+import tempfile
 import time
 
 from .axes import FLAW_VERSION, VERSION, digest
@@ -253,6 +254,30 @@ def session_file(b, pid, sid, cwd, entry, t, start=None, name=None, status=None,
     if name:
         d['name'] = name
     return d
+
+
+_FOLDS = {}                                           # device number -> whether that file system folds case
+
+
+def folds_case(folder):
+    """Whether `folder` is on a file system that treats `B.md` and `b.md` as one file (the default on macOS and Windows). False when it cannot be told."""
+    try:
+        dev = os.stat(folder).st_dev
+        if dev not in _FOLDS:
+            fd, probe = tempfile.mkstemp(prefix='CaseProbe', dir=folder)
+            os.close(fd)
+            try:
+                _FOLDS[dev] = os.path.exists(os.path.join(os.path.dirname(probe), os.path.basename(probe).swapcase()))
+            finally:
+                os.unlink(probe)
+        return _FOLDS[dev]
+    except OSError:
+        return False
+
+
+def needs_two_names_by_case(case):
+    """Whether the scene writes two files whose names differ only in case (a debate with `nstyle=collide`: B.md and b.md), which a case-folding file system cannot hold."""
+    return case.bundle == 'deb' and case.v['nstyle'] == 'collide'
 
 
 def build_case(case, root):

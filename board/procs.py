@@ -15,6 +15,7 @@ import time
 PROC = '/proc'                    # hidden in tests (to imitate macOS)
 PS_ARGV = ('ps', '-axww', '-o', 'pid=,command=')
 PS_PPID_ARGV = ('ps', '-axww', '-o', 'pid=,ppid=')     # parent pid table when there is no /proc (everything at once, cached for 3 seconds)
+PS_UID_ARGV = ('ps', '-axww', '-o', 'pid=,uid=')       # owner (effective user id) table when there is no /proc, the same way
 PS_ENV_ARGV = ('ps', '-E', '-ww', '-o', 'command=', '-p')   # command line with the environment attached when there is no /proc (macOS; only the same user's processes). The pid is appended at the end
 ENV_READ_MAX = 1 << 20                                   # cap on how much of environ is read
 CACHE_SEC = 3
@@ -23,6 +24,7 @@ _lock = threading.Lock()
 _PS = {'ts': 0.0, 'v': None}      # ps result {pid: command line (bytes)}. None if it could not be had (that is not asked again for 3 seconds either)
 _CODEX = {'ts': 0.0, 'v': None}
 _PPID = {'ts': 0.0, 'v': None}    # ps result {pid: ppid}
+_UID = {'ts': 0.0, 'v': None}     # ps result {pid: uid}
 _PIDS = {'ts': 0.0, 'v': None, 'k': None}     # per codex process {pid, argv, fds}
 _ENV = {}                         # the ps way: {(pid, names): (time, values)}: holds only the values of the requested names (no other part of the environment is kept anywhere)
 
@@ -33,6 +35,7 @@ def reset():
         _PS.update(ts=0.0, v=None)
         _CODEX.update(ts=0.0, v=None)
         _PPID.update(ts=0.0, v=None)
+        _UID.update(ts=0.0, v=None)
         _PIDS.update(ts=0.0, v=None, k=None)
         _ENV.clear()
 
@@ -182,13 +185,13 @@ def _status_field(pid, key):
     return None
 
 
-def _ps_ppids():
-    """{pid: ppid}. None if ps is unusable (that is not asked again for 3 seconds either)."""
+def _ps_pairs(argv, cache):
+    """{pid: number} from a two-column `ps` listing (pid, then ppid or uid), cached for 3 seconds in `cache`. None if ps is unusable (that is not asked again for 3 seconds either)."""
     with _lock:
-        if time.time() - _PPID['ts'] < CACHE_SEC:
-            return _PPID['v']
+        if time.time() - cache['ts'] < CACHE_SEC:
+            return cache['v']
     try:
-        r = subprocess.run(PS_PPID_ARGV, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
+        r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=5)
         out = r.stdout if r.returncode == 0 else None
     except (OSError, subprocess.SubprocessError, ValueError):
         out = None
@@ -200,8 +203,13 @@ def _ps_ppids():
             if len(f) == 2 and f[0].isdigit() and f[1].isdigit():
                 table[int(f[0])] = int(f[1])
     with _lock:
-        _PPID.update(ts=time.time(), v=table)
+        cache.update(ts=time.time(), v=table)
     return table
+
+
+def _ps_ppids():
+    """{pid: ppid}. None if ps is unusable."""
+    return _ps_pairs(PS_PPID_ARGV, _PPID)
 
 
 def ppid(pid):
@@ -243,14 +251,17 @@ def starttime(pid):
 
 
 def uid(pid):
-    """Effective user id of the process (the second value of Uid in /proc/<pid>/status). None without /proc."""
-    if not _ok_pid(pid) or not has_proc():
+    """Effective user id of the process: the second value of Uid in /proc/<pid>/status, elsewhere the `ps -o pid=,uid=` table (cached for 3 seconds). None for a missing process or unknown."""
+    if not _ok_pid(pid):
         return None
-    f = _status_field(pid, b'Uid:')
-    try:
-        return int(f[1]) if f and len(f) > 1 else None
-    except ValueError:
-        return None
+    if has_proc():
+        f = _status_field(pid, b'Uid:')
+        try:
+            return int(f[1]) if f and len(f) > 1 else None
+        except ValueError:
+            return None
+    table = _ps_pairs(PS_UID_ARGV, _UID)
+    return None if table is None else table.get(pid)
 
 
 def argv(pid):
@@ -332,7 +343,9 @@ def env_values(pid, names):
     out = _run_env_ps(pid) if cmd else None
     got = None
     if out is not None and out.startswith(cmd):                 # the environment is appended after the command line. If the front is not the same, the two cannot be told apart
-        got = _pick_env(out[len(cmd):], names, False)
+        rest = out[len(cmd):]
+        if rest.strip():                                        # nothing appended: ps leaves out another user's environment (an empty one looks the same), so unknown, not "absent"
+            got = _pick_env(rest, names, False)
     with _lock:
         if len(_ENV) > 256:
             _ENV.clear()

@@ -99,8 +99,9 @@ class EnvPrimitives(unittest.TestCase):
             self.assertEqual(len(calls), n)                                      # 3-second cache
             self.assertNotIn(SECRETS[0], repr(procs._ENV))                       # values that were not requested are not in the cache either
             self.assertIsNone(procs.env_values(78, (E.encode(),)))               # a process that is not in the ps table
-        # unknown/none if the environment is not printed (permissions), if the part before it differs so it cannot be split off, or if ps fails
-        for out in (cmd, b'something else entirely CLAUDE_PID=1', None):
+        # unknown (None, never `{}` = "read, and the name is absent") if the environment is not printed (another user's process: macOS ps shows only the command), if the part before it
+        # differs so it cannot be split off, or if ps fails
+        for out in (cmd, cmd + b' ', b'something else entirely CLAUDE_PID=1', None):
             def run2(argv, out=out, **kw):
                 if tuple(argv[:-1]) == procs.PS_ENV_ARGV:
                     if out is None:
@@ -109,8 +110,20 @@ class EnvPrimitives(unittest.TestCase):
                 return types.SimpleNamespace(returncode=0, stdout=b'  77 %s\n' % cmd)
             with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(subprocess, 'run', run2):
                 procs.reset()
-                self.assertIn(procs.env_values(77, (E.encode(),)), ({}, None), out)
-                self.assertFalse((procs.env_values(77, (E.encode(),)) or {}).get(E))
+                self.assertIsNone(procs.env_values(77, (E.encode(),)), out)
+        procs.reset()
+
+    def test_ps_environment_without_the_name_is_empty_but_known(self):
+        """The environment was printed and the name is not in it: `{}`, unlike the environment of another user's process, which ps does not print (None)."""
+        cmd = b'claude -p fix'
+
+        def run(argv, **kw):
+            if tuple(argv[:-1]) == procs.PS_ENV_ARGV:
+                return types.SimpleNamespace(returncode=0, stdout=cmd + b' HOME=/h PATH=/bin\n')
+            return types.SimpleNamespace(returncode=0, stdout=b'  77 %s\n' % cmd)
+        with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(subprocess, 'run', run):
+            procs.reset()
+            self.assertEqual(procs.env_values(77, (E.encode(),)), {})
         procs.reset()
 
 

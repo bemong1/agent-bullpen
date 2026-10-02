@@ -122,6 +122,23 @@ def read(path):
         return f.read()
 
 
+def synth_home_codex_unknown(home):
+    """codex_unknown_here for the synthetic HOME `home`."""
+    return codex_unknown_here(os.path.join(home, '.codex', 'sessions'))
+
+
+def codex_unknown_here(sessions):
+    """Whether an unfinished Codex agent reads as `unknown` on this machine. Without /proc (macOS) ps cannot say which rollout a codex process holds open, so once any codex
+    process runs (a fake one of --live, or a real one of the developer) the agent is neither running nor ended. With /proc, or with no codex process at all, it is not unknown."""
+    sys.path.insert(0, ROOT)
+    from board import procs
+    procs.reset()
+    try:
+        return not procs.has_proc() and bool(procs.codex_procs(sessions)['any'])
+    finally:
+        procs.reset()
+
+
 def tree_digest(root):
     """List of (relative path, content) for the files under a folder. Modification times are left out."""
     out = []
@@ -651,6 +668,9 @@ class BusyBoard(unittest.TestCase):
     def topics(self):
         return {t['key']: t for t in self.state['debates'][0]['topics']}
 
+    def codex_unknown(self):
+        return codex_unknown_here(os.path.join(self.info['home'], '.codex', 'sessions'))
+
     def test_sessions(self):
         code, body = self.board.get('/api/sessions')
         by_id = {x['id']: x for x in body['sessions']}
@@ -664,8 +684,10 @@ class BusyBoard(unittest.TestCase):
         ag = self.state['agents']
         self.assertEqual(len(ag), 33)
         self.assertEqual({p: sum(a['provider'] == p for a in ag) for p in ('claude', 'codex')}, {'claude': 31, 'codex': 2})
+        unknown = 2 if self.codex_unknown() else 0                                                         # the two Codex agents, on a machine that cannot see open files and has a codex process
         self.assertEqual(sum(a['status'] == 'done' for a in ag), 19)                                      # 6 finished topics x 3 + T5-C
-        self.assertEqual(sum(a['status'] == 'ended' for a in ag), 14)                                      # there is no process, so the 14 unfinished agents are ended
+        self.assertEqual(sum(a['status'] == 'ended' for a in ag), 14 - unknown)                            # there is no process, so the 14 unfinished agents are ended
+        self.assertEqual(sum(a['status'] == 'unknown' for a in ag), unknown)
         workers = [a for a in ag if not a['units']]
         self.assertEqual(len(workers), 9)                                                                  # 9 desks in the "Other work" room
         self.assertEqual(sorted(re.sub(r'-\d+$', '', a['tag']) for a in workers), ['opus5.5'] + ['sol6.1'] + ['sonnet5.5'] * 7)
@@ -685,7 +707,7 @@ class BusyBoard(unittest.TestCase):
         self.assertTrue(all(len(v['rows']) == 3 for v in t.values()))
         cells = lambda k: {r['p']: [c['state'] for c in r['cells']] for r in t[k]['rows']}
         self.assertEqual(cells('t1_naming'), {'A': ['done', 'done'], 'B': ['done', 'done'], 'C': ['done', 'done']})
-        self.assertEqual(cells('t3_retry'), {'A': ['done', 'missing'], 'B': ['done', 'missing'], 'C': ['done', 'missing']})     # round 2 is not there yet (no --live, so "missing")
+        self.assertEqual(cells('t3_retry'), {'A': ['done', 'missing'], 'B': ['done', 'missing'], 'C': ['done', 'writing' if self.codex_unknown() else 'missing']})     # round 2 is not there yet (no --live, so "missing"; C is the Codex agent, whose process nobody can rule out)
         self.assertEqual(cells('t5_logging'), {'A': ['missing'], 'B': ['missing'], 'C': ['done']})            # only round 1
 
     def test_recent_topic_keeps_its_room_and_old_ones_do_not(self):
@@ -773,11 +795,12 @@ class BusyLive(unittest.TestCase):
         st = board.get('/api/state')[1]
         self.assertEqual((st['session']['alive'], st['orch']['state']), (True, 'working'))
         ag = st['agents']
-        self.assertEqual(sum(a['status'] == 'running' for a in ag), 14)
+        unknown = synth_home_codex_unknown(self.home)                    # no /proc (macOS): ps cannot say which rollout the fake codex process holds open
+        self.assertEqual(sum(a['status'] == 'running' for a in ag), 14 - 2 * unknown)
         self.assertEqual(sum(a['status'] == 'done' for a in ag), 19)
         self.assertEqual(sum(a['status'] in ('stalled', 'ended', 'failed', 'killed') for a in ag), 0)
-        self.assertTrue(all(a['status'] == 'running' for a in ag if a['provider'] == 'codex'))             # an open turn + a process that has the rollout open
-        self.assertEqual(sum(a['status'] == 'running' for a in ag if not a['units']), 9)                    # 9 agents in the "Other work" room
+        self.assertEqual({a['status'] for a in ag if a['provider'] == 'codex'}, {'unknown' if unknown else 'running'})     # an open turn + a process that has the rollout open (/proc)
+        self.assertEqual(sum(a['status'] == 'running' for a in ag if not a['units']), 9 - unknown)         # 9 agents in the "Other work" room, one of them Codex
         states = [c['state'] for t in st['debates'][0]['topics'] for r in t['rows'] for c in r['cells']]
         self.assertEqual((states.count('writing'), states.count('draft')), (5, 0))                          # T3 round 2 has 3 cells (Codex's is the cell planned with -o) + T5 round 1 has 2 cells
         self.assertEqual([a['level'] for a in st['alerts']], ['check'])
@@ -878,11 +901,13 @@ class LinkScene(unittest.TestCase):
         scene means: read in this process with the later stage inline, the children are linked by a guess or left unlinked for the same reasons."""
         sys.path.insert(0, os.path.join(ROOT, 'tests'))
         from compat import patched, server
-        from board import link
+        from board import link, procs
         home = self.info['home']
         idx = server.LinkIndex()                                                               # the later stage runs inside scan()
         with patched(HOME=home, CLAUDE_HOME=os.path.join(home, '.claude'), PROJECTS=os.path.join(home, '.claude', 'projects'), CODEX_HOME=os.path.join(home, '.codex'),
                      CODEX_SESSIONS=os.path.join(home, '.codex', 'sessions'), CODEX_NAMES=os.path.join(home, '.codex', 'session_index.jsonl'), CODEX=server.CodexIndex(), LINKS=idx):
+            procs.reset()                                                                      # without /proc (macOS) the process table is cached for 3 seconds, and an earlier test may have left one that lacks the fake child
+            self.addCleanup(procs.reset)
             idx.scan()
             self.assertTrue(idx.deep_ready.is_set())
             self.assertEqual({k: (o['sid'], o['rule'], link.certain(o['rule'])) for k, o in idx.cli_owners.items()},

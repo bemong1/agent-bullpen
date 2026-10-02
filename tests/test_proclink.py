@@ -198,7 +198,9 @@ class ProcsPrimitives(unittest.TestCase):
         calls = []
 
         def run(argv, **kw):
-            calls.append(argv)
+            calls.append(tuple(argv))
+            if tuple(argv) == procs.PS_UID_ARGV:
+                return types.SimpleNamespace(returncode=0, stdout=b'  500     0\n  501   501\n 502   501\nbad line\n  503 x\n')
             return types.SimpleNamespace(returncode=0, stdout=b'  500   1\n  501 500\n 502 501\nbad line\n')
         with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(subprocess, 'run', run):
             procs.reset()
@@ -207,17 +209,36 @@ class ProcsPrimitives(unittest.TestCase):
             self.assertIsNone(procs.ppid(999))
             self.assertEqual(len(calls), 1)                                # the table is not fetched again for 3 seconds
             self.assertIsNone(procs.starttime(502))                        # without /proc it cannot be compared
-            self.assertIsNone(procs.uid(502))
+            self.assertEqual((procs.uid(502), procs.uid(500), procs.uid(501)), (501, 0, 501))     # the owner comes from its own ps table
+            self.assertEqual((procs.uid(999), procs.uid(503)), (None, None))                     # a missing process; a row that is not two numbers
+            self.assertEqual([c for c in calls if c == procs.PS_UID_ARGV], [procs.PS_UID_ARGV])  # fetched once for all of them
             self.assertIsNone(procs.codex_pids('/s'))                      # open files are unknown
         for exc in (OSError('x'), subprocess.TimeoutExpired('ps', 1)):
             procs.reset()
             with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(subprocess, 'run', side_effect=exc):
                 self.assertIsNone(procs.ppid(502))
+                self.assertIsNone(procs.uid(502))
                 self.assertEqual(procs.ancestors(502), [])
         procs.reset()
         with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), \
                 mock.patch.object(subprocess, 'run', return_value=types.SimpleNamespace(returncode=1, stdout=b'')):
             self.assertIsNone(procs.ppid(502))
+            self.assertIsNone(procs.uid(502))
+        procs.reset()
+
+    def test_real_ps_without_proc(self):
+        """The ps way against the real `ps` of this machine (procps on Linux, BSD on macOS): the tables for the parent and the owner read back what the system says."""
+        import shutil
+        if not shutil.which('ps'):
+            self.skipTest('no ps')
+        me = os.getpid()
+        with mock.patch.object(procs, 'PROC', '/nonexistent-proc'):
+            procs.reset()
+            self.assertFalse(procs.has_proc())
+            self.assertEqual(procs.ppid(me), os.getppid())
+            self.assertEqual(procs.uid(me), os.geteuid())
+            self.assertIn(os.getppid(), procs.ancestors(me))
+            self.assertIsNone(procs.uid(2 ** 22 + 12345))                                     # no such process
         procs.reset()
 
     def test_codex_pids_per_process(self):
@@ -458,10 +479,18 @@ class LineageCli(Fixture):
         cmds = ''.join('%d %s\n' % (p, c) for p, (c, _) in table.items()).encode()
         ppids = ''.join('%d %d\n' % (p, pp) for p, (_, pp) in table.items()).encode()
 
+        uids = {}                                                          # pid -> owner the fake ps names (ours unless set)
+
         def run(argv, **kw):
+            if tuple(argv) == procs.PS_UID_ARGV:
+                return types.SimpleNamespace(returncode=0, stdout=''.join('%d %d\n' % (p, uids.get(p, os.geteuid())) for p in table).encode())
             return types.SimpleNamespace(returncode=0, stdout=ppids if tuple(argv) == procs.PS_PPID_ARGV else cmds)
         with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(subprocess, 'run', run):
             self.assertEqual(self.linked()[C]['sid'], P)
+        self.links.lineage = lineage.Lineage()
+        uids[100] = os.geteuid() + 1                                       # the live claude of the session file is another user's: its file is not trusted
+        with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(subprocess, 'run', run):
+            self.assertNotIn(C, self.linked())
         self.links.lineage = lineage.Lineage()
         with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(subprocess, 'run', side_effect=OSError):
             self.assertNotIn(C, self.linked())                                # if ps cannot be used either, unknown: no link and no exception

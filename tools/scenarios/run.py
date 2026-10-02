@@ -175,7 +175,9 @@ def grade_case(case, b, obs, truth):
 
 
 def run_case(case, root):
-    """Build, observe, grade one case. Returns its cells."""
+    """Build, observe, grade one case. Returns its cells (none for a case this file system cannot hold, see `skipped_here`)."""
+    if build.needs_two_names_by_case(case) and build.folds_case(root):
+        return []
     case_root = os.path.join(root, axes.digest(case.id, n=12))
     b = build.build_case(case, case_root)
     try:
@@ -415,6 +417,14 @@ def select():
     return list(_SELECTED)
 
 
+def skipped_here(cases, root=None):
+    """The ids of the cases that run_all leaves out on this machine: a scene that needs two names differing only in case (B.md and b.md) cannot be built on a file
+    system that folds case (macOS by default), so there is no board answer to grade."""
+    if not build.folds_case(root or tempfile.gettempdir()):
+        return set()
+    return {c.id for c in cases if build.needs_two_names_by_case(c)}
+
+
 def run_all(cases, root=None, progress=False):
     """Runs every case; returns (cells, errors). A case that raises is an error of the generator, never a pass."""
     own = root is None
@@ -643,13 +653,15 @@ def _row(*cols):
     return '| ' + ' | '.join(str(x) for x in cols) + ' |'
 
 
-def summary_text(cases, cells, errors=(), seconds=None):
+def summary_text(cases, cells, errors=(), seconds=None, skipped=()):
     """The summary the run prints (and the test prints): counts per bundle and field, and the red cells per reason."""
     red = [c for c in cells if c.result != 'pass']
     lines = ['scenarios: %d cases (%s; %d decoy twins), %d cells: %d pass, %d miss (%d of them the field is not emitted), %d wrong%s' % (
         len(cases), ', '.join('%s %d' % (b, n) for b, n in sorted(collections.Counter(c.bundle for c in cases).items())),
         sum(1 for c in cases if c.twin_of), len(cells), len(cells) - len(red), sum(1 for c in red if c.result == 'miss'), sum(1 for c in red if c.absent),
         sum(1 for c in red if c.result == 'wrong'), '' if seconds is None else ' in %.1f s' % seconds)]
+    if skipped:
+        lines.append('skipped on this machine: %d cases that need two file names differing only in case (the file system folds case)' % len(skipped))
     if errors:
         lines.append('GENERATOR ERRORS: %d (first: %s)' % (len(errors), errors[0]))
     lines.append('')
@@ -754,8 +766,8 @@ def dump_xfail(doc):
     return '\n'.join(lines) + '\n'
 
 
-def compare_xfail(cells, doc):
-    """Problems of the run against the xfail document (empty = the red list is exactly right)."""
+def compare_xfail(cells, doc, skipped=()):
+    """Problems of the run against the xfail document (empty = the red list is exactly right). `skipped`: ids of cases this machine could not run (skipped_here)."""
     problems = []
     seen = set()
     for c in cells:
@@ -776,7 +788,7 @@ def compare_xfail(cells, doc):
             for key in cs:
                 if (cid, key) not in seen and not any(c.case == cid and '%s.%s' % (c.role, c.field) == key for c in cells):
                     problems.append('stale xfail entry (no such cell any more): %s %s' % (cid, key))
-        else:
+        elif cid not in skipped:
             problems.append('stale xfail entry (no such case any more): %s' % cid)
     return problems
 
@@ -793,10 +805,13 @@ def main(argv=None):
         for c in cases:
             print(c.id)
         return 0
+    skipped = skipped_here(cases)
+    if args.write_xfail and skipped:
+        ap.error('--write-xfail needs a file system that keeps B.md and b.md apart: %d cases cannot be built here, and their cells would drop out of the list' % len(skipped))
     t0 = time.time()
     cells, errors = run_all(cases)
     dt = time.time() - t0
-    print(summary_text(cases, cells, errors, dt))
+    print(summary_text(cases, cells, errors, dt, skipped))
     if args.md == '-':
         print()
         sys.stdout.write(red_md(cases, cells))

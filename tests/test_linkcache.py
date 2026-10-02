@@ -158,7 +158,7 @@ class CacheFile(Fixture):
         self.assertEqual(len(got), MAX_PAIRS)
         self.assertEqual(got[0]['child'], '%08d-0000-4000-8000-000000000000' % 0)    # the entry first seen latest comes first
         put_cache(self.cache, [row(seen=NOW - MAX_DAYS * 86400 - 5), row(child=D, seen=NOW - MAX_DAYS * 86400 + 60)])
-        self.assertEqual([r['child'] for r in lineage.read_cache(self.cache)], [D])
+        self.assertEqual([r['child'] for r in lineage.read_cache(self.cache, now=NOW)], [D])        # NOW is when this module was imported; a slow run would age the 60 s margin out
 
     # ---- writing ----
     def test_written_when_a_certain_link_is_found(self):

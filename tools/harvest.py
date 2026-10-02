@@ -1535,7 +1535,8 @@ def cwd_kind(child, call, inv):
     if not cd:
         return 'same' if cc == (call.cwd or cc) else 'other'
     target = os.path.normpath(os.path.join(call.cwd or '/', os.path.expanduser(unquote(cd))))
-    if os.path.islink(target) or (os.path.realpath(target) != target and os.path.realpath(target) == os.path.realpath(cc)):
+    # a link on the way only counts when the child records the folder under another name: the same name needs no resolving (macOS keeps /tmp and /var behind links)
+    if os.path.islink(target) or (cc and target != os.path.normpath(cc) and os.path.realpath(target) != target and os.path.realpath(target) == os.path.realpath(cc)):
         return 'symlink'
     base = call.cwd or ''
     if target == os.path.normpath(base) and cc == base:

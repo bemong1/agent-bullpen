@@ -4,6 +4,7 @@
 """
 import json
 import os
+import re
 import sys
 import tempfile
 import threading
@@ -759,28 +760,68 @@ class S03S04ThenDo(S0102OptionValues):
 
 class RealShellSoundness(unittest.TestCase):
     """Checked with a real shell: a command we judge to open (launch) must **really run** (missing one because we did not open it is fine). The inner command is swapped for a harmless `printf` and run,
-    and the output shows whether it ran. Commands this machine lacks (sudo, zsh, ksh, setsid -f) and fragments (then …) are left out."""
+    and the output shows whether it ran. Commands this machine lacks (sudo, zsh, ksh, setsid -f) and fragments (then …) are left out, and so is a template this machine cannot run
+    (`can_run`: macOS has no `timeout` and has BSD env and nice), one by one: the rest is still checked."""
     SKIP = ('sudo', 'zsh', 'ksh', 'setsid', 'then ', 'ssh ', 'eval -x', '>/dev/null')
+    TOOLS = ('timeout', 'env', 'nice', 'nohup', 'dash')
+    GNU_TOOLS = ('timeout', 'env', 'nice')
+    # options the BSD tools may not take: a long option, `env -C`, and `nice -5` / `nice -n -5` (BSD nice refuses a negative value without privilege and then does not run the command)
+    GNU_OPTION = re.compile(r'\b(?:env|nice|timeout)\b[^;&|]*?\s(?:--\w|-C\b|-\d)')
+    _gnu = {}
 
     def real_runs(self, cmd):
         import subprocess
         r = subprocess.run(['bash', '-c', cmd], env=dict(os.environ, T='10'), stdin=subprocess.DEVNULL, capture_output=True, timeout=15, text=True)
         return 'RAN' in r.stdout
 
+    @classmethod
+    def is_gnu(cls, tool):
+        """Whether `tool` is the GNU one: it answers --version (the BSD env, nice and timeout do not)."""
+        import subprocess
+        if tool not in cls._gnu:
+            try:
+                cls._gnu[tool] = subprocess.run([tool, '--version'], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10).returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                cls._gnu[tool] = False
+        return cls._gnu[tool]
+
+    def can_run(self, t):
+        """Whether this machine can really run the template: it has every tool the template names, and the GNU env, nice and timeout when the template gives them options only those take."""
+        import shutil
+        used = [w for w in self.TOOLS if re.search(r'\b%s\b' % w, t)]
+        if any(not shutil.which(w) for w in used):
+            return False
+        return not self.GNU_OPTION.search(t) or all(self.is_gnu(w) for w in used if w in self.GNU_TOOLS)
+
+    def templates(self):
+        return [t.replace('/w ', '/tmp ') for t in S03S04ThenDo.NEG + S03S04ThenDo.POS if not any(w in t for w in self.SKIP)]
+
     def test_opened_implies_really_runs(self):
         import shutil
         if not shutil.which('bash'):
             self.skipTest('bash 없음')
         bad, checked = [], 0
-        for t in S03S04ThenDo.NEG + S03S04ThenDo.POS:
-            if any(w in t for w in self.SKIP) or any(not shutil.which(w) for w in ('timeout', 'env', 'nice', 'nohup', 'dash')):
+        for t in self.templates():
+            if not self.can_run(t):
                 continue
-            t = t.replace('/w ', '/tmp ')
             checked += 1
             if launches(t.format('codex exec resume %s x' % U)) and not self.real_runs(t.format('printf RAN')):
                 bad.append(t)
-        self.assertGreater(checked, 80)
+        full = all(shutil.which(w) for w in self.TOOLS) and all(self.is_gnu(w) for w in self.GNU_TOOLS)
+        self.assertGreater(checked, 80 if full else 40)                  # most templates need none of the tools a machine may lack
         self.assertEqual(bad, [], '안을 열었지만 실제로는 실행되지 않는 명령')
+
+    def test_a_machine_without_timeout_and_with_bsd_tools_still_checks_most_templates(self):
+        """What macOS has: no `timeout`, no GNU option in env and nice. Every template that names `timeout` or gives those tools a GNU option is left out, none else."""
+        with mock.patch('shutil.which', lambda w: None if w == 'timeout' else '/usr/bin/' + w), mock.patch.object(self, 'is_gnu', lambda w: False):
+            run = [t for t in self.templates() if self.can_run(t)]
+        left = [t for t in self.templates() if t not in run]
+        self.assertTrue(all(re.search(r'\btimeout\b', t) or self.GNU_OPTION.search(t) for t in left), left)
+        self.assertGreater(len(run), 40)
+        self.assertTrue(any('nice -n 5 ' in t for t in run) and any('env -u FOO ' in t for t in run))                    # the POSIX forms are still checked
+        self.assertFalse(any(re.search(r'\btimeout\b', t) or '--unset=' in t or 'env -C' in t or 'nice -5' in t for t in run))
+        with mock.patch('shutil.which', lambda w: '/usr/bin/' + w), mock.patch.object(self, 'is_gnu', lambda w: True):     # all GNU: nothing is left out
+            self.assertEqual([t for t in self.templates() if not self.can_run(t)], [])
 
     def test_text_forms(self):
         import shutil
@@ -790,6 +831,8 @@ class RealShellSoundness(unittest.TestCase):
             self.assertTrue(launches(t.format('codex exec resume %s x' % U)), t)          # if it was opened
             if '\n then' in t or t.startswith('true; do'):
                 continue                                                                   # fragments (syntax errors) are not asked whether they ran
+            if not self.can_run(t):
+                continue                                                                   # needs a tool this machine lacks (`timeout`): the parser side above still holds
             self.assertTrue(self.real_runs(t.format('printf RAN')) or 'nohup' in t, t)      # it really runs
         for t in S03S04ThenDo.TEXT_NEG:
             self.assertFalse(launches(t.format('codex exec resume %s x' % U)), t)

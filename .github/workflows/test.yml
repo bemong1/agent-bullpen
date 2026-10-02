@@ -18,9 +18,6 @@ jobs:
     name: unit tests (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
-    # The macOS job has not been run yet (the author checks macOS by hand): its result is shown but does not fail the workflow.
-    # Delete this line after the first green macOS run.
-    continue-on-error: ${{ matrix.os == 'macos-latest' }}
     strategy:
       fail-fast: false
       matrix:

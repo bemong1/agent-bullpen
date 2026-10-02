@@ -7,6 +7,8 @@ now passes, a listed cell whose value changed, a stale entry: each fails here. F
 
     python3 -m unittest discover -s tests
 """
+import contextlib
+import io
 import json
 import os
 import re
@@ -18,6 +20,7 @@ import time
 import types
 import unicodedata
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import compat  # noqa: E402,F401  (puts the repo root first on sys.path)
@@ -997,7 +1000,7 @@ class BuilderChecks(unittest.TestCase):
                 rival = self.bash_commands(b.paths['orch2'])[0]
                 rival_dir = rival.split(' && ')[0][len('cd '):]
                 first = lambda role: _read_lines(b.paths[role])[0]['cwd']
-                self.assertEqual(os.path.realpath(rival_dir), first('child'), (cwd, decoy))             # the rival `cd`s to where the target child records its folder
+                self.assertEqual(os.path.realpath(rival_dir), os.path.realpath(first('child')), (cwd, decoy))      # the rival `cd`s to where the target child records its folder (a temporary folder may sit behind a link: macOS /var)
                 self.assertEqual(first('child2'), first('child'), (cwd, decoy))                        # and its own child records the same one
 
     def test_a_sibling_launch_is_still_open_when_its_child_starts(self):
@@ -1401,7 +1404,7 @@ class FakeProcessModel(unittest.TestCase):
             noenv = start('env -i /bin/sleep 30 & echo $!; wait')
             nid = child_pid(noenv)
             pids.append(nid)
-            self.assertEqual(procs.env_values(nid, (marker.encode(),)), {})
+            self.assertIn(procs.env_values(nid, (marker.encode(),)), ({}, None))                 # `{}` from /proc/<pid>/environ; ps -E prints an empty environment like one it will not show (unknown)
             self.assertIn(noenv.pid, procs.ancestors(nid))
             self.assertFalse(WAY['envi']['env'])
             self.assertTrue(WAY['envi']['lineage'])
@@ -1429,6 +1432,58 @@ class FakeProcessModel(unittest.TestCase):
             procs.reset()
 
 
+class CaseFoldingFileSystem(unittest.TestCase):
+    """A scene that needs B.md and b.md side by side cannot be built where the file system folds case (the macOS default). Such a case is left out and said so, never
+    graded as a miss, and an xfail list is not written from a run that left cases out."""
+
+    def collide_and_plain(self):
+        cases = run.select()
+        collide = [c for c in cases if build.needs_two_names_by_case(c)]
+        plain = [c for c in cases if c.bundle == 'deb' and not build.needs_two_names_by_case(c)]
+        self.assertTrue(collide and plain)
+        return cases, collide, plain
+
+    def test_the_collision_cases_are_left_out_only_on_a_folding_file_system(self):
+        cases, collide, plain = self.collide_and_plain()
+        want = {c.id for c in collide}
+        with mock.patch.object(build, 'folds_case', lambda folder: True):
+            self.assertEqual(run.skipped_here(cases), want)
+            root = tempfile.mkdtemp(prefix='scen-fold-')
+            self.addCleanup(shutil.rmtree, root, True)
+            cells, errors = run.run_all(collide[:2] + plain[:1], root)
+            self.assertEqual(errors, [])
+            self.assertEqual({c.case for c in cells}, {plain[0].id})                      # the collision cases give no cell at all, the others still run
+            self.assertIn('skipped on this machine: %d cases' % len(want), run.summary_text(cases, cells, skipped=want))
+        with mock.patch.object(build, 'folds_case', lambda folder: False):
+            self.assertEqual(run.skipped_here(cases), set())
+            root = tempfile.mkdtemp(prefix='scen-nofold-')
+            self.addCleanup(shutil.rmtree, root, True)
+            cells, errors = run.run_all(collide[:1], root)
+            self.assertEqual((errors, {c.case for c in cells}), ([], {collide[0].id}))
+
+    def test_a_listed_case_that_was_left_out_is_not_stale(self):
+        doc = {'cells': {'deb:gone': {'seat.cell': ['miss', 'done', 'missing', 'D-DEBATE']}}}
+        self.assertEqual(run.compare_xfail([], doc, skipped={'deb:gone'}), [])
+        self.assertEqual(len(run.compare_xfail([], doc)), 1)
+
+    def test_the_probe(self):
+        with tempfile.TemporaryDirectory(prefix='scen-probe-') as d:
+            build._FOLDS.clear()
+            self.addCleanup(build._FOLDS.clear)
+            with mock.patch('os.path.exists', lambda p: True):                            # the other spelling of the probe file "exists": the file system folds case
+                self.assertTrue(build.folds_case(d))
+            build._FOLDS.clear()
+            self.assertIsInstance(build.folds_case(d), bool)
+            self.assertEqual(os.listdir(d), [])                                           # the probe file is gone
+            self.assertFalse(build.folds_case(os.path.join(d, 'missing')))
+
+    def test_an_xfail_list_is_not_written_from_a_run_that_left_cases_out(self):
+        with mock.patch.object(run, 'skipped_here', lambda cases, root=None: {'deb:x'}), mock.patch.object(run, 'XFAIL', os.devnull):
+            with contextlib.redirect_stderr(io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    run.main(['--write-xfail', '--cases', 'no-such-case*'])
+
+
 class StrictXfail(unittest.TestCase):
     """The red list of the board as it is today. See the module docstring for how to change it."""
 
@@ -1437,12 +1492,13 @@ class StrictXfail(unittest.TestCase):
         t0 = time.time()
         cells, errors = run.run_all(cases)
         dt = time.time() - t0
-        sys.stderr.write('\n' + run.summary_text(cases, cells, errors, dt) + '\n')
+        skipped = run.skipped_here(cases)
+        sys.stderr.write('\n' + run.summary_text(cases, cells, errors, dt, skipped) + '\n')
         self.assertEqual(errors, [], 'the generator itself failed on a case')
         self.assertLess(dt, BUDGET_SEC, 'the scenario suite must stay under %d s' % BUDGET_SEC)
         with open(os.path.join(REPO, 'tests', 'scenarios_xfail.json')) as f:
             doc = json.load(f)
-        problems = run.compare_xfail(cells, doc)
+        problems = run.compare_xfail(cells, doc, skipped)
         self.assertEqual(problems[:20], [], '%d differences from tests/scenarios_xfail.json (first 20 shown); regenerate with --write-xfail after a deliberate change' % len(problems))
         # every red cell has a reason that names an owner
         for cid, cs in doc['cells'].items():

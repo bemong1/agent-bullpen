@@ -25,7 +25,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
@@ -58,11 +60,18 @@ def specs(res, bundle):
     return [dict(kv.split('=', 1) for kv in cid.split(':', 1)[1].split(';')) for cid in res.cases if cid.startswith(bundle + ':')]
 
 
+def folds_case(case):
+    """Whether the scene of `case` needs B.md and b.md side by side on a file system that folds case (macOS by default): it cannot be built, so there is nothing to read back."""
+    return B.needs_two_names_by_case(case) and B.folds_case(tempfile.gettempdir())
+
+
 def comparable(case):
     """The axis values of `case` a record can show, or None when the whole case is out of reach of a finished record."""
     if case.bundle not in UNSEEN:
         return None                             # the coupling bundle is not harvested
     if any(case.v[a] in vals for (b, a), vals in NOT_READ_BACK.items() if b == case.bundle):
+        return None
+    if folds_case(case):
         return None
     optional = A.OPTIONAL.get(case.bundle, ())
     v, want = case.v, {a: case.v[a] for a in case.axes if a not in UNSEEN[case.bundle] and a not in optional}
@@ -200,6 +209,35 @@ class Commands(unittest.TestCase):
         self.assertEqual(H.analyze_command("echo 'claude -p \"x\"'")['invs'], [])
 
 
+class CwdKind(unittest.TestCase):
+    """Where a `cd` leads against where the child records its own folder. A link on the way (macOS keeps /tmp and /var behind /private) is a symlinked folder only when
+    the child names the folder differently; the same name needs no resolving."""
+
+    def setUp(self):
+        self.root = os.path.realpath(tempfile.mkdtemp(prefix='hv-cwd-'))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        os.makedirs(os.path.join(self.root, 'real', 'work', 'sub'))
+        os.makedirs(os.path.join(self.root, 'real', 'other'))
+        os.symlink('real', os.path.join(self.root, 'via'))                      # like /var -> private/var
+        os.symlink(os.path.join(self.root, 'real', 'work', 'sub'), os.path.join(self.root, 'real', 'work', 'link'))
+
+    def kind(self, call_cwd, cd, child_cwd):
+        inv = H.Inv()
+        inv.cd = cd
+        return H.cwd_kind(types.SimpleNamespace(cwd=os.path.join(self.root, child_cwd)), types.SimpleNamespace(cwd=os.path.join(self.root, call_cwd)), inv)
+
+    def test_the_same_name_behind_a_link_on_the_way_is_not_a_symlink(self):
+        self.assertEqual(self.kind('via/work', 'sub', 'via/work/sub'), 'cd')
+        self.assertEqual(self.kind('via/work', '../other', 'via/other'), 'other')
+        self.assertEqual(self.kind('via/work', None, 'via/work'), 'same')
+        self.assertEqual(self.kind('via/work', None, 'via/other'), 'other')
+        self.assertEqual(self.kind('real/work', 'sub', 'real/work/sub'), 'cd')            # nothing is linked: the same answer
+
+    def test_a_folder_that_is_a_link_or_is_recorded_under_another_name_is_a_symlink(self):
+        self.assertEqual(self.kind('via/work', 'link', 'real/work/sub'), 'symlink')       # the folder itself is a link
+        self.assertEqual(self.kind('via/work', 'sub', 'real/work/sub'), 'symlink')        # the child records the resolved name of what the call named through a link
+
+
 class RoundTrip(unittest.TestCase):
     """A case the generator builds is read back as the same axis values."""
 
@@ -221,10 +259,24 @@ class RoundTrip(unittest.TestCase):
         reals = dict(A.real_cases())
         wrong = {}
         for name in exact:
+            if folds_case(reals[name]):
+                continue                                                          # B9: B.md and b.md are one file on this file system
             diff = self.check(reals[name])
             if diff != []:
                 wrong[name] = diff
         self.assertEqual(wrong, {}, 'axes that did not come back (None: no spec at all)')
+
+    def test_a_scene_that_needs_two_names_by_case_is_left_out_on_a_folding_file_system(self):
+        b9 = dict(A.real_cases())['B9']                                           # B.md next to b.md
+        disk_folds = B.folds_case(tempfile.gettempdir())                        # this machine's own disk (macOS folds case by default)
+        with mock.patch.object(B, 'folds_case', lambda folder: True):
+            self.assertTrue(folds_case(b9))
+            self.assertIsNone(comparable(b9))
+        with mock.patch.object(B, 'folds_case', lambda folder: False):
+            self.assertFalse(folds_case(b9))
+            self.assertIn('nstyle', comparable(b9))
+            if not disk_folds:                                                    # the round trip writes both files for real: only a case-sensitive disk keeps them apart
+                self.assertEqual(self.check(b9), [])
 
     def test_the_unreachable_real_cases_are_reported_as_such(self):
         reals = dict(A.real_cases())

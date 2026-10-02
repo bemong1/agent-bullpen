@@ -73,7 +73,8 @@ def _mine(pid, d, owner, ns):
     if procs.cmdline_has(pid, b'claude') is not True:
         return False
     if not procs.has_proc():
-        return True                                   # no way to know the start time or owner: trust only the judgment above (a live claude)
+        u = procs.uid(pid)                            # ps names the owner but not the start time
+        return u is None or u == owner                # an owner that cannot be told: trust only the judgment above (a live claude)
     st, uid = procs.starttime(pid), procs.uid(pid)
     if st is None or uid is None or uid != owner:
         return False

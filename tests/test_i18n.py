@@ -66,7 +66,7 @@ class Registry(unittest.TestCase):
         loc.put('_limits.json', pack('_limits', 'x'))                          # not a language file
         loc.put('.hidden.json', pack('en', 'x'))
         loc.put('README.txt', 'x')
-        loc.put('EN.json', pack('EN', 'x'))                                    # an upper-case name is not registered
+        loc.put('ZH.json', pack('ZH', 'x'))                                    # an upper-case name is not registered (not EN.json: on a file system that folds case, as macOS does by default, that is en.json)
         loc.put('ko.json.bak', pack('ko', 'x'))
         os.makedirs(os.path.join(loc.dir, 'sub.json'))                         # a folder
         loc.put('real.json', pack('en', 'x'))                                  # a link to a real file
