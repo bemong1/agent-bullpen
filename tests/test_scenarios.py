@@ -31,7 +31,9 @@ from tools.scenarios.axes import AXES, BUNDLES, Case, WAY  # noqa: E402
 from tools.scenarios.observe import MISSING  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BUDGET_SEC = 30.0
+# A guard against the generator growing without notice, not a speed test: about 15 s on a developer machine, roughly twice that on a
+# shared CI runner. AGENT_BULLPEN_SCENARIO_BUDGET overrides it for a slower machine.
+BUDGET_SEC = float(os.environ.get('AGENT_BULLPEN_SCENARIO_BUDGET') or 60.0)
 
 
 class OracleIsIndependent(unittest.TestCase):
