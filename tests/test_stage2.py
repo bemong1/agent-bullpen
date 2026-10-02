@@ -284,20 +284,12 @@ class Item21Session(CliFixture):
 
 
 class Stage2Helpers(unittest.TestCase):
-    """Helper functions shared by Claude and Codex (model_numbers, pending_or_stall, etc.). The visible results are checked by test_preserve.py."""
+    """Helper functions shared by Claude and Codex (model_numbers, codex_call, etc.). The visible results are checked by test_preserve.py."""
 
     def test_model_numbers(self):
         ag = [types.SimpleNamespace(id=i, m=m) for i, m in enumerate(['a', 'b', 'a', 'a', 'b'])]
         self.assertEqual(server.model_numbers(ag, lambda x: x.m), {0: 'a', 1: 'b', 2: 'a-2', 3: 'a-3', 4: 'b-2'})
         self.assertEqual(server.model_numbers([], lambda x: x.m), {})
-
-    def test_pending_or_stall(self):
-        a = types.SimpleNamespace(pending={})
-        self.assertEqual(server.pending_or_stall(a, 100.0, 100.0 + server.STALL_SEC), 'running')
-        self.assertEqual(server.pending_or_stall(a, 100.0, 100.0 + server.STALL_SEC + 1), 'stalled')
-        a.pending = {'x': {'ts': 100.0}, 'y': {'ts': None}}
-        self.assertEqual(server.pending_or_stall(a, 100.0, 100.0 + server.TOOL_STALL_SEC - 1), 'running')
-        self.assertEqual(server.pending_or_stall(a, 100.0, 100.0 + server.TOOL_STALL_SEC), 'stalled')
 
     def test_codex_call(self):
         self.assertEqual(server.codex_call('custom_tool_call', {'input': 'tools.exec_command({cmd: "ls"})'}), ('exec_command', 'ls'))

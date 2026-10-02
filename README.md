@@ -2,7 +2,14 @@
 
 <p align="center"><b>English</b> · <a href="./README.ko.md">한국어</a></p>
 
-A live, read-only office view of your Claude Code and Codex agents: who is working on what, how a debate is going, what it costs. It reads the transcripts the tools already write to disk. No hooks, no install, nothing to configure.
+**Your whole agent team, at a glance.**
+
+When one Claude Code session starts sub-agents, `claude -p` runs and Codex runs, your terminal still shows a single conversation. Agent Bullpen shows the whole team on one live page: who is working, who started whom, what each agent is doing right now, and what they are saying to each other.
+
+- **Watch the team work** — agents sit at their desks while they work, gather in a room for debates and meetings, and rest in the lounge when they are done.
+- **Follow the conversation** — your conversation with the orchestrator, and a separate card for its instructions, the agents' reports and the messages agents send each other.
+- **See where things stand** — who has turned in what in each round, when the usage limit that stopped a run resets, and what each agent costs (at API list prices).
+- **No setup** — it reads the transcripts Claude Code and Codex already write. No hooks, no install, no account.
 
 ![Dashboard](docs/images/en/dashboard.png)
 
@@ -28,12 +35,16 @@ Every panel is explained in the [screen guide](docs/guide.md).
 
 ## Status / Support
 
+**Beta (0.x).** Agent Bullpen reads the private on-disk formats of the Claude Code and Codex transcripts. Their makers do not document or promise those formats, so an update of either tool can change what the dashboard sees; expect rough edges until they settle, and expect options and screens to change between 0.x releases (see the [changelog](CHANGELOG.md)). If an agent is in the wrong place, a link or a status is wrong, or a debate or meeting is not recognized, please [open an issue](https://github.com/bemong1/agent-bullpen/issues/new/choose) with the bug template. It asks for the output of `python3 tools/harvest.py <session id>`, which prints only the shape of the case (how agents were launched, how reports were written, how runs ended): no transcript text, path, time or id. `python3 server.py --version` tells which release you run.
+
 | Platform | Status |
 |---|---|
 | Linux | Verified |
-| macOS | Experimental. Verification on a Mac is pending; process detection falls back to `ps`, and `--claude-usage-api` normally has no login file to read there (see [Security & privacy](#security--privacy)). |
+| macOS | Experimental. The unit tests run on macOS in CI; it is not yet verified on a Mac. Process detection falls back to `ps`, and a few things (the list of this machine's addresses for `--host 0.0.0.0`) are written for macOS but not yet run there. |
 | WSL2 | Experimental (runs as Linux, not yet verified). |
 | Windows (native) | Not supported. |
+
+**Orchestrator.** The team view assumes a **Claude Code** orchestrator: its sub-agents and the `claude -p` and `codex exec` runs it starts are gathered under it. A Codex session is listed with its own status, tools and cost, but the runs a Codex orchestrator starts from its shell are not yet gathered under it (they appear as separate sessions or as unlinked candidates).
 
 Requires **Python 3.9+**. The standard library only: nothing to `pip install`.
 
@@ -54,8 +65,8 @@ On start the server prints the address, the folders it reads and how many sessio
 ```
 Dashboard: http://localhost:8790/
   Claude Code   ~/.claude/projects           sessions 2 · with agents 1  (default)
-  ◆ Codex       ~/.codex/sessions            last 7 days: 0  (default)
-  Usage API off · process check /proc
+  ◆ Codex       ~/.codex/sessions            standalone sessions, last 7 days: 0  (default)
+  Process check /proc
 Session a11ce000-0000-4000-8000-000000000001 loaded in 0.0s · agents 5
 ```
 
@@ -73,13 +84,28 @@ Open <http://localhost:8791>. The demo scenarios (`/game?demo=all`) also play on
 
 ### Viewing it from another device
 
-Tunnel over SSH, then open `http://localhost:8790` on the device:
+Give `--host` the address to listen on: `0.0.0.0` (every network card, so the LAN and a VPN), one address (for example the 100.x address a VPN gave this machine), `::`, or a host name. An address that is not loopback turns on an **access token**: the server makes a random one at every start and prints the addresses to open.
 
 ```bash
-ssh -L 8790:localhost:8790 you@the-machine
+python3 server.py --host 0.0.0.0
 ```
 
-The server itself keeps listening on loopback only. More (VPN addresses and their warnings): [`docs/remote.md`](docs/remote.md).
+```
+Dashboard — an access token is needed. Open one of these:
+  http://localhost:8790/?token=Qw3dJ8…
+  http://192.168.0.5:8790/?token=Qw3dJ8…
+  http://100.64.0.2:8790/?token=Qw3dJ8…
+The browser keeps the token in a cookie after the first visit, so later visits need no token. …
+```
+
+Open one of those addresses on the other device. The server sets a cookie and sends the browser on to the same address without the token, so the token does not stay in the address bar or in the history; a reload or a later visit needs nothing more, until the server is started again (see below). Without the token (or the cookie) every page and every API answers 401 with a short note; a script can send `Authorization: Bearer <token>` instead.
+
+- `--token VALUE` (or the environment variable `AGENT_BULLPEN_TOKEN`, which keeps it out of the process list) fixes the token instead of making a new one at every start. Setting one turns the check on for loopback addresses too.
+- `--no-auth` switches the check off on a non-loopback address. Then anyone who can reach the port can read your conversations, and the server says so in a framed warning.
+- The token and the cookie travel unencrypted over http. Use a network you trust (a VPN, your own LAN), never an open one, and never publish the port.
+- The other way needs no option: an SSH tunnel keeps the server on loopback, and `ssh -L 8790:localhost:8790 you@the-machine` makes it `http://localhost:8790` on the device you sit at.
+
+More (names and `--allow-host`, VPN notes, what to check when it does not open): [`docs/remote.md`](docs/remote.md).
 
 ## Options
 
@@ -92,23 +118,48 @@ python3 server.py [options]
 | `--claude-config-dir DIR` | `$CLAUDE_CONFIG_DIR`, else `~/.claude` | Claude Code config folder; transcripts are read from `DIR/projects`. |
 | `--codex-home DIR` | `$CODEX_HOME`, else `~/.codex` | Codex folder; transcripts are read from `DIR/sessions` (last 7 days). |
 | `--port PORT` | `8790` | Port to listen on. If it is taken, the server says so in one line and exits. |
-| `--host ADDR` | `127.0.0.1` | Address to listen on; may be repeated. Only loopback, `100.64.0.0/10` and `fd7a:115c:a1e0::/48` (the ranges Tailscale/NetBird-style VPNs use) are accepted; `0.0.0.0` and LAN addresses refuse to start. Anything non-loopback prints a "no authentication" warning. |
-| `--allow-host NAME` | none | Extra names accepted in the `Host` header; may be repeated. A name (`my.box`) or a suffix (`.example.net`, which matches `a.example.net` but not `example.net`). |
+| `--host ADDR` | `127.0.0.1` | Address to listen on; may be repeated. Any IP address (`0.0.0.0`, `::`, a LAN or VPN address) or a host name. Loopback has no login; any other address requires an access token ([above](#viewing-it-from-another-device)). `--host ::1` opens an IPv6 loopback listener: use `http://[::1]:8790/`. |
+| `--token VALUE` | a new random token at every start | Fixed access token: at least 16 characters, letters, digits and `. _ ~ -`. Also `AGENT_BULLPEN_TOKEN` (the option wins). Setting one turns the check on for loopback too. |
+| `--no-auth` | off | No token check, even on a non-loopback address; prints a framed warning. Cannot be combined with `--token`. |
+| `--allow-host NAME` | none | Extra names accepted in the `Host` header where there is no token check (a loopback address, or `--no-auth`); may be repeated. A name (`my.box`) or a suffix (`.example.net`, which matches `a.example.net` but not `example.net`). With a token every name is accepted. |
 | `--session ID` | most recently active orchestration, or the most recent plain conversation if there is none | Session (UUID) to open when the URL names none. |
 | `--lang CODE` | `auto`: `AGENT_BULLPEN_LANG`, then `LC_ALL`, `LC_MESSAGES`, `LANG`, else `en` | Language of the terminal output and `--help` (`en`, `ko`). The screen language is separate: the selector in the header, `?lang=`, your browser. |
-| `--claude-usage-api` | off | Query Anthropic's unofficial usage API for the Claude plan bar. See [Security & privacy](#security--privacy). |
 | `--no-link-cache` | off | Do not keep the certain session links in `links.json` (see [Security & privacy](#security--privacy)). |
+| `--version` | | Print the version and exit. |
 
 Details and precedence rules: [`docs/configuration.md`](docs/configuration.md).
 
+### Plan usage from Claude Code's status line
+
+Claude Code hands its status line command a JSON document that already holds your 5-hour and weekly usage. `statusline.py` (in this folder, standard library only) keeps just those numbers in a small file and the dashboard reads it: no request, no token read, no server option. (The dashboard never asks Anthropic for your usage itself.)
+
+```
+python3 statusline.py --print-config
+```
+
+prints the piece to merge into `~/.claude/settings.json`; it does not edit the file. If you already have a status line it is kept as the chain, so it keeps drawing as before:
+
+```json
+{
+  "statusLine": { "type": "command", "command": "python3 /path/to/agent-bullpen/statusline.py --chain '~/.claude/my-statusline.sh'" }
+}
+```
+
+(With no status line yet, the command is just `python3 /path/to/agent-bullpen/statusline.py`, which draws nothing; add `--show` for a short usage text.)
+
+- **What it leaves:** `$XDG_CACHE_HOME/agent-bullpen/statusline.json` (default `~/.cache/agent-bullpen/`, folder 0700, file 0600): `{"v":1,"at":<time received>,"rate_limits":{"five_hour":{"used_percentage":…,"resets_at":…},"seven_day":{…}}}` and nothing else, except that with a gateway account the spending limit (`spend_limit`: percentage, reset time, the dollar amounts used and allowed, and the period) is kept too. No path, session id, model, cost or instruction from the input is kept.
+- **On the screen** the plan bar shows "status line · HH:MM" in gray after the 5-hour and weekly values. Order of sources: the status line file, then the `.claude.json` cache ("recorded HH:MM · refresh with /usage"; Claude Code refreshes it when you open `/usage`). What the status line does not carry (a model's own week such as Sonnet, extra usage) always comes from that cache and is shown with the cache's own "recorded HH:MM", never under the status line's time.
+- **What it costs you:** the numbers update only while Claude Code is drawing its status line (a session is open and active). Without it the bar shows the cache, or one hint line ("Open /usage in Claude Code to see this") when there is none.
+
+Details, options (`--chain`, `--chain-timeout`, `--show`) and the exact rules: [`docs/configuration.md`](docs/configuration.md#statuslinepy-plan-usage-from-the-status-line).
+
 ## Security & privacy
 
-- **Read-only.** It never writes to your Claude Code or Codex folders (`~/.claude` and `~/.codex` by default). It reads session transcripts, plus Claude Code's `.claude.json` for the plan tier and cached usage numbers (account id and email are never sent to the page). It does not open `auth.json`, `settings*.json`, `config.toml`, `history.jsonl` or the Codex sqlite files, and it opens `.credentials.json` only if you pass `--claude-usage-api` (below).
-- **No authentication.** Anyone who can reach the port can read your conversations. By default it listens on `127.0.0.1` only. If you open it on another address, or add `--allow-host`, it prints a warning, and what happens next depends on your VPN or firewall, not on this program. Do not expose it to the internet.
-- **No outbound requests by default.** The server makes no network calls and the pages load nothing from the internet (the font is bundled). The one file it writes by default is a small link record, `links.json` in `$XDG_CACHE_HOME/agent-bullpen/` (default `~/.cache/agent-bullpen/`, mode 0600): when a child session is tied to the session that started it by firm evidence (process lineage, an environment variable, an output file or a long instruction that matches), it keeps the two session ids with the rule and time (no paths, prompts or environment values), at most 2000 links for 90 days, so that a restart does not forget the link, and it creates nothing until such a link is found. Guesses are not kept. `--no-link-cache` turns that off.
-- **`--claude-usage-api` is opt-in, unofficial, and at your own risk.** It reads the access token in `.credentials.json` in your Claude config folder (`~/.claude` by default, or `CLAUDE_CONFIG_DIR`) and calls an undocumented Anthropic endpoint (`api.anthropic.com/api/oauth/usage`) every 60 seconds; it can break or change without notice. The token is never shown, logged or sent anywhere else. It keeps the last usage numbers and reset times (no token, no account identity; mode 0600) in `$XDG_CACHE_HOME/agent-bullpen/usage.json` (default `~/.cache/agent-bullpen/`). Without the flag the bottom bar shows the cached values from `.claude.json`, labelled "recorded HH:MM · refresh with /usage", which Claude Code refreshes when you open `/usage`. If Claude Code keeps your login somewhere other than that file (on macOS it normally uses the Keychain), there is no token for the flag to read: the bar keeps showing the cached values with a yellow "No login found" note, and nothing is read from the Keychain.
+- **Read-only.** It never writes to your Claude Code or Codex folders (`~/.claude` and `~/.codex` by default). It reads session transcripts, plus Claude Code's `.claude.json` for the plan tier and cached usage numbers (account id and email are never sent to the page), and `statusline.json` if you set up the status line command (above). It does not open `auth.json`, `.credentials.json`, `settings*.json`, `config.toml`, `history.jsonl` or the Codex sqlite files: no code in the server reads a login or a token of yours.
+- **Who can open it.** On a loopback address (the default, `127.0.0.1`) there is no login: any program or user on this machine can read your conversations through the port, as they could read your files. On any other address (`--host 0.0.0.0`, a LAN or VPN address, a host name) an access token is required: random at every start, compared in constant time, shown only in the addresses printed at start (never in a log, a response or the page), and exchanged at the first visit for an `HttpOnly`, `SameSite=Strict` cookie whose value is derived from it and from a salt made at each start, so the token itself never comes back in a response and a copied cookie dies when the server is started again (even with a token fixed by `--token`). `--no-auth` removes the check and prints a framed warning; do not use it outside a network you fully control. The token and the cookie are not encrypted in transit: use a VPN or an SSH tunnel on anything you do not trust, and never expose the port to the internet.
+- **No outbound requests.** The server makes no network calls, and the pages load nothing from the internet (the font is bundled). The Claude plan bar comes from the status line file or the `.claude.json` cache, never from a request. The one file the server writes by default is a small link record, `links.json` in `$XDG_CACHE_HOME/agent-bullpen/` (default `~/.cache/agent-bullpen/`, mode 0600): when a child session is tied to the session that started it by firm evidence (process lineage, an environment variable, an output file or a long instruction that matches), it keeps the two session ids with the rule and time (no paths, prompts or environment values), at most 2000 links for 90 days, so that a restart does not forget the link, and it creates nothing until such a link is found. Guesses are not kept. `--no-link-cache` turns that off. If you register `statusline.py` as your Claude Code status line, that command (not the server) also keeps `statusline.json` in the same folder: only the 5-hour and weekly usage percentages, their reset times and the time received, mode 0600; the server only reads it.
 - **The document viewer is narrow.** It opens only files the agents wrote and files inside debate folders (`.md`, `.txt`, `.yaml`, `.json`; regular files; up to 2 MiB). It never opens credential or settings files, anything under `~/.codex`, anything with a dot folder in its path (the one exception is a Claude Code worktree, `<repo>/.claude/worktrees/<name>/`, and even there `.env`, `.git` and other dot entries stay closed), or any file whose name looks like it holds a secret (`secret`, `credential`, `password`, `token`, `apikey`, `kubeconfig…`), `.md` included. The debate table is looser: it only checks that a report file exists, so a report under a hidden folder, or one named `token_budget.md`, still counts as submitted. It just cannot be opened from the page, so keep those words out of the names of reports you want to read there.
-- **Host check.** Requests whose `Host` header is not on the allow list get a 403 (a defense against DNS rebinding).
+- **Host check.** Where there is no token check (loopback, or `--no-auth`), requests whose `Host` header is not on the allow list get a 403 (a defense against DNS rebinding). With a token every name is accepted: a page of another site has no cookie for this server.
 - **Your transcripts are in the pictures.** A screenshot of your own dashboard shows your prompts. The screenshots in this repository come from synthetic data.
 
 ## Debate folders
@@ -156,11 +207,13 @@ Couldn't start the dashboard on 127.0.0.1:8790 — the port is already in use. I
 
 An old dashboard is probably still running; open it, or pick another `--port`.
 
-**403 "Host not allowed".** You reached the server by a name it does not know (a VPN name, a reverse proxy). Restart with `--allow-host <that name>` or a suffix such as `--allow-host .example.net`. The 403 page tells you the exact flag.
+**401 "Access token required".** The address you opened has no token and the browser has no cookie for this server (a new start makes a new token, and a cookie is per browser). A fixed `--token` keeps the token but not the cookie: every start makes the cookies it issued before useless, so open the address with the token once more after a restart. Open the address the server printed at start (`http://…/?token=…`), or the one with the token you fixed with `--token`. A page that was already open when the server restarted says "Token needed · reopen the printed address" in its header (the office page says it in its red line) and goes live again once this browser has the new token.
+
+**403 "Host not allowed".** Only where there is no token check (loopback, or `--no-auth`): you reached the server by a name it does not know (a VPN name, a reverse proxy). Restart with `--allow-host <that name>` or a suffix such as `--allow-host .example.net`; the 403 page tells you the exact flag. With a token (any non-loopback `--host`) names are not checked.
 
 **The screen or the terminal is in the wrong language.** The screen follows `?lang=`, then your last pick in the header selector, then your browser's languages, then English; the terminal follows `--lang`, then `AGENT_BULLPEN_LANG`, `LC_ALL`, `LC_MESSAGES`, `LANG`, then English (details: [screen guide](docs/guide.md#language-of-the-screen-and-of-the-terminal)).
 
-**A server that will not start with `--host`.** `--host` accepts loopback and VPN ranges only. For another device use [an SSH tunnel](#viewing-it-from-another-device).
+**A server that will not start with `--host`.** The address must be one of this machine (an IP address, `0.0.0.0` or `::`) or a host name that resolves here, with no port; the message says which it was. A VPN address disappears while the VPN is down.
 
 ## Development
 

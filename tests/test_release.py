@@ -1,4 +1,4 @@
-"""Tests of release preparation (server side): usage query off by default, path settings, port first and the start output, process check (no /proc), host names, solo and sources, fonts.
+"""Tests of release preparation (server side): no usage query and no credential file, path settings, port first and the start output, process check (no /proc), host names, solo and sources, fonts.
 The tests read temporary folders only (the transcripts and credential files of the real HOME are never opened).
 
     python3 -m unittest discover -s tests
@@ -21,7 +21,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compat import patched, server, start_patches, terminal_lang  # noqa: E402
+from compat import cache_globals, isolated_env, patched, server, start_patches, terminal_lang  # noqa: E402
 from test_preserve import codex_entry  # noqa: E402
 from test_stage1 import call  # noqa: E402
 from test_stage2 import iso  # noqa: E402
@@ -61,7 +61,7 @@ class Home:
                       CODEX_NAMES=os.path.join(self.codex, 'session_index.jsonl'),
                       DENY_FILES=(os.path.join(self.claude, '.credentials.json'), os.path.join(self.home, '.claude.json'),
                                   os.path.join(self.codex, 'auth.json')),
-                      CODEX=server.CodexIndex(), LINKS=self.links)
+                      CODEX=server.CodexIndex(), LINKS=self.links, **cache_globals(self.home))
         reps = mock.patch.dict(catalog._REPS, clear=True)
         reps.start()
         case.addCleanup(reps.stop)
@@ -106,14 +106,16 @@ class Run:
         return self._read(self._err)
 
     def port(self):
+        end = time.time() + 20                         # the address line comes a moment after the words a test waits for, when the machine is busy
+        while 'http://localhost:' not in self.out() and time.time() < end and self.p.poll() is None:
+            time.sleep(0.05)
         return int(self.out().split('http://localhost:')[1].split('/')[0])
 
 
 @contextlib.contextmanager
-def live_server(args, home, extra_env=None, wait=('사용량 조회',), timeout=20):
+def live_server(args, home, extra_env=None, wait=('프로세스 판정',), timeout=20):
     """Starts server.py as a separate process, waits until the text in wait appears on stdout (or the process ends), hands over a Run, and stops it on exit."""
-    env = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CACHE_HOME', 'AGENT_BULLPEN_LOG')}
-    env.update(HOME=home, PYTHONDONTWRITEBYTECODE='1', AGENT_BULLPEN_LANG='ko')       # the terminal texts the tests wait for and read are Korean, whatever LANG the runner has
+    env = isolated_env(home, AGENT_BULLPEN_LANG='ko')       # the terminal texts the tests wait for and read are Korean, whatever LANG the runner has
     env.update(extra_env or {})
     with tempfile.TemporaryFile('w+') as out, tempfile.TemporaryFile('w+') as err:
         run = Run(subprocess.Popen([sys.executable, server.__file__] + list(args), stdout=out, stderr=err, env=env, stdin=subprocess.DEVNULL), out, err)
@@ -133,7 +135,7 @@ def live_server(args, home, extra_env=None, wait=('사용량 조회',), timeout=
             run.out_text, run.err_text, run.code = run.out(), run.err(), run.p.returncode
 
 
-def run_server(args, home, extra_env=None, wait=('사용량 조회',), timeout=20):
+def run_server(args, home, extra_env=None, wait=('프로세스 판정',), timeout=20):
     """The result of starting live_server and stopping it right away: (stdout, stderr, exit code)."""
     with live_server(args, home, extra_env, wait, timeout) as run:
         pass
@@ -173,7 +175,6 @@ def main_env(case, home, run_inline=True):
         st.enter_context(mock.patch.object(server.LINKS, 'scan', lambda: None))
         st.enter_context(patched(REG=types.SimpleNamespace(get=lambda sid: None, loop=lambda: None)))
         st.enter_context(mock.patch.dict(server.main.__globals__, {'DEFAULT_SESSION': None, 'FIXED_DEFAULT': None}))
-        st.enter_context(mock.patch.object(server.CL_USAGE, 'enabled', False))
         st.enter_context(mock.patch.object(server, 'ALLOWED_HOSTS', set(server.ALLOWED_HOSTS)))
         st.enter_context(mock.patch.object(server, 'ALLOWED_SUFFIXES', set()))
         yield targets
@@ -193,8 +194,8 @@ def run_main(argv, servers=None, lang='ko', keep=False):
     return out.getvalue(), err.getvalue(), code
 
 
-# ---------- 1. usage query off by default ----------
-class UsageOffByDefault(unittest.TestCase):
+# ---------- 1. no usage query: no credential file is opened and nothing goes out ----------
+class NoUsageQuery(unittest.TestCase):
     def setUp(self):
         self.h = Home(self)
         write(os.path.join(self.h.claude, '.credentials.json'), json.dumps({'claudeAiOauth': {'accessToken': 'FAKE', 'expiresAt': (time.time() + 3600) * 1000}}))
@@ -204,44 +205,48 @@ class UsageOffByDefault(unittest.TestCase):
         plans._CL_CONF.update(key=None, v=None)
         self.addCleanup(plans._CL_CONF.update, key=None, v=None)
 
-    def test_default_never_opens_credentials_or_calls_the_api(self):
+    def test_main_never_opens_credentials_or_calls_the_api(self):
         opened, real_open = [], builtins.open
 
         def spy(path, *a, **kw):
             opened.append(os.fspath(path) if isinstance(path, (str, bytes, os.PathLike)) else path)
             return real_open(path, *a, **kw)
-        usage_state = os.path.join(self.h.home, '.cache', 'agent-bullpen', 'usage.json')
         with main_env(self, self.h, run_inline=True) as targets, mock.patch.object(builtins, 'open', spy), \
-                mock.patch('urllib.request.urlopen', side_effect=AssertionError('urlopen 호출')), \
-                mock.patch.object(plans, 'USAGE_STATE', usage_state), mock.patch.object(server.CL_USAGE, 'state', usage_state):
+                mock.patch('urllib.request.urlopen', side_effect=AssertionError('urlopen 호출')):
             out, err, code = run_main(['--port', '0'], servers=[FakeServer()])
             plan = server.plan_status()['claude']
-            server.CL_USAGE.loop()                  # even if the thread were started by mistake, it does nothing while it is off
         self.assertIsNone(code)
-        self.assertNotIn(server.CL_USAGE.loop, targets)
         self.assertEqual([p for p in opened if p.endswith(('.credentials.json', 'usage.json'))], [])
-        self.assertFalse(os.path.exists(usage_state))
         self.assertEqual(err, '')
-        self.assertIn('사용량 조회 꺼짐', out)
-        self.assertEqual((plan['usage_api'], plan['source'], plan['error']), (False, 'cache', None))
+        self.assertNotIn('사용량 조회', out)
+        self.assertEqual(plan['source'], 'cache')
         self.assertEqual(plan['five_hour']['percent'], 12.0)           # the bottom bar value comes from the .claude.json cache
+        self.assertEqual(set(plan) & {'usage_api', 'error', 'error_info'}, set())
 
-    def test_flag_starts_the_thread_and_prints_the_notice(self):
-        with main_env(self, self.h, run_inline=False) as targets:
-            out, err, code = run_main(['--port', '0', '--claude-usage-api'], servers=[FakeServer()])
-            self.assertTrue(server.CL_USAGE.enabled)
-        self.assertIn(server.CL_USAGE.loop, targets)
-        self.assertEqual(err.count('\n'), 1)                           # one notice line (stderr)
-        self.assertIn('--claude-usage-api', err)
-        self.assertIn('.credentials.json', err)
-        self.assertIn('사용량 조회 켬', out)
+    def test_the_old_flag_ends_with_a_pointer_to_the_status_line_command(self):
+        for lang, words in (('ko', ('없어졌습니다', 'statusline.py --print-config', 'docs/configuration.md')),
+                            ('en', ('no longer exists', 'statusline.py --print-config', 'docs/configuration.md'))):
+            srv = FakeServer()
+            with main_env(self, self.h, run_inline=False) as targets:
+                out, err, code = run_main(['--port', '0', '--claude-usage-api'], servers=[srv], lang=lang)
+            self.assertEqual(code, 2, lang)
+            self.assertEqual(out, '')
+            for w in words:
+                self.assertIn(w, err, lang)
+            self.assertEqual(targets, [])                              # nothing was started: no thread, no scan
+            self.assertFalse(srv.closed)                               # and no port was opened for it either
 
-    def test_enabled_uses_the_api_value_when_newer(self):
-        u = plans.ClaudeUsage(os.path.join(self.h.home, 'u.json'))
-        u.enabled, u.v = True, {'as_of': time.time(), 'five_hour': {'percent': 40.0, 'resets_at': None}, 'seven_day': None, 'scoped': [], 'extra': None}
-        with patched(CL_USAGE=u):
-            plan = server.plan_status()['claude']
-        self.assertEqual((plan['usage_api'], plan['source'], plan['five_hour']['percent']), (True, 'api', 40.0))
+    def test_the_old_flag_is_not_in_the_help(self):
+        out, err, code = run_server(['--help'], self.h.home, wait=('zzz',))                  # it ends by itself: nothing to stop (stopping it after its first words races its exit)
+        self.assertEqual(code, 0)
+        self.assertNotIn('usage-api', out)
+        self.assertIn('--token', out)
+
+    def test_the_old_flag_end_to_end(self):
+        out, err, code = run_server(['--port', '0', '--claude-usage-api'], self.h.home, wait=('zzz',), timeout=5)
+        self.assertEqual((out, code), ('', 2))
+        self.assertIn('statusline.py', err)
+        self.assertFalse(os.path.exists(os.path.join(self.h.home, '.cache')))
 
     def test_no_claude_json_means_no_claude_entry(self):
         os.remove(os.path.join(self.h.home, '.claude.json'))
@@ -256,41 +261,28 @@ class UsageOffByDefault(unittest.TestCase):
             self.assertEqual(server.plan_status()['claude']['plan'], 'Pro')     # the one inside the folder comes first
 
 
-class UsageFlagEndToEnd(unittest.TestCase):
-    """A separate process: in an empty HOME (no credential file) the default makes no query, and with the flag it starts querying (there is no credential file, so no HTTP call is made)."""
+class NoCredentialOrNetworkCode(unittest.TestCase):
+    """The sources of the server hold no code that opens a login file or talks to the outside: the credentials file is named only in the never-open list of
+    board/util.py, and no module imports an HTTP client."""
+    FILES = ['server.py', 'statusline.py'] + sorted(os.path.join('board', f) for f in os.listdir(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'board')) if f.endswith('.py'))
 
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.home = os.path.join(os.path.realpath(self.tmp.name), 'h')
-        write(os.path.join(self.home, '.claude.json'), '{}')
-        os.makedirs(os.path.join(self.home, '.claude', 'projects'))
+    def sources(self):
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for rel in self.FILES:
+            with open(os.path.join(root, rel), encoding='utf-8') as f:
+                yield rel, f.read()
 
-    def plans_of(self, run, wait_error=False):
-        port = run.port()
-        for _ in range(100):
-            c = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
-            c.request('GET', '/api/plans', headers={'Host': 'localhost:%d' % port})
-            plan = json.loads(c.getresponse().read())['claude']
-            if not wait_error or plan['error']:
-                return plan
-            time.sleep(0.1)
-        return plan
+    def test_the_credentials_file_is_named_only_in_the_never_open_list(self):
+        named = {rel: text.count('.credentials.json') for rel, text in self.sources() if '.credentials.json' in text}
+        self.assertEqual(named, {os.path.join('board', 'util.py'): 1})
+        util_src = dict(self.sources())[os.path.join('board', 'util.py')]
+        line = next(ln for ln in util_src.splitlines() if '.credentials.json' in ln)
+        self.assertIn("'DENY_FILES'", line)
 
-    def test_default(self):
-        usage_json = os.path.join(self.home, '.cache', 'agent-bullpen', 'usage.json')
-        with live_server(['--port', '0'], self.home) as run:
-            plan = self.plans_of(run)
-        self.assertEqual((plan['usage_api'], plan['source'], plan['error']), (False, 'cache', None))
-        self.assertEqual(run.err_text, '')
-        self.assertFalse(os.path.exists(usage_json))
-
-    def test_flag(self):
-        with live_server(['--port', '0', '--claude-usage-api'], self.home) as run:
-            plan = self.plans_of(run, wait_error=True)
-        self.assertTrue(plan['usage_api'])
-        self.assertEqual(plan['error'], '로그인 정보 없음')                 # the query started (it stops here because there is no credential file)
-        self.assertIn('--claude-usage-api', run.err_text)
+    def test_no_http_client_is_imported(self):
+        banned = ('urllib.request', 'urlopen', 'http.client', 'HTTPSConnection', 'HTTPConnection', 'create_connection', 'import requests', 'import ssl', 'import smtplib')
+        found = [(rel, word) for rel, text in self.sources() for word in banned if word in text]
+        self.assertEqual(found, [])
 
 
 # ---------- 2. path settings ----------
@@ -438,7 +430,7 @@ class PathsEndToEnd(unittest.TestCase):
         codex = next(ln for ln in lines if 'Codex' in ln)
         self.assertIn('폴더 없음', codex)
         self.assertIn('(CODEX_HOME)', codex)
-        self.assertTrue(any(ln.startswith('  사용량 조회 꺼짐 · 프로세스 판정') for ln in lines))
+        self.assertTrue(any(ln.startswith('  프로세스 판정') for ln in lines))
 
     def test_defaults_under_home(self):
         self.make_claude(os.path.join(self.home, '.claude'), 1, 1)
@@ -461,32 +453,29 @@ class PortFirst(unittest.TestCase):
     def tripwires(self):
         boom = mock.Mock(side_effect=AssertionError('포트를 못 연 뒤에는 아무것도 시작하지 않는다'))
         return [mock.patch.object(server, 'scan_sessions', boom), mock.patch.object(server.LINKS, 'scan', boom),
-                mock.patch.object(server.threading, 'Thread', boom), mock.patch.object(server.CL_USAGE, 'loop', boom),
+                mock.patch.object(server.threading, 'Thread', boom),
                 patched(REG=types.SimpleNamespace(get=boom, loop=boom))]
 
     def test_conflict_is_one_line_and_exit_1(self):
-        for extra in ([], ['--claude-usage-api']):
-            with contextlib.ExitStack() as st:
-                for t in self.tripwires():
-                    st.enter_context(t)
-                out, err, code = run_main(['--port', str(self.port), '--host', '127.0.0.1'] + extra)
-            self.assertEqual(code, 1)
-            self.assertEqual(out, '')
-            self.assertEqual(err.count('\n'), 1, err)                                  # one line
-            self.assertIn('127.0.0.1:%d' % self.port, err)                            # address and port
-            self.assertIn('--port %d' % (self.port + 1), err)                         # the alternative
-            self.assertIn('http://localhost:%d/' % self.port, err)
-        self.assertFalse(server.CL_USAGE.enabled)                                     # it was not even turned on
+        with contextlib.ExitStack() as st:
+            for t in self.tripwires():
+                st.enter_context(t)
+            out, err, code = run_main(['--port', str(self.port), '--host', '127.0.0.1'])
+        self.assertEqual(code, 1)
+        self.assertEqual(out, '')
+        self.assertEqual(err.count('\n'), 1, err)                                  # one line
+        self.assertIn('127.0.0.1:%d' % self.port, err)                            # address and port
+        self.assertIn('--port %d' % (self.port + 1), err)                         # the alternative
+        self.assertIn('http://localhost:%d/' % self.port, err)
 
     def test_conflict_end_to_end(self):
         with tempfile.TemporaryDirectory() as home:
-            write(os.path.join(home, '.claude', '.credentials.json'), '{}')
-            out, err, code = run_server(['--port', str(self.port), '--claude-usage-api'], home)
+            out, err, code = run_server(['--port', str(self.port)], home)
             self.assertEqual(code, 1)
             self.assertEqual(out, '')
             self.assertEqual(err.count('\n'), 1)
             self.assertIn('--port', err)
-            self.assertFalse(os.path.exists(os.path.join(home, '.cache')))            # the usage thread (usage.json) was not started either
+            self.assertFalse(os.path.exists(os.path.join(home, '.cache')))            # nothing was started: no scan, no link record
 
     def test_second_host_failure_closes_the_first(self):
         opened = []
@@ -562,21 +551,23 @@ class StartupOutput(unittest.TestCase):
 
     def test_non_loopback_allow_host_warns(self):
         _, err, _, (hosts, suffixes) = self.run_with(['--port', '0', '--allow-host', 'box.example.net', '--allow-host', '.tail1234.ts.net'])
-        self.assertEqual(err.count('\n'), 1)
-        self.assertIn('인증 없음', err)
+        self.assertEqual(err.count('\n'), 4)                                         # a framed notice: bar, title, text, bar
+        self.assertEqual(err.splitlines()[0], '!' * 72)
+        self.assertIn('경고 — 인증 없음', err)
         self.assertIn('허용한 이름 box.example.net, .tail1234.ts.net', err)
         self.assertNotIn('열린 주소', err)
         self.assertIn('box.example.net', hosts)
         self.assertEqual(suffixes, ['.tail1234.ts.net'])
 
-    def test_non_loopback_host_warns(self):
+    def test_no_auth_on_a_non_loopback_host_warns_loudly(self):
         with main_env(self, self.h):
-            out, err, code = run_main(['--port', '0', '--host', '127.0.0.1', '--host', '100.100.0.7'], servers=[FakeServer(), FakeServer()])
-        self.assertEqual(err.count('\n'), 1)
-        self.assertIn('인증 없음', err)
+            out, err, code = run_main(['--port', '0', '--host', '127.0.0.1', '--host', '100.100.0.7', '--no-auth'], servers=[FakeServer(), FakeServer()])
+        self.assertEqual(err.count('\n'), 4)
+        self.assertIn('경고 — 인증 없음', err)
         self.assertIn('열린 주소 100.100.0.7', err)
         self.assertNotIn('허용한 이름', err)
         self.assertEqual(out.count('현황판: http://'), 2)
+        self.assertNotIn('token', out)
 
     def test_counts_and_sources(self):
         self.h.session(SID[0], t=time.time() - 50, agents=1)
@@ -587,7 +578,7 @@ class StartupOutput(unittest.TestCase):
         self.assertIn('세션 3 · 에이전트 있는 세션 1', claude)
         self.assertIn('~/.claude/projects', claude)
         codex = next(ln for ln in out.splitlines() if 'Codex' in ln)
-        self.assertIn('최근 7일 0', codex)
+        self.assertIn('단독 대화, 최근 7일: 0', codex)
 
 
 # ---------- 4. process check ----------
@@ -602,7 +593,8 @@ PS_OUT = (b'    1 /sbin/launchd\n'
 def masked_proc(ps_out=PS_OUT):
     """A place without /proc (imitating macOS): PROC points at a missing folder, and the ps output is the given one (None means ps cannot be used)."""
     procs.reset()
-    with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(procs, '_run_ps', lambda: ps_out):
+    with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(procs, '_run_ps', lambda: ps_out), \
+            mock.patch.object(procs, 'uid', lambda pid: os.geteuid()):                     # the owner `ps` would name: the user of the test (the real ps table is another machine's)
         try:
             yield
         finally:
@@ -678,21 +670,26 @@ class ProcsMasked(unittest.TestCase):
             self.assertIsNone(cx_alive(other))                      # unknown if the list cannot be obtained
             self.assertIs(cx_alive(done), False)
 
-    def test_codex_status_does_not_end_on_unknown(self):
+    def test_codex_verdict_does_not_end_on_unknown(self):
+        """The judgment the page uses (CodexLinker.verdict): a rollout whose process cannot be seen is `unknown` once it has been quiet, never `ended`."""
         s = server.Session.__new__(server.Session)
+        s.agents = {}
         linker = server.CodexLinker(s)
         a = server.CodexAgent(codex_entry(5), {})
         a.spawn_ts, a.last_ts = 1000.0, 1000.0
         now = 1000.0 + 120                                                  # quiet for more than 60 seconds
         with masked_proc():                                                 # another codex is running and the open files are unknown
-            self.assertEqual(linker.status(a, True, now), 'running')
+            self.assertEqual(linker.verdict(a, now).status, 'unknown')
+            self.assertEqual(linker.verdict(a, 1000.0 + 30).status, 'running')     # still growing: no reason to doubt it
         with masked_proc(None):
-            self.assertEqual(linker.status(a, True, now), 'running')
+            self.assertEqual(linker.verdict(a, now).status, 'unknown')
+            self.assertEqual(linker.verdict(a, 1000.0 + 30).status, 'running')
         with masked_proc(PS_OUT.replace(b'codex', b'xxxxx')):               # it is certain that there is no codex at all
-            self.assertEqual(linker.status(a, True, now), 'ended')
-        pr = {'ts': 10 ** 12, 'cmd': [], 'fds': set(), 'any': True}         # Linux (knows the fds too): ended if not open (as it is now)
+            v = linker.verdict(a, now)
+            self.assertEqual((v.status, v.reason), ('ended', 'crash'))
+        pr = {'ts': 10 ** 12, 'cmd': [], 'fds': set(), 'any': True}         # Linux (knows the fds too): ended if not open
         with patched(cx_procs=lambda: pr):
-            self.assertEqual(linker.status(a, True, now), 'ended')
+            self.assertEqual(linker.verdict(a, now).status, 'ended')
 
 
 class ClaudeAliveMasked(unittest.TestCase):

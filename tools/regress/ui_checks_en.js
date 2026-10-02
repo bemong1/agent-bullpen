@@ -1,7 +1,7 @@
 // English-screen checks of static/index.html and static/game.html on one saved fixture (the fake browser of ui_checks.js, no npm, no browser).
 // The page is booted in English from the dictionary on disk and every text it writes to the screen is recorded (innerHTML, textContent, title, document.title).
 //  - cards: the orchestrator, token, agent, feed, talk and agent-talk cards, the header chips, the alerts; the agent drawer in all four tabs
-//  - the diagnosis card (empty HOME with every origin, server off, 403, 500, no answer, missing session) and the plan bar (errors by error_info, Codex limit)
+//  - the diagnosis card (empty HOME with every origin, server off, 403, 500, no answer, missing session) and the plan bar (sources, Codex limit)
 //  - the new server fields: a title from title_i18n (the old Korean title is not shown), notify status, questions, alerts, error_info
 //  - no Hangul outside data (data = text that came from the transcript or the fixture: Korean data is injected and must show unchanged), no [key], I18N.missing empty
 // Expected words are never typed here: they are read from the running page's own t('key'), so the dictionary can be edited without touching this file;
@@ -114,7 +114,7 @@ const EMPTY = over => ({ default: '', sessions: [], projects: [], sources: [Obje
 
   // ---------- 2) cards ----------
   const orch = P.html('#orchCard'), tok = P.html('#tokCard');
-  check('card: orchestrator card says Orchestrator (common.orchestrator) and none of the status words is a key', shows(orch, P.T('common.orchestrator')) && shows(orch, P.T(STATE.orch.state === 'working' ? 'status.running' : 'status.idle')), orch.slice(0, 200));
+  check('card: orchestrator card says Orchestrator (common.orchestrator) and none of the status words is a key', shows(orch, P.T('common.orchestrator')) && shows(orch, P.T(STATE.orch.state === 'working' ? 'status.running' : STATE.agents.some(a => a.status === 'running' || a.status === 'stalled') ? 'board.orch.waiting' : 'board.orch.idle')), orch.slice(0, 200));
   check('card: token card has its title (board.tok.title) and a dollar total', shows(tok, P.T('board.tok.title')) && /\$\d/.test(tok), tok.slice(0, 200));
   P.run("ui.oldOpen = true; ui.agentFilter = 'all'; renderAgents()");
   const list = P.html('#agentList');
@@ -252,27 +252,37 @@ const EMPTY = over => ({ default: '', sessions: [], projects: [], sources: [Obje
   P = makePage('index.html'); await P.load();
   const bar = c => { P.run('renderPlanBar(' + JSON.stringify({ now: STATE.now, claude: c, codex: null }) + ')'); return P.html('#planBar'); };
   const W = (pct, d) => ({ percent: pct, resets_at: STATE.now + d });
-  const base = { source: 'cache', error: null, error_info: null, plan: 'Max 5x', scoped: [], extra: null, hits: {}, usage_api: true, as_of: STATE.now - 30, five_hour: W(12, 3600), seven_day: W(40, 86400 * 3) };
+  const base = { source: 'cache', plan: 'Max 5x', scoped: [], extra: null, hits: {}, as_of: STATE.now - 30, five_hour: W(12, 3600), seven_day: W(40, 86400 * 3) };
   let h = bar(base);
-  check('plan bar: names, percentages and the "fetched" time are English words and numbers', shows(h, P.T('board.planbar.five')) && shows(h, P.T('board.planbar.week')) && h.includes('12%') && h.includes('40%') && /\d\d:\d\d/.test(h), h.slice(0, 250));
-  for (const [code, params] of [['http_error', { status: 429 }], ['http_error', { status: 500 }], ['login_missing', {}], ['token_expired', {}], ['fetch_failed', { error: 'URLError' }]]) {
-    h = bar(Object.assign({}, base, { error: '조회 실패(' + code + ')', error_info: { code, params } }));
-    check(`plan bar: error_info ${code}${params.status ? ' ' + params.status : ''} shows plan.error.${code}, not the old Korean error`, shows(h, P.T('plan.error.' + code, params)) && !h.includes('조회 실패') && !HAN.test(h), h.slice(0, 300));
-  }
-  h = bar(Object.assign({}, base, { error: '조회 실패(HTTP 429)', error_info: { code: 'brand_new_code', params: {} } }));
-  check('plan bar: an error code the dictionary lacks falls back to the old error text (never a [key])', h.includes('조회 실패(HTTP 429)') && !KEY.test(h), h.slice(0, 300));
-  h = bar(Object.assign({}, base, { error: '조회 실패(HTTP 500)', error_info: null }));
-  check('plan bar: an older server without error_info still shows its Korean error', h.includes('조회 실패(HTTP 500)'), h.slice(0, 300));
-  h = bar(Object.assign({}, base, { usage_api: false, as_of: STATE.now - 3000, error: '조회 실패(HTTP 429)', error_info: { code: 'http_error', params: { status: 429 } } }));
-  check('plan bar: usage API off + cache: the "recorded … refresh with /usage" line, and no error even if one was sent', shows(h, P.T('board.planbar.recordedRefresh', { time: P.run(`I18N.date(${STATE.now - 3000}, 'time')`) })) && !h.includes('class="warn"'), h.slice(0, 300));
-  h = bar(Object.assign({}, base, { usage_api: false, as_of: null, five_hour: null, seven_day: null }));
-  check('plan bar: usage API off + no cache: the one gray "open /usage" line', shows(h, P.T('board.planbar.noCache')), h);
+  check('plan bar: names, percentages and the "recorded" time are English words and numbers', shows(h, P.T('board.planbar.five')) && shows(h, P.T('board.planbar.week')) && h.includes('12%') && h.includes('40%') && /\d\d:\d\d/.test(h), h.slice(0, 250));
+  h = bar(Object.assign({}, base, { error: '조회 실패(HTTP 500)', error_info: { code: 'http_error', params: { status: 500 } } }));
+  check('plan bar: `error` / `error_info` from an older server are never drawn (no yellow line, no Korean, no [key])', !h.includes('class="warn"') && !h.includes('조회 실패') && !HAN.test(h) && !KEY.test(h), h.slice(0, 300));
+  h = bar(Object.assign({}, base, { as_of: STATE.now - 3000 }));
+  check('plan bar: cache: the "recorded … refresh with /usage" line', shows(h, P.T('board.planbar.recordedRefresh', { time: P.run(`I18N.date(${STATE.now - 3000}, 'time')`) })) && !h.includes('class="warn"'), h.slice(0, 300));
+  h = bar(Object.assign({}, base, { as_of: null, five_hour: null, seven_day: null }));
+  check('plan bar: no cache: the one gray "open /usage" line', shows(h, P.T('board.planbar.noCache')), h);
+  const sl = Object.assign({}, base, { source: 'statusline', as_of: STATE.now - 20, five_hour: W(42.3, 3600) });
+  const slTime = P.run(`I18N.date(${STATE.now - 20}, 'time')`);
+  h = bar(sl);
+  check('plan bar: status line source shows "status line · HH:MM" with its tooltip (board.planbar.statusline), not "recorded" / the /usage hint', shows(h, P.T('board.planbar.statusline', { time: slTime })) && shows(h, P.T('board.planbar.statuslineTitle')) && h.includes('42%')
+    && !shows(h, P.T('board.planbar.recordedRefresh', { time: slTime })) && !shows(h, P.T('board.planbar.noCache')) && !h.includes('class="warn"') && !HAN.test(h), h.slice(0, 400));
+  h = bar(Object.assign({}, sl, { five_hour: { percent: null, resets_at: STATE.now - 5 } }));
+  check('plan bar: a status line window that has reset shows a dash and the board.planbar.statuslineStale tooltip (not the /usage one)', h.includes('<b>—</b>') && shows(h, P.T('board.planbar.statuslineStale', { time: slTime })) && !shows(h, P.T('board.planbar.staleTitle', { time: slTime })), h.slice(0, 400));
+  const mixed = Object.assign({}, sl, { scoped: [{ name: 'Sonnet', percent: 33, resets_at: STATE.now + 86400 }], extra: { enabled: true, used: 1234, limit: 5000 } });
+  h = bar(mixed);
+  check('plan bar: status line source, cache cells without a cache time: the model week and extra usage are hidden, not drawn under the status line label', !h.includes('Sonnet') && !h.includes('$12.34') && shows(h, P.T('board.planbar.statusline', { time: slTime })), h.slice(0, 400));
+  const cacheAt = STATE.now - 90000, recTime = P.run(`hm(${cacheAt})`);
+  h = bar(Object.assign({}, mixed, { cache_as_of: cacheAt }));
+  const iSl = h.indexOf(P.T('board.planbar.statusline', { time: slTime })), iSon = h.indexOf('Sonnet'), iRec = h.indexOf(P.T('board.planbar.recorded', { time: recTime }));
+  check('plan bar: status line source, cache cells with their own time: status line label, then the cache cells, then board.planbar.recorded with its own date and time (no /usage refresh line)', iSl > 0 && iSon > iSl && iRec > iSon && shows(h, P.T('board.planbar.cacheTitle')) && !shows(h, P.T('board.planbar.recordedRefresh', { time: recTime })) && !HAN.test(h) && !KEY.test(h), h.slice(0, 600));
+  h = bar(Object.assign({}, sl, { cache_as_of: cacheAt }));
+  check('plan bar: status line source with a cache time but no cache cells: no stray "recorded" label', !shows(h, P.T('board.planbar.recorded', { time: recTime })), h.slice(0, 300));
   const cxBar = x => { P.run('renderPlanBar(' + JSON.stringify({ claude: null, codex: Object.assign({ plan_type: 'prolite', window_minutes: 10080, secondary: null, credits: null, as_of: STATE.now - 60 }, x) }) + ')'); return P.html('#planBar'); };
   const cxHits = [cxBar({ reached: true, stale: false, resets_at: STATE.now + 3600, used_percent: 100 }), cxBar({ reached: false, stale: false, resets_at: STATE.now + 3600, used_percent: 42 }),
     cxBar({ reached: false, stale: true, resets_at: STATE.now - 3600, used_percent: 42 }), cxBar({ reached: false, stale: false, resets_at: STATE.now + 3600, used_percent: 42, credits: { has_credits: true, unlimited: false, balance: '12.5' } })];
   check('plan bar: the Codex limit in four states (reached, percent, stale estimate, credits) has no Korean and no [key]; a percentage shows when fresh', cxHits.every(x => x && !HAN.test(x) && !KEY.test(x)) && cxHits[1].includes('42%') && !cxHits[2].includes('42%'), cxHits.map(x => x.slice(-160)));
   check('plan bar: a stale Codex value shows a dash, the estimate note and the "reset since the last record" tooltip (board.planbar.cxStaleTitle)', cxHits[2].includes('<b>—</b>') && shows(cxHits[2], P.T('board.planbar.cxStaleTitle')) && /\(est\.\)|est\./.test(P.T('board.planbar.estimate', { time: '0' })) === /\(est\.\)|est\./.test(cxHits[2]), cxHits[2].slice(-200));
-  clean('plan bar (the two old-server Korean errors shown above are data from an older server: excluded)', P, ['조회 실패(HTTP 429)', '조회 실패(HTTP 500)']);
+  clean('plan bar (the old-server Korean error shown above is data from an older server: excluded)', P, ['조회 실패(HTTP 500)']);
 
   // ---------- 7) the diagnosis card: every kind, in English ----------
   const diag = P_ => P_.html('#diag');
@@ -292,6 +302,8 @@ const EMPTY = over => ({ default: '', sessions: [], projects: [], sources: [Obje
   diagChecks('server off', P, 'diag.down.title', 'diag.label.down');
   P = makePage('index.html', { search: '', sessions: SESSIONS }); P.status = { 'api/sessions': 403 }; await P.load();
   check('diagnosis 403 (text/plain body): the card says the server refused and shows the server\'s line of the page language only (the body has one line per language: the first is English)', shows(diag(P), P.T('diag.http.title', { status: 403 })) && diag(P).includes('ERR-403 plain') && !diag(P).includes('second line') && shows(P.html('#updated'), P.T('diag.label.http')) && !HAN.test(diag(P)), diag(P).slice(0, 300));
+  P = makePage('index.html', { search: '', sessions: SESSIONS }); P.status = { 'api/sessions': 401 }; await P.load();
+  check('diagnosis 401 (JSON body): the card says the server wants an access token (diag.http.token401) and not the raw error text', shows(diag(P), P.T('diag.http.title', { status: 401 })) && shows(diag(P), P.T('diag.http.token401')) && !diag(P).includes('ERR-401') && !HAN.test(diag(P)), diag(P).slice(0, 300));
   P = makePage('index.html', { search: '', sessions: SESSIONS }); P.status = { 'api/sessions': 500 }; await P.load();
   check('diagnosis 500 (JSON body): the title uses the status, the server\'s error text is data', shows(diag(P), P.T('diag.http.title', { status: 500 })) && diag(P).includes('ERR-500') && !HAN.test(diag(P)), diag(P).slice(0, 300));
   P = makePage('index.html', { search: '', sessions: SESSIONS }); P.hang = /api\/sessions/; await P.load(); P.fire(10000, 10000); await sleep(30);
@@ -303,6 +315,10 @@ const EMPTY = over => ({ default: '', sessions: [], projects: [], sources: [Obje
   P = makePage('index.html'); await P.load(); P.down = true; await P.run('tick()'); await sleep(20);
   check('later outage (after a session was shown): the header says Disconnected (board.live.down), the board stays and no diagnosis card replaces it', shows(P.html('#updated'), P.T('board.live.down', { sec: P.run('Math.round((Date.now() - lastOk) / 1000)') })) && /dead/.test(P.html('#updated')) && P.html('#diag') === '', P.html('#updated'));
   clean('later outage', P);
+  P = makePage('index.html'); await P.load(); P.status = { 'api/state': 401 }; await P.run('tick()'); await sleep(20);
+  check('later 401 (server restarted, new token): the header says the token is needed (board.live.token401) with the diag.http.token401 sentence as tooltip, not Disconnected; the board stays',
+    shows(P.html('#updated'), P.T('board.live.token401')) && shows(P.html('#updated'), P.T('diag.http.token401')) && /dead/.test(P.html('#updated')) && !shows(P.html('#updated'), P.T('board.live.down', { sec: 0 }).split(' (')[0]) && !P.html('#updated').includes('ERR-401') && P.html('#diag') === '' && P.run('!!S'), P.html('#updated'));
+  clean('later 401', P);
 
   // ---------- 8) Korean data passes through unchanged and is the only Hangul ----------
   const KO = { session: '한글 세션 제목', agent: '한글 에이전트 설명', say: '한글로 쓴 사용자 지시입니다', topic: '한글 주제 제목' };
@@ -325,6 +341,9 @@ const EMPTY = over => ({ default: '', sessions: [], projects: [], sources: [Obje
   check('game.html in English: the page runs in English, the header and the cost chip are English words and a dollar amount', P.run('I18N.lang') === 'en' && /\$\d/.test(P.text('#cost')) && shows(P.ctx.document.title, P.T('office.page.title')) && !HAN.test(P.text('#cost') + P.text('#upd')), [P.text('#cost'), P.ctx.document.title]);
   check('game.html in English: the selector is wired (current language en)', P.els.get('#langSel').value === 'en', P.els.get('#langSel').value);
   clean('game.html', P);
+  P.status = { 'api/state': 401 }; await P.run('tick()'); await sleep(20);
+  check('game.html later 401 (server restarted, new token): the red line is the token sentence (diag.http.token401), not "Server not responding"', shows(P.text('#err'), P.T('diag.http.token401')) && P.els.get('#err').style.display === 'block' && !shows(P.text('#err'), P.T('office.err.noResponse', { message: '401' }).split(' (')[0]), P.text('#err'));
+  clean('game.html later 401', P);
   P = makePage('game.html', { search: '', sessions: EMPTY() }); P.status = { 'api/state': 404 }; await P.load();
   check('game.html first screen: the diagnosis card is the same English card (no sessions to open)', shows(diag(P), P.T('diag.empty.title')) && !HAN.test(diag(P)), diag(P).slice(0, 200));
   clean('game.html diagnosis', P);

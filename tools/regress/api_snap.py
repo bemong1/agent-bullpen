@@ -1,9 +1,10 @@
 # Compare Agent Bullpen API responses of two ports (old A, new B) for the given sessions.
 # usage: python3 api_snap.py [--raw] 8811 8812 <sid> [<sid> ...]
-# The only differences accepted are the fields that the language edition and the status and link work add (API_SNAP_ALLOW below); --raw accepts none (every added field is a DIFF, as before the English edition).
+# The only differences accepted are the fields that the language edition, the status and link work and the work rooms add (API_SNAP_ALLOW below); --raw accepts none (every added field is a DIFF, as before the English edition).
 # Not accepted, on purpose, and so a DIFF for a session that has them: a new VALUE of an old field (agents[].status `interrupted`/`unknown`, orch.state `limit_wait`), a state that no longer reads as before
 # (an agent that is now judged by its own error line), and the system lines (kind `sys`) that the feed and /api/talk now carry for the API-error lines of the record: they make the list longer and move every
 # later event number (`idx`). Compare against a session whose record has none of these, or read the DIFF as the intended change.
+# Also not accepted: the fields that went away with the account usage query (/api/plans claude: `usage_api`, `error`, `error_info`), so an older server shows a DIFF there.
 import json, sys, time, urllib.request, urllib.parse, urllib.error
 from collections import Counter
 DROP_TOP = {'now', 'version', 'boot'}
@@ -18,7 +19,6 @@ API_SNAP_ALLOW = [
     ('alert title_i18n / text_i18n', lambda x, endpoint, path: all(k in x for k in ('level', 'title', 'id', 'ts')), ('title_i18n', 'text_i18n')),
     ('alert title_params (the grouped limit notice)', lambda x, endpoint, path: all(k in x for k in ('level', 'title', 'id', 'ts')), ('title_params',)),
     ('tokens model_costs', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'tokens' and 'models' in x, ('model_costs',)),
-    ('plans claude.error_info', lambda x, endpoint, path: endpoint == 'api/plans' and path == '/claude', ('error_info',)),
     ('JSON error error_code', lambda x, endpoint, path: path == '' and 'error' in x, ('error_code',)),
     # /api/state: what each agent says about how it stopped and where it hangs, how sure its link is, the orchestrator waiting on a limit, the count of diagnostics
     ('agent reason / resets_at / node / by / parent / runs / work_units', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'agents[]' and 'tokens' in x and 'status' in x,
@@ -26,6 +26,10 @@ API_SNAP_ALLOW = [
     ('agent link rule_class / incomplete / assumed / tree', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'link' and 'rule' in x and 'certain' in x, ('rule_class', 'incomplete', 'assumed', 'tree')),
     ('orch resets_at / auto (limit_wait)', lambda x, endpoint, path: path == '/orch' and 'state' in x and 'tokens' in x, ('resets_at', 'auto')),
     ('state diag', lambda x, endpoint, path: path == '' and 'orch' in x and 'agents' in x and 'session' in x, ('diag',)),
+    # a topic that is a work room (people working together in a folder, no debate shape): which kind of room, and the instruction file it was recognised from
+    ('room topic room / guide', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'topics[]' and all(k in x for k in ('dir', 'key', 'rows', 'kind')), ('room', 'guide')),
+    # a debate that stands for copies of its folder (a link into it, the same place in the repository's linked worktrees): how many were folded into it
+    ('debate copies', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'debates[]' and all(k in x for k in ('root', 'topics', 'finals')), ('copies',)),
     # a tool entry (activity, last_tool, current, pending) whose summary is the board's own wording says which dictionary key words it
     ('tool text_i18n (activity, last_tool, current, pending)', lambda x, endpoint, path: all(k in x for k in ('ts', 'name', 'text')), ('text_i18n',)),
 ]

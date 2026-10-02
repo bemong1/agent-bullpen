@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat import server, start_patches  # noqa: E402
 from test_stage2 import T0, bash_line, child_lines, dump, iso  # noqa: E402,F401  (import functions only: importing a TestCase would run it twice)
 
-from board import link, lineage, procs  # noqa: E402
+from board import catalog, link, lineage, procs, sessions  # noqa: E402
 
 P = '11111111-1111-4111-8111-111111111111'       # parent Claude session
 Q = '22222222-2222-4222-8222-222222222222'       # another Claude session
@@ -958,6 +958,110 @@ class CodexTurnCall(unittest.TestCase):
         lk, c = self.linker(cmd='codex exec "go" > /h/.codex/sessions/rollout-2026-10-01-%s.jsonl' % TID)
         self.assertIn(TID, c['ids'])                                                              # the loose reading still sees it ...
         self.assertEqual(lk._turn_call(TID, 1, t), (None, None))                                 # ... the turn does not take it for the call that started it
+
+
+class StateProcessIdentity(Fixture):
+    """The process the page calls the owner of a session (Session.alive, sessions.session_procs) is the one the lineage trusts: a pid that now belongs to another
+    process (its start time differs from the file's), another user's, or another pid namespace's is not it. What cannot be read is unknown, not alive."""
+
+    def alive(self, sid=P):
+        s = server.Session.__new__(server.Session)
+        s.id = sid
+        return s.alive()
+
+    def test_the_process_that_wrote_the_file_is_alive(self):
+        self.proc.add(100, 1, ['claude', '--x'], start=10)
+        self.session_file(100, P, entrypoint='cli', proc_start='10')
+        self.assertEqual(self.alive(), (True, 100, None))
+        self.assertEqual(sessions.session_procs()[P].alive, True)
+        self.assertEqual(self.alive(Q), (False, None, None))
+
+    def test_a_reused_pid_is_not_the_session(self):
+        self.proc.add(100, 1, ['claude', '--x'], start=20)                                       # a claude that started later holds pid 100 now
+        self.session_file(100, P, entrypoint='cli', proc_start='10')                             # the file was written by the one that started at 10
+        self.assertEqual(self.alive(), (False, None, None))
+        self.assertEqual((sessions.session_procs()[P].alive, sessions.session_procs()[P].pids), (False, ()))
+
+    def test_another_user_or_another_pid_namespace_is_not_the_session(self):
+        self.proc.add(100, 1, ['claude'], uid=UID + 1, start=10)
+        self.session_file(100, P, entrypoint='cli', proc_start='10')
+        self.proc.add(101, 1, ['claude'], start=10)
+        self.session_file(101, Q, entrypoint='cli', proc_start='10', domain='linux:abc:pid:[4026531999]')
+        self.assertEqual((self.alive(P), self.alive(Q)), ((False, None, None), (False, None, None)))
+        table = sessions.session_procs()
+        self.assertEqual((table[P].alive, table[Q].alive), (False, False))
+
+    def test_a_file_that_does_not_name_its_own_pid_is_no_claim(self):
+        self.proc.add(100, 1, ['claude'], start=10)
+        self.session_file(100, P, entrypoint='cli', proc_start='10', name='other.json')          # not <pid>.json
+        self.session_file(100, Q, entrypoint='cli', proc_start='10', name='101.json')            # <pid>.json, but the pid inside is another
+        self.assertEqual((self.alive(P), self.alive(Q)), ((False, None, None), (False, None, None)))
+
+    def test_what_cannot_be_read_is_unknown(self):
+        self.proc.add(100, 1, ['claude'], start=10)
+        self.session_file(100, P, entrypoint='cli', proc_start='10')
+        os.unlink(os.path.join(self.proc.root, '100', 'stat'))                                   # the process is there but its start time cannot be read
+        self.assertEqual(self.alive(), (None, 100, None))
+        self.assertEqual(sessions.session_procs()[P].alive, None)
+        self.proc.add(101, 1, ['claude'], start=10)
+        self.session_file(101, Q, entrypoint='cli', proc_start='10')
+        os.unlink(os.path.join(self.proc.root, '101', 'status'))                                 # ... or its owner
+        self.assertEqual(self.alive(Q), (None, 101, None))
+
+    def test_a_session_file_with_no_start_value_is_judged_by_the_rest(self):
+        self.proc.add(100, 1, ['claude'], start=10)
+        self.session_file(100, P, entrypoint='cli', proc_start=None, domain=None)               # an older Claude Code: no procStart, no pidDomain
+        self.assertEqual(self.alive(), (True, 100, None))
+
+    def test_two_files_of_one_session_one_of_them_a_reused_pid(self):
+        self.proc.add(100, 1, ['claude'], start=20)
+        self.session_file(100, P, entrypoint='cli', proc_start='10')
+        self.proc.add(101, 1, ['claude'], start=30)
+        self.session_file(101, P, entrypoint='cli', proc_start='30')
+        self.assertEqual(self.alive()[:2], (True, 101))
+        pr = sessions.session_procs()[P]
+        self.assertEqual((pr.alive, pr.pids), (True, (101,)))
+
+    def test_the_ids_that_cannot_be_called_finished_follow_the_same_check(self):
+        """`claude_alive_ids` (the representative of a project is kept while its session is in it) asks `lineage.holds`, not only for a claude command line."""
+        R = '44444444-4444-4444-8444-444444444444'
+        self.proc.add(100, 1, ['claude'], start=20)                                              # a later claude has this pid now
+        self.session_file(100, P, entrypoint='cli', proc_start='10')
+        self.proc.add(101, 1, ['claude'], start=10)
+        self.session_file(101, Q, entrypoint='cli', proc_start='10')                             # the one that wrote the file
+        self.proc.add(102, 1, ['claude'], start=10)
+        self.session_file(102, R, entrypoint='cli', proc_start='10')
+        os.unlink(os.path.join(self.proc.root, '102', 'stat'))                                   # there, but not told apart: it cannot be called finished
+        self.proc.add(103, 1, ['claude'], uid=UID + 1, start=10)
+        self.session_file(103, C, entrypoint='cli', proc_start='10')                             # another user's
+        self.session_file(104, '55555555-5555-4555-8555-555555555555', entrypoint='cli')         # no such process
+        self.assertEqual(server.claude_alive_ids(), {Q, R})
+        self.assertEqual(catalog.claude_alive_ids(), {Q, R})
+
+    def test_a_child_whose_pid_was_reused_is_not_taken_for_alive(self):
+        """A `claude -p` child that was linked while its process was there: when the pid is later another process's, the page stops calling it running."""
+        self.parent()
+        self.child()
+        self.tree()
+        self.scan()
+        s = server.Session(os.path.join(self.proj, P + '.jsonl'))
+        s.poll()
+        status = lambda: next(a['status'] for a in s.state()['agents'] if a['id'] == C)
+        self.assertIn(status(), ('running', 'stalled'))                                      # its process holds the pid: the record ended its turn but the process is still there
+        self.session_file(103, C, proc_start='5')                                            # the pid now belongs to a process that started at another time
+        self.assertEqual(status(), 'done')                                                   # no process of its own any more: the end of its turn is the end
+
+    def test_without_proc_the_owner_still_counts(self):
+        """Where there is no /proc (macOS) a start value cannot be compared, but the owner can: another user's process is not the session, and an owner that cannot be
+        told leaves the command line as the only evidence (as the lineage does)."""
+        self.session_file(100, P, entrypoint='cli', proc_start='10')
+        with mock.patch.object(procs, 'PROC', '/nonexistent-proc'), mock.patch.object(procs, '_run_ps', lambda: b'100 claude --x\n'):
+            for owner, want in ((UID, True), (UID + 1, False), (None, True)):
+                procs.reset()
+                with mock.patch.object(procs, 'uid', lambda pid, owner=owner: owner):
+                    self.assertEqual(self.alive()[0], want, owner)
+                    self.assertEqual(sessions.session_procs()[P].alive, want, owner)
+        procs.reset()
 
 
 if __name__ == '__main__':

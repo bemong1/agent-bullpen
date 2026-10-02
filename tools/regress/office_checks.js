@@ -94,6 +94,7 @@ for (const lang of ['ko', 'en']) {
   // ---- the signs and the whiteboard: states the saved state does not show (a Codex orchestrator, a waiting topic, people outside any debate, a crowded lounge)
   const draw = st => { const w = world(lang); w.g.update(st, null); w.frame(50); return w; };
   const has = (w, text, cls) => w.texts.some(x => x === text || (cls && x.includes(text)));
+  const stages = w => w.texts.map(x => (x.match(/<span class="st">([^<]*)<\/span>/) || [])[1]).filter(Boolean);     // the stage lines of the whiteboards
   let w = draw(Object.assign(W.state(), { orch: Object.assign({}, W.state().orch, { provider: 'codex', model: 'gpt-6-sol' }) }));
   check(`${lang}: Codex orchestrator: the sign carries the Codex form`, has(w, T('office.sign.orchCodex')) && !has(w, T('office.sign.orch')), w.texts.filter(x => /Codex|Control|지휘/.test(x)).slice(0, 4));
   w = draw(W.state());
@@ -112,6 +113,27 @@ for (const lang of ['ko', 'en']) {
   const crowd = W.state(); crowd.debates = []; crowd.agents.forEach(a => { a.status = 'running'; });
   w = draw(crowd);
   check(`${lang}: running people outside any debate: the other-work board and the head count`, has(w, T('office.board.other'), 1) && has(w, T('office.board.working', { count: crowd.agents.length }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 3));
+  // the "other work" room: a newcomer takes the empty end seat, whatever place the server lists it in, and nobody else is moved a seat over; when somebody leaves the rest close up in the same order
+  const otherSeats = Wd => Wd.g._g.seats.filter(sq => sq.block.other).map(sq => sq.agentId);
+  const wk = world(lang), room0 = W.state(); room0.debates = []; room0.agents.forEach(a => { a.status = 'running'; });
+  wk.g.update(room0, null); wk.frame(50);
+  const seatsBefore = otherSeats(wk), mkLate = (n, tag) => Object.assign({}, room0.agents[0], { id: 'late' + n + 'x'.repeat(12), tag, title: 'Newcomer ' + n, status: 'running', spawn_ts: room0.now, parent: null });
+  const late1 = mkLate(1, 'N1'), late2 = mkLate(2, 'N2'), st1 = JSON.parse(JSON.stringify(room0));
+  st1.agents.unshift(late1);                                                    // listed seatsBefore everybody else
+  wk.g.update(st1, null); wk.frame(50);
+  const after1 = otherSeats(wk);
+  check(`${lang}: other-work room, a newcomer listed first: it takes the end seat and everybody keeps theirs`, seatsBefore.length === room0.agents.length && JSON.stringify(after1) === JSON.stringify(seatsBefore.concat([late1.id])), [seatsBefore, after1]);
+  const st2 = JSON.parse(JSON.stringify(st1));
+  st2.agents.splice(2, 0, late2);                                               // and another one listed in the middle
+  wk.g.update(st2, null); wk.frame(50);
+  const after2 = otherSeats(wk);
+  check(`${lang}: other-work room, a second newcomer listed in the middle: the end seat again`, JSON.stringify(after2) === JSON.stringify(seatsBefore.concat([late1.id, late2.id])), [seatsBefore, after2]);
+  const st3 = JSON.parse(JSON.stringify(st2));
+  st3.agents = st3.agents.filter(a => a.id !== seatsBefore[1]);
+  wk.g.update(st3, null); wk.frame(50);
+  check(`${lang}: other-work room, somebody leaves: the rest close up in the same order`, JSON.stringify(otherSeats(wk)) === JSON.stringify(after2.filter(id => id !== seatsBefore[1])), [after2, otherSeats(wk)]);
+  check(`${lang}: other-work room, a first drawing still seats a launched run beside its launcher`, (() => { const k = JSON.parse(JSON.stringify(room0)); const [pa, ch] = [k.agents[0], k.agents[1]]; ch.parent = pa.id; k.agents.splice(1, 1); k.agents.push(ch);
+    const ww = world(lang); ww.g.update(k, null); ww.frame(50); const o = otherSeats(ww); return o.indexOf(ch.id) === o.indexOf(pa.id) + 1; })(), '');
   const empty = W.state(); empty.debates[0].topics[1].rows[0].agents = [];
   w = draw(empty);
   check(`${lang}: a seat nobody holds: the empty-seat tag`, w.texts.some(x => x.includes('<span class="nm">' + T('office.tag.empty') + '</span>')), '');
@@ -152,6 +174,49 @@ for (const lang of ['ko', 'en']) {
   ut.final = { exists: false }; ut.rows.forEach((r, i) => r.cells.forEach(c => { if (c.round === 2) { c.state = i ? 'unknown' : 'done'; c.agent = c.agent || 'x'; } }));
   w = draw(uz);
   check(`${lang}: a cell in a state this page does not know keeps its round open on the whiteboard`, has(w, T('office.board.round', { round: 2, done: 1, total: ut.rows.length }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
+  // rooms: people who work together in a folder. One round and no round folder; or no cell at all (participants only). No final to wait for: a room closes 20 minutes after its last participant stops
+  const roomState = (kind, cellState, status, quiet) => {
+    const st = W.state(), ag = st.agents.slice(0, 3);
+    ag.forEach(a => { a.status = status; a.last_ts = st.now - (quiet || 5); });
+    st.debates = [{ root: '/r/m', short: 'm', name: 'm', title: 'Sync', finals: [], last_ts: st.now, current: true, topics: [{ dir: '/r/m', key: 'm', title: 'Sync', name: '', deps: '', kind: 'rounds', room: kind, final: { exists: false },
+      rounds: kind === 'cells' ? [1] : [], rows: ag.map((a, i) => ({ p: 'ABC'[i], role: '', agents: [a.id], cells: kind === 'cells' ? [{ round: 1, state: cellState(i), path: '/r/m/' + i, agent: a.id, readers: [], lines: 1, mtime: st.now - (quiet || 5) }] : [] })) }] }];
+    return st;
+  };
+  w = draw(roomState('cells', i => (i ? 'draft' : 'done'), 'running'));
+  check(`${lang}: a room of cells: its own stage line (no round number), in/total from the cells`, has(w, T('office.board.room', { done: 1, total: 3 }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
+  w = draw(roomState('cells', () => 'done', 'running'));
+  check(`${lang}: a room whose every file is in but whose people still work: all in`, has(w, T('office.board.roomDone', { total: 3 }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
+  w = draw(roomState('cells', () => 'done', 'done'));
+  check(`${lang}: a room whose every file is in and nobody works: complete (no round to wait for)`, stages(w).join('|') === T('office.board.complete'), stages(w));
+  w = draw(roomState('cells', i => (i ? 'missing' : 'done'), 'done'));
+  check(`${lang}: a room with a seat that never handed in is stopped, in/total, not complete`, stages(w).join('|') === T('office.board.room', { done: 1, total: 3 }), stages(w));
+  const flatState = (cellState, status, quiet) => {                       // a flat review: result files declared, no round folder, the cells carry no round
+    const st = W.state(), ag = st.agents.slice(0, 3);
+    ag.forEach(a => { a.status = status; a.last_ts = st.now - (quiet || 5); });
+    st.debates = [{ root: '/r/f', short: 'f', name: 'f', title: 'Review', finals: [], last_ts: st.now, current: true, topics: [{ dir: '/r/f', key: 'f', title: 'Review', name: '', deps: '', kind: 'flat', final: { exists: false },
+      rounds: [], rows: ag.map((a, i) => ({ p: ['sol', 'opus', 'mini'][i], role: '', agents: [a.id], cells: [{ round: null, state: cellState(i), path: '/r/f/' + i, agent: a.id, readers: [], lines: 1, mtime: st.now - (quiet || 5) }] })) }] }];
+    return st;
+  };
+  w = draw(flatState(() => 'done', 'done'));
+  check(`${lang}: a flat review whose every result is in and nobody works: complete, not waiting for a round`, stages(w).join('|') === T('office.board.complete'), stages(w));
+  w = draw(flatState(i => (i ? 'draft' : 'done'), 'running'));
+  check(`${lang}: a flat review with results still coming: in/total`, stages(w).join('|') === T('office.board.room', { done: 1, total: 3 }), stages(w));
+  w = draw(flatState(() => 'done', 'done', 3600));
+  check(`${lang}: and an hour later a finished flat review is closed too`, !stages(w).length && !w.texts.some(x => x.includes('Review')), stages(w));
+  const zones = st => draw(st).g._g.blocks.filter(b => b.type === 'zone' && b.topic).length;
+  const unstarted = quiet => { const st = flatState(() => 'waiting', 'done', quiet); st.debates[0].topics[0].rows.forEach(r => { r.agents = []; r.cells.forEach(c => { c.agent = null; c.mtime = null; }); }); return st; };
+  check(`${lang}: a flat review that has not started (every cell waiting, nobody on it) keeps its room, however long it has been`, zones(unstarted()) === 1 && zones(unstarted(3600)) === 1, [zones(unstarted()), zones(unstarted(3600))]);
+  check(`${lang}: a flat review whose people are all unknown but whose results are not in keeps its room after an hour`, zones(flatState(i => (i ? 'writing' : 'done'), 'unknown', 3600)) === 1, zones(flatState(i => (i ? 'writing' : 'done'), 'unknown', 3600)));
+  check(`${lang}: nor does one that was cut off with a paused cell`, zones(flatState(i => (i ? 'paused' : 'done'), 'interrupted', 3600)) === 1, zones(flatState(i => (i ? 'paused' : 'done'), 'interrupted', 3600)));
+  check(`${lang}: a flat review whose every result is in and nobody works is closed after an hour; with a final already out it is closed whatever its cells say`,
+    zones(flatState(() => 'done', 'done', 3600)) === 0 && zones(flatState(i => (i ? 'missing' : 'done'), 'done', 3600)) === 1 &&
+    zones((st => { st.debates[0].topics[0].final = { exists: true, path: '/r/f/final.md', rel: 'final.md', auto: true }; return st; })(flatState(i => (i ? 'missing' : 'done'), 'done', 3600))) === 0, '');
+  w = draw(roomState('members', () => 'done', 'running'));
+  check(`${lang}: a room of participants only: how many talk, and they sit in the room (no other-work board)`, has(w, T('office.board.members', { count: 3 }), 1) && !has(w, T('office.board.other'), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
+  w = draw(roomState('members', () => 'done', 'done', 60));
+  check(`${lang}: the same room once they have all stopped says it ended`, has(w, T('office.board.membersEnded'), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
+  w = draw(roomState('members', () => 'done', 'done', 3600));
+  check(`${lang}: and an hour later the room is closed (nobody working, nothing to wait for)`, !has(w, T('office.board.membersEnded'), 1) && !w.texts.some(x => x.includes('Sync')), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
   const limEv = { kind: 'sys', from: 'sys', to: 'user', title: 'old Korean title', title_i18n: { key: 'event.sys.limit.auto', params: { at: atTs } }, text: '', sys: { code: 'limit', status: 429, resets_at: atTs, auto: true } };
   feed([limEv]);
   check(`${lang}: a usage-limit line makes the orchestrator say it from its desk, with the time of this page`, nthBubble() === T('event.sys.limit.auto', { at: clockOf(atTs) }), nthBubble());
@@ -166,6 +231,84 @@ for (const lang of ['ko', 'en']) {
   check(`${lang}: seats beside the launcher: an agent follows the one that launched it`, order.indexOf(p2.id) === order.indexOf(p0.id) + 1 && order.length === kin.agents.length, order);
   p2.parent = 'not-in-the-room'; const plain = seatsOf(kin), kin2 = W.state(); kin2.debates = []; kin2.agents.forEach(a => { a.status = 'running'; });
   check(`${lang}: a launcher that is not in the room changes nothing`, plain.join() === seatsOf(kin2).join(), [plain, seatsOf(kin2)]);
+
+  // ---- people who come in walk in from the entrance, also when their arrival changes the layout of the rooms (a seat more in "other work", a new room, the lounge);
+  // those who were already there are put at their (moved) desks at once, and those still walking on their way carry on. One world is updated twice: a fresh world has no past, so it puts everybody in place.
+  const clone = o => JSON.parse(JSON.stringify(o));
+  const newcomer = (st, i, status) => Object.assign(clone(st.agents[0]), { id: 'newcomer' + i + 'x'.repeat(10), tag: 'N' + i, title: 'New ' + i, parent: null, status: status || 'running', last_ts: st.now, current: null });
+  const at = (e, p, d) => Math.hypot(e.x - p.x, e.y - p.y) <= d;
+  const home = e => !e.path.length && e.x === e.goal.pt.x && e.y === e.goal.pt.y;
+  const walkIn = (w, e, frames) => { let n = 0; while (n < frames && !home(e)) { w.frame(50); n++; } return home(e) ? n : -1; };
+  const others0 = W.state(); others0.debates = []; others0.agents.forEach(a => { a.status = 'running'; a.parent = null; });
+  {
+    const w = world(lang), G = w.g._g;
+    w.g.update(others0, null); w.frame(50);
+    const before = G.sig, firstSeats = G.blocks.find(b => b.other).seats.length, was = others0.agents.map(a => G.ents.get(a.id));
+    const st = clone(others0), nc = newcomer(st, 1); st.agents.push(nc);
+    w.g.update(st, null);
+    const e = G.ents.get(nc.id);
+    check(`${lang}: one more person in Other work changes the layout (a seat more, the desks move)`, G.sig !== before && G.blocks.find(b => b.other).seats.length === firstSeats + 1, [before, G.sig]);
+    check(`${lang}: that person starts at the entrance and has a way to walk, not at the desk`, e && at(e, G.entrance, 0.01) && e.path.length > 0 && !at(e, e.goal.pt, 20), e && [e.x, e.y, e.path.length]);
+    check(`${lang}: the people who were already there are at their (moved) desks at once, not walking`, was.every(x => x && G.ents.get(x.id) === x && home(x) && x.where === 'sit'), was.map(x => x && [x.x, x.y, x.path.length]));
+    w.frame(50);
+    check(`${lang}: a tick later the new person has moved on from the entrance along the way`, at(e, G.entrance, 40) && !at(e, G.entrance, 0.01), [e.x, e.y]);
+    const n = walkIn(w, e, 200);
+    check(`${lang}: and gets to the desk after a few ticks (${n})`, n > 0 && n < 120, n);
+    check(`${lang}: the ones who were there did not move meanwhile`, was.every(x => home(x)), was.map(x => [x.x, x.y]));
+  }
+  {
+    const full = W.state(), room = full.debates[0].topics[1], who = room.rows[0].agents[room.rows[0].agents.length - 1];
+    const w = world(lang), G = w.g._g;
+    const first = clone(full); first.debates = []; first.agents = first.agents.filter(a => a.id !== who);
+    first.agents.forEach(a => { a.status = 'running'; });
+    w.g.update(first, null); w.frame(50);
+    const before = G.sig, was = first.agents.map(a => G.ents.get(a.id));
+    const again = clone(full); again.agents.forEach(a => { a.status = 'running'; });                 // everybody works: the new room is open and its people sit at its desks
+    w.g.update(again, null);
+    const e = G.ents.get(who);
+    check(`${lang}: a debate room that appears for the first time changes the layout`, G.sig !== before && G.blocks.some(b => b.topic && b.topic.key === room.key), [before, G.sig]);
+    check(`${lang}: the first participant of that new room starts at the entrance and walks in`, e && at(e, G.entrance, 0.01) && e.path.length > 0 && e.goal.block.topic && e.goal.block.topic.key === room.key, e && [e.x, e.y, e.path.length]);
+    check(`${lang}: the people who were already in the office are at their new desks at once`, was.every(x => x && G.ents.get(x.id) === x && home(x)), was.map(x => x && [x.x, x.y, x.path.length]));
+    check(`${lang}: and the new participant sits down at the room's desk a few ticks later`, walkIn(w, e, 200) > 0 && e.where === 'sit' && e.goal.block.topic.key === room.key, e && [e.x, e.y]);
+  }
+  {
+    const w = world(lang), G = w.g._g;
+    const rest = W.state(), room = rest.debates[0].topics[1], holders = room.rows.map(r => r.agents[r.agents.length - 1]).filter(Boolean);
+    w.g.update(rest, null); w.frame(50);                                                       // two people rest in the lounge (their room is still open)
+    const lounge = rest.agents.filter(a => !['running', 'working'].includes(a.status) && holders.includes(a.id));
+    const before = G.sig, was = rest.agents.map(a => G.ents.get(a.id)).filter(Boolean);
+    const st = clone(rest), nc = newcomer(st, 2); st.agents.push(nc);                          // and a runner arrives in Other work: the layout changes while the lounge people are in place
+    w.g.update(st, null);
+    check(`${lang}: with people in the lounge, a new runner changes the layout and the lounge people stay in place`, G.sig !== before && lounge.length > 0 && lounge.every(a => G.ents.get(a.id).where === 'lounge' && home(G.ents.get(a.id))), [before, G.sig, lounge.length]);
+    check(`${lang}: the runner comes in at the entrance`, at(G.ents.get(nc.id), G.entrance, 0.01) && G.ents.get(nc.id).path.length > 0, '');
+  }
+  {
+    const w = world(lang), G = w.g._g;
+    w.g.update(others0, null); w.frame(50);
+    const a = clone(others0), n1 = newcomer(a, 3); a.agents.push(n1);
+    w.g.update(a, null);
+    const e1 = G.ents.get(n1.id);
+    for (let i = 0; i < 4; i++) w.frame(50);
+    const mid = [e1.x, e1.y], moving = e1.path.length > 0;
+    const b = clone(a), n2 = newcomer(b, 4); b.agents.push(n2);                                // another one comes in while the first is still walking: the layout changes again
+    const sig = G.sig;
+    w.g.update(b, null);
+    const e2 = G.ents.get(n2.id);
+    check(`${lang}: a second arrival lays the rooms out again while the first still walks`, moving && G.sig !== sig, [moving, sig, G.sig]);
+    check(`${lang}: the one still walking is not put at the desk: it carries on from where it is`, e1.path.length > 0 && !at(e1, e1.goal.pt, 5) && at(e1, { x: mid[0], y: mid[1] }, 1), [e1.x, e1.y, mid]);
+    check(`${lang}: the second one starts at the entrance`, at(e2, G.entrance, 0.01) && e2.path.length > 0, [e2.x, e2.y]);
+    check(`${lang}: both get to their desks`, walkIn(w, e1, 300) >= 0 && walkIn(w, e2, 300) >= 0 && home(e1) && home(e2), [e1.x, e1.y, e2.x, e2.y]);
+  }
+  {
+    const w = world(lang), G = w.g._g;                                                          // the first picture: nobody is replayed
+    w.g.update(others0, null);
+    check(`${lang}: the first picture puts everybody in place (nobody walks in from the entrance)`, others0.agents.every(a => home(G.ents.get(a.id))), '');
+    const restart = clone(others0); restart.boot = (others0.boot || 0) + '-restarted';
+    const nc = newcomer(restart, 5); restart.agents.push(nc);
+    w.g.update(Object.assign(clone(others0), { boot: 'first' }), null);
+    w.g.update(restart, null);
+    check(`${lang}: the first picture after a server restart puts everybody in place too`, home(G.ents.get(nc.id)), '');
+  }
 
   // ---- a whole run of every demo scenario: no [key], no unfilled {name}, English without Hangul
   const missBefore = W.I18N.missing.size;

@@ -2,13 +2,43 @@
 
 A test that changes module globals (HOME, DENY_FILES, LINKS ...) changes every module that holds that global:
 in single-file code that is server alone, in the package it is server and whichever board.* modules have that name."""
+import atexit
 import contextlib
 import os
+import shutil
 import sys
+import tempfile
 from unittest import mock
+
+# A throwaway HOME and cache folder for the whole test process, set before board is imported (its modules fix the cache paths from these when they are imported),
+# so no test reads the real ~/.cache/agent-bullpen (a status line reading there changes the plan bar) or ~/.claude. A test module that imports board imports compat first.
+SANDBOX = tempfile.mkdtemp(prefix='bullpen-tests-')
+atexit.register(shutil.rmtree, SANDBOX, ignore_errors=True)
+SANDBOX_HOME = os.path.join(SANDBOX, 'home')
+os.makedirs(SANDBOX_HOME)
+for _name in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'AGENT_BULLPEN_TOKEN'):
+    os.environ.pop(_name, None)
+os.environ.update(HOME=SANDBOX_HOME, XDG_CACHE_HOME=os.path.join(SANDBOX_HOME, '.cache'))
 
 sys.path.insert(0, os.environ.get('AB_SRC') or os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import server  # noqa: E402
+
+CLEARED_FOR_CHILDREN = ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CACHE_HOME', 'AGENT_BULLPEN_LOG', 'AGENT_BULLPEN_TOKEN')
+
+
+def isolated_env(home, **extra):
+    """The environment of a child process that runs the server or a tool: the runner's, without the variables that move the folders it reads or the cache it writes
+    (or switch the log or the token check on), with HOME and XDG_CACHE_HOME inside `home`. One place, so no test process can reach the real home or ~/.cache."""
+    env = {k: v for k, v in os.environ.items() if k not in CLEARED_FOR_CHILDREN}
+    env.update(HOME=home, XDG_CACHE_HOME=os.path.join(home, '.cache'), PYTHONDONTWRITEBYTECODE='1')
+    env.update(extra)
+    return env
+
+
+def cache_globals(home):
+    """The module globals that hold paths below the cache folder, for patched(**cache_globals(home)): the status line reading and the link record of `home`."""
+    folder = os.path.join(home, '.cache', 'agent-bullpen')
+    return {'STATUSLINE_STATE': os.path.join(folder, 'statusline.json'), 'LINK_CACHE': os.path.join(folder, 'links.json')}
 
 
 def holders(name):

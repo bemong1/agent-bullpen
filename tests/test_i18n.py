@@ -129,7 +129,7 @@ class ShippedDictionaries(unittest.TestCase):
         # The same keys in the same order are checked for the common sections and the section anchors only (the full check is tools/regress/i18n_check.py)
         base = lambda d: [k for k in d['messages'] if k.split('.')[0] in ('common', 'status', 'kind', 'time', 'unit') or k.endswith('._')]    # noqa: E731
         self.assertEqual(base(ko), base(en))
-        self.assertEqual(len([k for k in base(en) if k.endswith('._')]), 14)
+        self.assertEqual(len([k for k in base(en) if k.endswith('._')]), 13)
         self.assertEqual(i18n.languages(), [{'code': 'en', 'name': 'English'}, {'code': 'ko', 'name': '한국어'}])
 
 

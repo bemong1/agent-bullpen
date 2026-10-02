@@ -91,10 +91,13 @@ class VirtualFiles(unittest.TestCase):
         try:
             path = '/proc/%d/environ' % child.pid
             for _ in range(100):                                                   # the environment is there once the child has exec'd
-                if os.path.exists(path) and open(path, 'rb').read():
-                    break
+                if os.path.exists(path):
+                    with open(path, 'rb') as f:
+                        if f.read():
+                            break
                 time.sleep(0.02)
-            self.assertIn(sid.encode(), open(path, 'rb').read(), 'the control: the id-shaped text is in that environment')
+            with open(path, 'rb') as f:
+                self.assertIn(sid.encode(), f.read(), 'the control: the id-shaped text is in that environment')
             self.assertEqual(OutIndex._read(path), frozenset())
         finally:
             child.kill()

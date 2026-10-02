@@ -100,7 +100,7 @@ async function tick() {
     if (!S) { await diag.fail(e); return; }      // A failure before the first state: "session not found", "server refused" or "connection failed" goes to the diagnosis box
     const el = document.getElementById('err');
     el.style.display = 'block';
-    el.textContent = t('office.err.noResponse', { message: e.message });
+    el.textContent = e && e.status === 401 ? t('diag.http.token401') : t('office.err.noResponse', { message: e.message });   // 401: the server restarted and the access token is new
   } finally { clearTimeout(guard); ticking = false; }
 }
 // One legend line, only when Codex is on screen (a real record, or the demo's T9 C slot)

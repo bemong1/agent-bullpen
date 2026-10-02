@@ -9,6 +9,7 @@ now passes, a listed cell whose value changed, a stale entry: each fails here. F
 """
 import contextlib
 import io
+import itertools
 import json
 import os
 import re
@@ -223,7 +224,7 @@ class Selection(unittest.TestCase):
     def test_count_and_uniqueness(self):
         ids = [c.id for c in self.cases]
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertTrue(700 <= len(ids) <= 1600, len(ids))
+        self.assertTrue(700 <= len(ids) <= 3000, len(ids))
 
     def test_the_cover_is_deterministic(self):
         names = run.PAIR_AXES['sta']
@@ -238,7 +239,7 @@ class Selection(unittest.TestCase):
     def test_every_pair_of_values_inside_a_bundle_is_covered_or_impossible(self):
         import itertools
         import random
-        for bundle in ('aff', 'deb', 'sta', 'cpl'):
+        for bundle in ('aff', 'deb', 'sta', 'cpl', 'room'):
             names = run.PAIR_AXES[bundle]
             covered = set()
             for c in (c for c in self.cases if c.bundle == bundle and c.twin_of is None):
@@ -417,8 +418,8 @@ class OracleDecisions(unittest.TestCase):
             got = {x.field: x.result for x in run.grade_case(c, b, obs, oracle.truth(c))}
             self.assertEqual(got['status'], want, shown)
 
-    def test_format_drift_is_a_version_outside_the_range_or_a_known_field_gone(self):
-        for flaw, drift in (('old_format', True), ('future_version', True), ('field_gone', True), ('unknown_type', False), ('torn', False), ('none', False)):
+    def test_format_drift_is_a_known_field_gone_inside_the_range_and_a_version_outside_it_says_nothing(self):
+        for flaw, drift in (('old_format', False), ('future_version', False), ('field_gone', True), ('unknown_type', False), ('torn', False), ('none', False)):
             c = axes.normalize(Case('sta', {'skind': 'cli', 'life': 'normal_end', 'flaw': flaw}))
             self.assertEqual(('format_drift', 'child') in oracle.truth(c).diag, drift, flaw)
 
@@ -1107,7 +1108,7 @@ class AnswerDecisions(unittest.TestCase):
     def test_the_diagnostic_scope_is_the_answers_not_the_adapters(self):
         self.assertFalse(hasattr(observe, 'BUNDLE_CODES'))                 # the adapter reports every entry it sees
         self.assertIsNone(oracle.diag_scope(axes.normalize(Case('cpl', {}))))
-        for bundle in ('aff', 'sta', 'deb'):
+        for bundle in ('aff', 'sta', 'deb', 'room'):
             self.assertIsInstance(oracle.diag_scope(axes.normalize(Case(bundle, {}))), frozenset)
 
     def test_every_expected_code_is_in_the_scope_of_its_bundle(self):
@@ -1339,7 +1340,7 @@ class RealRecordShapes(unittest.TestCase):
         self.assertEqual(len(cost), 1)
         self.assertNotIn('totalDuration', cost[0])
         self.assertEqual({d['version'] for d in lines if 'version' in d}, {'2.1.285'})              # still inside the observed range 2.1.235-2.1.286
-        for flaw, expected in (('old_format', True), ('future_version', True), ('field_gone', True), ('unknown_type', False)):
+        for flaw, expected in (('old_format', False), ('future_version', False), ('field_gone', True), ('unknown_type', False)):
             c = axes.normalize(Case('sta', {'skind': 'cli', 'life': 'normal_end', 'flaw': flaw}))
             self.assertEqual(('format_drift', 'child') in oracle.truth(c).diag, expected, flaw)
 
@@ -1482,6 +1483,717 @@ class CaseFoldingFileSystem(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit):
                     run.main(['--write-xfail', '--cases', 'no-such-case*'])
+
+
+class RoomScenes(unittest.TestCase):
+    """The room bundle: a folder where agents of one orchestrator share a guide of any name and each hold a file of their own (or only message each other), the lookalikes
+    that are no room, and the words of the instruction that are never evidence. The builder writes what each value says, so a red cell is the board's."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix='scen-room-')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def case(self, **v):
+        return axes.normalize(Case('room', v))
+
+    def build(self, **v):
+        c = self.case(**v)
+        return c, build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+
+    def kind(self, **v):
+        return oracle.room_kind(self.case(**v).v)[0]
+
+    def prompt(self, b, role):
+        return _read_lines(b.paths[role])[0]['message']['content']
+
+    def calls(self, path, name):
+        return [blk['input'] for d in _read_lines(path) if d.get('type') == 'assistant' for blk in d['message']['content']
+                if blk.get('type') == 'tool_use' and blk['name'] == name]
+
+    # --- the rules ---
+    def test_a_room_needs_a_shared_guide_and_a_file_of_each_participants_own(self):
+        self.assertEqual(self.kind(), 'cells')
+        # the first half only: everybody points at one guide, and the files are no per-participant files in its folder
+        for guide in ('top_readme', 'top_claude', 'top_agents', 'docs_guide'):
+            c = self.case(guide=guide)
+            self.assertEqual(c.v['shape'], 'far', guide)                                    # a common document has no folder to write beside
+            self.assertIsNone(oracle.room_kind(c.v)[0], guide)
+        for shape in ('deep', 'far', 'same', 'scatter'):
+            self.assertIsNone(self.kind(shape=shape), shape)
+        # the second half only: a file of each beside the others, and no shared guide in the first instruction
+        for guide in ('own', 'missing', 'late'):
+            self.assertIsNone(self.kind(guide=guide), guide)
+        self.assertIsNone(self.kind(people='1'))
+        self.assertIsNone(self.kind(trees='two', people='2'))                               # one participant on each orchestrator's page
+        self.assertEqual(self.kind(trees='two', people='3'), 'cells')                       # two of them on this page, the third is another orchestrator's
+
+    def test_a_guide_of_any_name_and_a_file_beside_it_or_one_below_make_a_room(self):
+        for guide, shape, people in itertools.product(('agenda', 'brief', 'readme', 'plan'), ('beside', 'below', 'mixed'), ('2', '3', '5')):
+            self.assertEqual(self.kind(guide=guide, shape=shape, people=people), 'cells', (guide, shape, people))
+            T = oracle.truth(self.case(guide=guide, shape=shape, people=people))
+            self.assertEqual(sum(1 for r, f in T.subjects.items() if f.get('role') == 'writer'), int(people))
+
+    def test_the_title_of_a_room_is_the_first_heading_of_its_guide(self):
+        for lang in ('en', 'ko'):
+            for guide in ('agenda', 'brief', 'readme', 'plan'):
+                c, b = self.build(guide=guide, lang=lang)
+                with open(os.path.join(b.meta['unit'], axes.ROOM_GUIDES[guide])) as fh:
+                    heading = re.match(r'# (.+)', fh.read()).group(1)
+                self.assertEqual(oracle.truth(c).subjects['listing']['titles'], frozenset(['docs/meeting|' + heading]), (guide, lang))
+
+    def test_the_words_of_the_instruction_are_never_evidence(self):
+        for guide, (shape, talk), lang in itertools.product(('agenda', 'brief', 'late'), (('beside', 'none'), ('below', 'none'), ('none', 'peer'), ('none', 'none'), ('r1', 'none'), ('far', 'none')), AXES['lang']):
+            truths = [oracle.truth(self.case(word=w, lang=lang, shape=shape, talk=talk, guide=guide)).subjects for w in AXES['word']]
+            self.assertTrue(all(t == truths[0] for t in truths), (guide, shape, talk, lang))
+        # ... and the builder does write them: five instructions, five wordings
+        for lang in AXES['lang']:
+            texts = {w: self.prompt(self.build(word=w, lang=lang)[1], 'p1') for w in AXES['word']}
+            self.assertEqual(len(set(texts.values())), 5, lang)
+        self.assertIn('debate', self.prompt(self.build(word='debate')[1], 'p1'))
+        self.assertIn('회의', self.prompt(self.build(word='meeting', lang='ko')[1], 'p1'))
+        self.assertNotRegex(re.sub(r'`[^`]*`', '', self.prompt(self.build(word='none')[1], 'p1')), r'(?i)debate|meeting|agenda|sync')     # no noun at all (the paths are not words)
+
+    def test_a_meeting_by_message_only_is_a_room_without_cells(self):
+        c = self.case(shape='none', talk='peer')
+        T = oracle.truth(c)
+        self.assertEqual(T.subjects['listing']['units'], frozenset(['docs/meeting']))
+        for role in ('p1', 'p2', 'p3'):
+            self.assertEqual(T.subjects[role], dict(unit='docs/meeting', seat=None, cell=None, role='none', placements=frozenset()))
+        for talk in ('none', 'orch'):                                                         # nobody tells the others anything: the orchestrator alone does, or nobody
+            self.assertIsNone(self.kind(shape='none', talk=talk), talk)
+        self.assertIsNone(self.kind(shape='none', talk='peer', guide='top_readme'))          # a common document and messages: still no room
+        self.assertIsNone(self.kind(shape='none', talk='peer', guide='late'))
+        for shape in ('same', 'far', 'deep', 'scatter'):                                      # messages beside files that are no per-participant files: those are not meetings by message only
+            self.assertIsNone(self.kind(shape=shape, talk='peer'), shape)
+        self.assertEqual(self.case(people='1', shape='none', talk='peer').v['talk'], 'none')
+
+    def test_a_round_folder_makes_a_debate_whatever_the_guide_is_called(self):
+        for guide in ('agenda', 'plan', 'readme', 'brief'):
+            c = self.case(shape='r1', guide=guide, people='2')
+            T = oracle.truth(c)
+            self.assertEqual(oracle.room_kind(c.v)[0], 'debate')
+            self.assertEqual(T.subjects['listing']['units'], frozenset(['docs/meeting']))
+            self.assertNotIn('titles', T.subjects['listing'])                                 # the title of a folder that was a debate already is not asked
+            self.assertEqual(T.subjects['p1']['placements'], frozenset(['docs/meeting|1|A|r1/A']))
+        self.assertEqual(oracle.room_kind(self.case(shape='r1', people='1').v)[0], 'debate')   # one participant is enough for a debate
+        self.assertEqual(self.case(shape='r1', guide='top_readme').v['shape'], 'far')          # a common document has no folder of its own to hold a round folder
+        self.assertEqual(self.case(shape='r1', guide='own').v['guide'], 'agenda')              # a debate has the guide of its folder
+
+    def test_the_seat_is_the_letter_a_marker_names_else_the_tag_else_the_stem_of_the_file(self):
+        marks = ('bracket', 'dam', 'dam_paren', 'en_participant', 'en_as', 'en_seat', 'tag')
+        for mark in marks:
+            c = self.case(seatmark=mark, fname='prefix', shape='below')
+            self.assertEqual(oracle.truth(c).subjects['p2']['seat'], 'B', mark)
+            self.assertEqual(oracle.truth(c).subjects['p2']['placements'], frozenset(['docs/meeting|1|B|out/notes_B']), mark)       # the place is the file, the seat the letter
+        for mark in ('none', 'quoted', 'negated', 'other'):                                  # a letter that is quoted, negated or means something else seats nobody
+            for lang in AXES['lang']:
+                c = self.case(seatmark=mark, fname='prefix', shape='below', lang=lang)
+                self.assertEqual(oracle.truth(c).subjects['p2']['seat'], 'notes_B', (mark, lang))
+        for mark in AXES['seatmark']:
+            self.assertEqual(oracle.truth(self.case(seatmark=mark, fname='plain')).subjects['p2']['seat'], 'B', mark)           # the file is named by the letter: all agree
+        self.assertEqual(oracle.truth(self.case(shape='mixed', people='5')).subjects['p2']['placements'], frozenset(['docs/meeting|1|notes_B|notes_B']))
+        self.assertEqual(oracle.truth(self.case(shape='mixed', people='5')).subjects['p3']['placements'], frozenset(['docs/meeting|1|C|out/C']))
+
+    def test_a_marker_needs_the_language_it_is_written_in(self):
+        for mark in ('dam', 'dam_paren'):
+            self.assertEqual(self.case(seatmark=mark, lang='en').v['lang'], 'ko')
+        for mark in ('en_participant', 'en_as', 'en_seat'):
+            self.assertEqual(self.case(seatmark=mark, lang='ko').v['lang'], 'en')
+
+    def test_the_cells_follow_the_files_and_whether_the_participants_work_on(self):
+        for proof, phase, want in (('told', 'working', 'writing'), ('told', 'done', 'missing'), ('wrote', 'working', 'draft'), ('both', 'done', 'done')):
+            T = oracle.truth(self.case(proof=proof, phase=phase))
+            self.assertEqual({T.subjects[r]['cell'] for r in ('p1', 'p2', 'p3')}, {want}, (proof, phase))
+
+    def test_an_agent_of_another_orchestrator_is_not_on_the_page(self):
+        c, b = self.build(trees='two', people='5')
+        self.assertEqual(b.meta['page'], ['p1', 'p3', 'p5'])
+        self.assertEqual(b.meta['strangers'], ['p2', 'p4'])
+        T = oracle.truth(c)
+        self.assertEqual({r for r in T.subjects if r != 'listing'}, {'p1', 'p3', 'p5'})
+        other = os.path.join(os.path.dirname(b.paths['orch']), b.sid('orch2'), 'subagents')
+        mine = os.path.join(os.path.dirname(b.paths['orch']), b.sid('orch'), 'subagents')
+        self.assertEqual(len([f for f in os.listdir(other) if f.endswith('.jsonl')]), 2)
+        self.assertEqual(len([f for f in os.listdir(mine) if f.endswith('.jsonl')]), 3)
+        self.assertEqual(self.prompt(b, 'p1').split('. ')[0], 'You are a participant of the meeting')      # the same words, another tree
+
+    # --- the builder ---
+    def test_every_first_instruction_points_where_the_guide_axis_says(self):
+        c, b = self.build()
+        guide = os.path.join(b.meta['unit'], 'agenda.md')
+        for role in ('p1', 'p2', 'p3'):
+            self.assertIn('`%s`' % guide, self.prompt(b, role))
+        self.assertTrue(os.path.isfile(guide))
+        c, b = self.build(guide='own')
+        self.assertEqual(sorted(f for f in os.listdir(b.meta['unit']) if f.startswith('agenda')), ['agenda_A.md', 'agenda_B.md', 'agenda_C.md'])
+        for role, letter in zip(('p1', 'p2', 'p3'), 'ABC'):
+            self.assertIn('agenda_%s.md' % letter, self.prompt(b, role))
+        c, b = self.build(guide='missing')
+        self.assertIn('agenda.md', self.prompt(b, 'p1'))
+        self.assertFalse(os.path.exists(os.path.join(b.meta['unit'], 'agenda.md')))
+        c, b = self.build(guide='late')
+        self.assertTrue(os.path.isfile(os.path.join(b.meta['unit'], 'agenda.md')))
+        for role in ('p1', 'p2', 'p3'):
+            self.assertNotIn('agenda.md', self.prompt(b, role))                               # the first instruction names no guide ...
+            later = [d['message']['content'] for d in _read_lines(b.paths[role]) if d.get('origin', {}).get('kind') == 'coordinator']
+            self.assertEqual(len(later), 1)
+            self.assertIn('agenda.md', later[0])                                              # ... a later message does
+        for guide, rel in (('top_readme', 'README.md'), ('top_claude', 'CLAUDE.md'), ('top_agents', 'AGENTS.md'), ('docs_guide', 'docs/guide.md')):
+            c, b = self.build(guide=guide)
+            self.assertTrue(os.path.isfile(os.path.join(b.meta['repo'], rel)), guide)
+            self.assertIn('`%s`' % os.path.join(b.meta['repo'], rel), self.prompt(b, 'p2'))
+            self.assertFalse(os.path.exists(os.path.join(b.meta['repo'], 'docs', 'meeting', 'agenda.md')))
+
+    def test_the_guide_never_declares_a_participant_a_reviewer_or_a_round(self):
+        """A guide that did would be read by the rules of a debate (units.declares_rounds, declared_reports): it must say nothing but its title and its topics."""
+        for guide, lang in itertools.product(('agenda', 'brief', 'readme', 'plan'), AXES['lang']):
+            c, b = self.build(guide=guide, lang=lang)
+            with open(os.path.join(b.meta['unit'], axes.ROOM_GUIDES[guide])) as fh:
+                text = fh.read()
+            self.assertNotRegex(text, r'(?i)reviewers?\b|(?:^|[^\w/])(?:r|round)\d+/|\*\*[A-Z]\s*[—–-]|\.md`')
+
+    def test_files_are_on_disk_where_the_shape_says_and_when_a_participant_wrote_them(self):
+        for shape, rel in (('beside', 'docs/meeting/{L}.md'), ('below', 'docs/meeting/out/{L}.md'), ('r1', 'docs/meeting/r1/{L}.md'), ('deep', 'docs/meeting/out/x/{L}.md'),
+                           ('far', 'work/reports/{L}.md')):
+            for proof in ('told', 'wrote', 'both'):
+                c, b = self.build(shape=shape, proof=proof, people='2')
+                for letter in 'AB':
+                    path = os.path.join(b.meta['repo'], rel.format(L=letter))
+                    self.assertEqual(os.path.isfile(path), proof != 'told', (shape, proof, letter))
+                    told = path in self.prompt(b, 'p%d' % ('AB'.index(letter) + 1))
+                    self.assertEqual(told, proof != 'wrote', (shape, proof))                    # the instruction names the file when it is told
+                    wrote = [w['file_path'] for w in self.calls(b.paths['p%d' % ('AB'.index(letter) + 1)], 'Write')]
+                    self.assertEqual(wrote, [path] if proof != 'told' else [], (shape, proof))
+        c, b = self.build(shape='same', people='3')
+        self.assertEqual(sorted(os.listdir(b.meta['unit'])), ['agenda.md', 'minutes.md'])
+        c, b = self.build(shape='scatter', people='3')
+        for letter in 'abc':
+            self.assertTrue(os.path.isdir(os.path.join(b.meta['repo'], 'repos', 'svc_' + letter, '.git')))
+            self.assertTrue(os.path.isfile(os.path.join(b.meta['repo'], 'repos', 'svc_' + letter, 'src', 'part.py')))
+        self.assertEqual(sorted(os.listdir(b.meta['unit'])), ['agenda.md'])
+        c, b = self.build(shape='none')
+        self.assertEqual(sorted(os.listdir(b.meta['unit'])), ['agenda.md'])                   # nothing is written, nothing is told to be written
+        self.assertEqual(self.calls(b.paths['p1'], 'Write'), [])
+
+    def test_a_path_is_written_in_the_form_the_axis_says(self):
+        for ref in ('abs', 'rel', 'tilde'):
+            c, b = self.build(ref=ref, people='2')
+            text = self.prompt(b, 'p1')
+            want = {'abs': os.path.join(b.meta['repo'], 'docs/meeting/agenda.md'), 'rel': 'docs/meeting/agenda.md',
+                    'tilde': '~' + os.path.join(b.meta['repo'], 'docs/meeting/agenda.md')[len(b.home):]}[ref]
+            self.assertIn('`%s`' % want, text)
+            self.assertIn(want.replace('agenda.md', 'A.md'), text)
+
+    def test_messages_go_between_the_participants_or_from_the_orchestrator_only(self):
+        c, b = self.build(shape='none', talk='peer', people='3')
+        ids = {r: b.ids[r] for r in ('p1', 'p2', 'p3')}
+        for role, to in (('p1', 'p2'), ('p2', 'p3'), ('p3', 'p1')):                          # a ring: each one tells the next
+            self.assertEqual([m['to'] for m in self.calls(b.paths[role], 'SendMessage')], [ids[to]], role)
+        self.assertEqual(self.calls(b.paths['orch'], 'SendMessage'), [])
+        c, b = self.build(shape='none', talk='orch', people='3')
+        self.assertEqual({m['to'] for m in self.calls(b.paths['orch'], 'SendMessage')}, {b.ids[r] for r in ('p1', 'p2', 'p3')})
+        for role in ('p1', 'p2', 'p3'):
+            self.assertEqual(self.calls(b.paths[role], 'SendMessage'), [], role)
+        c, b = self.build(shape='none', talk='peer', people='2')
+        self.assertEqual([m['to'] for m in self.calls(b.paths['p1'], 'SendMessage')], [b.ids['p2']])
+        self.assertEqual([m['to'] for m in self.calls(b.paths['p2'], 'SendMessage')], [b.ids['p1']])
+        c, b = self.build(shape='none', talk='peer', trees='two', people='3')                 # the ring stays inside the orchestrator: p1 and p3 on this page, p2 on the other
+        self.assertEqual([m['to'] for m in self.calls(b.paths['p1'], 'SendMessage')], [b.ids['p3']])
+        self.assertEqual([m['to'] for m in self.calls(b.paths['p3'], 'SendMessage')], [b.ids['p1']])
+
+    NAIVE_MARK = re.compile(r'\[[A-Za-z0-9_]+-([A-E])\]|(?<![A-Za-z0-9])([A-E])\s*\([^)\n]{1,60}\)\s*담당|(?<![A-Za-z0-9])([A-E])\s*담당|participant ([A-E])\b|[Ss]eat ([A-E])\b|\bas ([A-E]) \(')
+
+    def naive_letter(self, text):
+        """The letter a reader that only matches the words finds in the part of an instruction a marker is looked for in (the first 300 characters), or None."""
+        m = self.NAIVE_MARK.search(text[:300])
+        return next(g for g in m.groups() if g) if m else None
+
+    def test_a_marker_opens_the_instruction_and_a_lookalike_is_no_marker_for_a_reader_that_only_matches_words(self):
+        want = {'bracket': r'^\[ROOM-B\] ', 'dam': r'^당신은 B 담당입니다', 'dam_paren': r'^당신은 B\(예산\) 담당입니다', 'en_participant': r'^You are participant B \(Budget\)',
+                'en_as': r'^Work as B \(Budget\)', 'en_seat': r'^You hold seat B\.'}
+        for mark, rx in want.items():
+            text = self.prompt(self.build(seatmark=mark)[1], 'p2')
+            self.assertRegex(text, rx, mark)
+            self.assertEqual(self.naive_letter(text), 'B', mark)                                   # the participant's own letter, at the start
+        for mark, lang in itertools.product(('quoted', 'negated', 'other'), AXES['lang']):
+            c, b = self.build(seatmark=mark, lang=lang)
+            for i, role in enumerate(('p1', 'p2', 'p3')):
+                found = self.naive_letter(self.prompt(b, role))
+                self.assertIsNotNone(found, (mark, lang, role))                                      # it does look like a marker to a reader that only matches the words ...
+                if mark != 'other':
+                    self.assertEqual(found, 'BCD'[i], (mark, lang, role))                            # ... of the next participant's letter, never the participant's own
+        for mark in ('none', 'tag'):
+            self.assertIsNone(self.naive_letter(self.prompt(self.build(seatmark=mark)[1], 'p1')), mark)
+        for i, phrase in enumerate(('as C (not C++)', 'seat C', 'participant C of the user study')):
+            self.assertIn(phrase, self.prompt(self.build(seatmark='other')[1], 'p%d' % (i + 1)))
+        self.assertIn('C(언어) 담당', self.prompt(self.build(seatmark='other', lang='ko')[1], 'p1'))
+        self.assertIn('C 담당자', self.prompt(self.build(seatmark='other', lang='ko')[1], 'p2'))
+        c, b = self.build(seatmark='tag')                                                          # the tag is the first word of the description
+        self.assertEqual(sorted(x['description'][:2] for x in self.calls(b.paths['orch'], 'Agent')), ['A ', 'B ', 'C '])
+
+    def test_every_room_case_is_built_as_its_axes_say(self):
+        """A sweep over every room case of the selection: who is on the page, what each first instruction points at (in the form the axis says), which files are on
+        disk, and who sends a message to whom."""
+        n = 0
+        for c in run.select():
+            if c.bundle != 'room':
+                continue
+            n += 1
+            b = build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+            v, repo = c.v, b.meta['repo']
+            form = {'abs': lambda r: os.path.join(repo, r), 'rel': lambda r: r, 'tilde': lambda r: '~' + os.path.join(repo, r)[len(b.home):]}[v['ref']]
+            page = [(int(r[1:]) - 1, r) for r in b.meta['page']]
+            self.assertEqual(len(self.calls(b.paths['orch'], 'Agent')), len(page) + (v['copy'] == 'worktree'), c.id)          # a checkout with a copy of the bundle has another agent working in it
+            self.assertEqual(page, [(i, 'p%d' % (i + 1)) for i in range(int(v['people'])) if axes.room_tree(v, i) == 1], c.id)
+            for i, role in page:
+                text = self.prompt(b, role)
+                guide, on_disk = axes.room_guide(v, i)
+                self.assertEqual('`%s`' % form(guide) in text if guide else False, guide is not None, c.id)
+                if guide:
+                    self.assertEqual(os.path.isfile(os.path.join(repo, guide)), on_disk, c.id)
+                out, code = axes.room_out(v, i), axes.room_code(v, i)
+                if out is not None:
+                    self.assertEqual('`%s`' % form(out) in text, v['proof'] != 'wrote', c.id)       # the instruction names the file unless only the write shows it
+                    wrote = [os.path.join(repo, out)] + ([os.path.join(repo, code)] if code else [])
+                    scratch = [os.path.join(b.work, 'scratch', name % axes.SEAT_LETTERS[i]) for name in ('repro_%s.py', 'draft_%s.md')] if v['scratch'] == 'tmp' else []
+                    self.assertEqual([w['file_path'] for w in self.calls(b.paths[role], 'Write')], (wrote if v['proof'] != 'told' else []) + scratch, c.id)
+                    logs = [x['command'] for x in self.calls(b.paths[role], 'Bash') if '> ' in x['command']]
+                    self.assertEqual(logs, ['make test > %s' % os.path.join(repo, 'logs', axes.SEAT_LETTERS[i] + '.txt')] if v['scratch'] == 'log' else [], c.id)
+                    self.assertEqual(('Execute these instructions:\n\n```text\n' in text or '다음 지시를 따르세요:\n\n```text\n' in text), v['wrap'] == 'exec_fence', c.id)
+                    self.assertEqual(('Implement your step in a source file' in text or '소스 파일에 구현하세요' in text), v['code'] == 'implied' or (bool(code) and v['proof'] == 'wrote'), c.id)
+                    if code:
+                        self.assertEqual('`%s`' % form(code) in text, v['proof'] != 'wrote', c.id)
+                else:
+                    self.assertEqual(self.calls(b.paths[role], 'Write'), [], c.id)
+            for i in range(int(v['people'])):
+                out, code = axes.room_out(v, i), axes.room_code(v, i)
+                if out is not None:
+                    self.assertEqual(os.path.isfile(os.path.join(repo, out)), v['proof'] != 'told', c.id)
+                if code:
+                    self.assertEqual(os.path.isfile(os.path.join(repo, code)), v['proof'] != 'told', c.id)
+            sent = {role: len(self.calls(b.paths[role], 'SendMessage')) for _, role in page}
+            same_tree = [i for i, _ in page]
+            self.assertEqual(sum(sent.values()), len(same_tree) if v['talk'] == 'peer' and len(same_tree) > 1 else 0, c.id)
+            self.assertEqual(len(self.calls(b.paths['orch'], 'SendMessage')), len(page) if v['talk'] == 'orch' else 0, c.id)
+        self.assertGreater(n, 300)
+
+    # --- the invariant that keeps the debate cases as they are ---
+    def test_in_a_debate_case_no_other_agent_points_at_the_guide_of_the_participant(self):
+        """The room rules need two agents of one orchestrator pointing at the same guide. Of the debate and coupling cases only the rival does (it writes the same
+        file as the participant, so it has no file of its own): every other agent of those scenes is given a text that names no guide, and the room rules add nothing."""
+        guide = re.compile(r'\b(?:brief|README|index|agenda|plan)\.md\b')
+        n = 0
+        for c in run.select():
+            if c.bundle not in ('deb', 'cpl') or c.twin_of or int(axes.digest(c.id, n=4), 16) % 9:
+                continue
+            b = build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+            texts = []
+            for d in _read_lines(b.paths['orch']):
+                if d.get('type') == 'assistant':
+                    for blk in d['message']['content']:
+                        if blk.get('type') == 'tool_use' and blk['name'] == 'Agent':
+                            texts.append(blk['input'].get('prompt', ''))
+                        elif blk.get('type') == 'tool_use' and blk['name'] == 'Bash' and ('claude -p' in blk['input'].get('command', '') or 'codex exec' in blk['input'].get('command', '')):
+                            texts.append(blk['input']['command'])
+            naming = [t for t in texts if guide.search(t)]
+            self.assertLessEqual(len(naming), 2 if c.v['role'] == 'rival' else 1, c.id)
+            n += 1
+        self.assertGreater(n, 30)
+
+
+def _when(stamp):
+    """Seconds since the epoch of a record's ISO timestamp."""
+    import calendar
+    return calendar.timegm(time.strptime(stamp[:19], '%Y-%m-%dT%H:%M:%S')) + float('0' + stamp[19:-1])
+
+
+class BundleScenes(unittest.TestCase):
+    """The room's folder as one topic of a bundle (`bundle=root`): the folder above it holds the bundle's brief and, by `above`, a document that may close it; `copy` reaches the
+    bundle's folder by a link the participants write their paths with, or copies it into a linked worktree of the repository where another agent works."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix='scen-bundle-')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def build(self, **v):
+        c = axes.normalize(Case('room', dict(bundle='root', proof='wrote', phase='done', **v)))
+        return c, build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+
+    def calls(self, path, name):
+        return [blk['input'] for d in _read_lines(path) if d.get('type') == 'assistant' for blk in d['message']['content'] if blk.get('type') == 'tool_use' and blk['name'] == name]
+
+    def test_the_new_axes_are_named_in_an_id_only_off_the_baseline(self):
+        base = Case('room', {}).id
+        for a in ('bundle', 'above', 'copy'):
+            self.assertNotIn(a + '=', base)
+            self.assertIn(a, axes.OPTIONAL['room'])
+        self.assertIn('above=closing', Case('room', dict(bundle='root', above='closing')).id)
+
+    def test_what_cannot_be_a_bundle_topic_is_folded_to_a_room_alone(self):
+        for v in (dict(guide='top_readme'), dict(shape='far'), dict(shape='r1'), dict(people='1'), dict(trees='two'), dict(cite='fence')):
+            c = axes.normalize(Case('room', dict(v, bundle='root', above='closing', copy='link')))
+            self.assertEqual((c.v['bundle'], c.v['above'], c.v['copy']), ('none', 'none', 'none'), v)
+        self.assertEqual(axes.normalize(Case('room', dict(above='closing', copy='worktree'))).v['above'], 'none')
+
+    def test_the_bundle_has_a_brief_and_the_room_is_a_folder_of_it(self):
+        c, b = self.build()
+        repo = b.meta['repo']
+        self.assertEqual(b.meta['unit'], os.path.join(repo, 'docs', 'records', 'bundle', 'meeting'))
+        self.assertTrue(os.path.isfile(os.path.join(repo, 'docs', 'records', 'bundle', 'brief.md')))
+        self.assertTrue(os.path.isfile(os.path.join(b.meta['unit'], 'agenda.md')))
+
+    def test_the_documents_above_the_room(self):
+        for above, name, after in (('none', None, None), ('closing', 'CLOSING.md', True), ('unnamed', 'CLOSING.md', True), ('early', 'CLOSING.md', False), ('plain', 'notes.md', True), ('open', 'CLOSING.md', True)):
+            c, b = self.build(above=above)
+            bundle = os.path.join(b.meta['repo'], 'docs', 'records', 'bundle')
+            have = sorted(f for f in os.listdir(bundle) if f != 'brief.md' and os.path.isfile(os.path.join(bundle, f)))
+            self.assertEqual(have, [name] if name else [], above)
+            if name:
+                mine = os.path.getmtime(os.path.join(b.meta['unit'], 'A.md'))
+                self.assertEqual(os.path.getmtime(os.path.join(bundle, name)) > mine, after, above)
+                with open(os.path.join(bundle, name)) as f:
+                    said = f.read()
+                self.assertEqual('meeting/' in said, above in ('closing', 'early', 'plain'), above)
+
+    def test_the_link_is_what_the_participants_write_and_the_files_are_in_the_real_folder(self):
+        c, b = self.build(copy='link')
+        repo = b.meta['repo']
+        link = os.path.join(repo, 'view')
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(os.path.realpath(link), os.path.realpath(os.path.join(repo, 'docs', 'records', 'bundle')))
+        self.assertEqual(b.meta['unit'], os.path.join(link, 'meeting'))
+        self.assertTrue(os.path.isfile(os.path.join(repo, 'docs', 'records', 'bundle', 'meeting', 'A.md')))
+        for role in b.meta['page']:
+            text = _read_lines(b.paths[role])[0]['message']['content']
+            self.assertIn(os.path.join(link, 'meeting'), text)
+            self.assertNotIn('docs/records/bundle', text)
+            self.assertTrue(all(w['file_path'].startswith(link + os.sep) for w in self.calls(b.paths[role], 'Write')))
+
+    def test_the_worktree_is_a_linked_checkout_with_a_copy_of_the_bundle_and_an_agent_in_it(self):
+        c, b = self.build(copy='worktree', above='closing')
+        repo, wt = b.meta['repo'], os.path.join(b.work, 'wt')
+        def read(path):
+            with open(path) as f:
+                return f.read()
+        git = read(os.path.join(wt, '.git')).split(':', 1)[1].strip()
+        self.assertEqual(os.path.realpath(os.path.join(git, read(os.path.join(git, 'commondir')).strip())), os.path.realpath(os.path.join(repo, '.git')))
+        for rel in ('brief.md', 'CLOSING.md', 'meeting/agenda.md', 'meeting/A.md'):
+            one, two = os.path.join(repo, 'docs', 'records', 'bundle', rel), os.path.join(wt, 'docs', 'records', 'bundle', rel)
+            self.assertEqual((read(one), os.path.getmtime(one)), (read(two), os.path.getmtime(two)), rel)
+        agents = self.calls(b.paths['orch'], 'Agent')
+        self.assertEqual(len(agents), len(b.meta['page']) + 1)
+        first = _read_lines(b.paths['bystander'])[0]
+        self.assertEqual(first['cwd'], wt)
+        self.assertNotIn('meeting', first['message']['content'])                       # it points at no guide: it is no participant
+
+    def test_the_truth_closes_the_room_only_when_the_conclusion_is_after_the_files_and_the_files_are_in_and_nobody_works(self):
+        for above, phase, proof in itertools.product(AXES['above'], AXES['phase'], ('told', 'wrote')):
+            c = axes.normalize(Case('room', dict(bundle='root', above=above, phase=phase, proof=proof)))
+            got = oracle.truth(c).subjects['listing']['finals']
+            want = above in ('closing', 'unnamed') and phase == 'done' and proof == 'wrote'
+            self.assertEqual(got, frozenset(['docs/records/bundle/meeting|../CLOSING.md']) if want else frozenset(), (above, phase, proof))
+
+
+class ReviewShapes(unittest.TestCase):
+    """Shapes of real work that the first scenes did not draw, as axis values with a truth and a builder: runs that never overlap, parallel work on code beside a
+    plan, an earlier instruction that is only shown (a fence, a block quote, a read-only review), messages that were never delivered, and an orchestrator page whose
+    session ended in a way the old scenes never had (a `claude -p` run, local slash commands, a process that is gone). The builder writes what the value says, so a red
+    cell is the board's."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix='scen-review-')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def case(self, bundle='room', **v):
+        return axes.normalize(Case(bundle, v))
+
+    def build(self, bundle='room', **v):
+        c = self.case(bundle, **v)
+        return c, build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+
+    def why(self, **v):
+        kind, _, _, why = oracle.room_trace(self.case(**v).v)
+        return kind, why
+
+    def calls(self, path, name):
+        return [blk['input'] for d in _read_lines(path) if d.get('type') == 'assistant' for blk in d['message']['content'] if blk.get('type') == 'tool_use' and blk['name'] == name]
+
+    def prompt(self, b, role):
+        return _read_lines(b.paths[role])[0]['message']['content']
+
+    # --- ids: nothing that does not use the new axes is renamed ---
+    def test_the_new_axes_are_named_in_an_id_only_when_they_are_not_at_the_baseline(self):
+        for bundle, names in (('room', ('rtime', 'code', 'cite', 'delivery')), ('deb', ('qform',)), ('sta', ('entry', 'tail', 'process'))):
+            base = Case(bundle, {}).id
+            for a in names:
+                self.assertNotIn(a + '=', base)
+                self.assertIn(a, axes.OPTIONAL[bundle])
+        self.assertIn('rtime=sequential', self.case(rtime='sequential').id)
+        self.assertIn('tail=commands', self.case('sta', skind='main', tail='commands').id)
+        self.assertEqual(Case.from_id(self.case('sta', skind='main', entry='sdk', tail='end', process='gone').id).key(), self.case('sta', skind='main', entry='sdk', tail='end', process='gone').key())
+        self.assertNotIn('entry', run.PAIR_AXES['sta'])
+
+    # --- runs that never overlap ---
+    def test_participants_that_run_one_after_the_other_are_no_room(self):
+        for people, phase in itertools.product(('2', '3', '5'), AXES['phase']):
+            self.assertEqual(self.why(rtime='overlap', people=people, phase=phase), ('cells', None), (people, phase))
+            self.assertEqual(self.why(rtime='sequential', people=people, phase=phase), (None, 'timing'), (people, phase))
+        T = oracle.truth(self.case(rtime='sequential', phase='done'))
+        self.assertEqual(T.subjects['listing']['units'], frozenset())
+        for role in ('p1', 'p2', 'p3'):
+            self.assertEqual(T.subjects[role], dict(seat=None, cell=None, role='none', placements=frozenset(), unit=None))
+        # it only means something where a room could be one; and runs that never coexist send no message
+        self.assertEqual(self.case(rtime='sequential', shape='r1').v['rtime'], 'overlap')                  # a round folder is a debate whenever it ran
+        self.assertEqual(self.case(rtime='sequential', shape='none', talk='peer').v['rtime'], 'overlap')
+        self.assertEqual(self.case(rtime='sequential', talk='peer').v['talk'], 'none')
+        self.assertEqual(self.case(rtime='sequential', talk='orch').v['talk'], 'orch')                        # the orchestrator may message each of them
+        self.assertEqual(self.why(rtime='sequential', talk='orch'), (None, 'timing'))
+        self.assertEqual(self.case(rtime='sequential', people='1').v['rtime'], 'overlap')
+        self.assertEqual(self.case(rtime='sequential', guide='top_readme').v['rtime'], 'overlap')
+
+    def spans(self, b):
+        """[(start, end or inf)] of the participants of the page, from their own records: the first line, and the last one when it ends the turn."""
+        out = []
+        for role in b.meta['page']:
+            rows = _read_lines(b.paths[role])
+            last = [d for d in rows if d.get('type') == 'assistant'][-1]
+            ended = last['message'].get('stop_reason') == 'end_turn'
+            out.append((_when(rows[0]['timestamp']), _when(rows[-1]['timestamp']) if ended else float('inf')))
+        return out
+
+    def test_the_records_overlap_in_time_exactly_when_the_axis_says(self):
+        for rtime, people, phase in itertools.product(AXES['rtime'], ('2', '3', '5'), AXES['phase']):
+            c, b = self.build(rtime=rtime, people=people, phase=phase)
+            spans = self.spans(b)
+            overlap = max(s for s, _ in spans) < min(e for _, e in spans)
+            self.assertEqual(overlap, rtime in ('overlap', 'quiet'), c.id)                              # one that has not ended is there until now
+            if rtime == 'quiet':                                                                         # none has ended, though each one's records stop before the next one's begin
+                rows = {role: _read_lines(b.paths[role]) for role in b.meta['page']}
+                windows = [(_when(r[0]['timestamp']), _when(r[-1]['timestamp'])) for r in rows.values()]
+                self.assertEqual([e for _, e in spans], [float('inf')] * int(people), c.id)
+                for (s1, e1), (s2, e2) in zip(windows, windows[1:]):
+                    self.assertGreater(s2 - e1, 60, c.id)
+            if rtime == 'sequential':                                                                    # each starts after the one before has finished, with room to spare
+                for (s1, e1), (s2, e2) in zip(spans, spans[1:]):
+                    self.assertGreater(s2 - e1, 60, c.id)
+                self.assertEqual([e == float('inf') for _, e in spans], [False] * (int(people) - 1) + [phase == 'working'], c.id)
+            elif phase == 'done' and rtime != 'quiet':
+                self.assertTrue(all(e != float('inf') for _, e in spans), c.id)
+
+    # --- parallel work on code that reports beside a plan ---
+    def test_participants_that_mostly_change_code_outside_the_folder_are_no_room(self):
+        want = {('2', 'none'): 'cells', ('2', 'one'): 'cells', ('2', 'all'): None, ('3', 'one'): 'cells', ('3', 'majority'): None, ('3', 'all'): None,
+                ('5', 'one'): 'cells', ('5', 'majority'): None, ('5', 'all'): None}
+        for (people, code), kind in want.items():
+            for shape in ('beside', 'below', 'mixed'):
+                self.assertEqual(self.why(people=people, code=code, shape=shape), (kind, None if kind else 'code'), (people, code, shape))
+        self.assertEqual(self.case(people='2', code='majority').v['code'], 'all')                           # two of two
+        self.assertEqual({len(axes.room_coders(self.case(people=p, code='majority').v)) for p in ('3',)}, {2})
+        self.assertEqual(len(axes.room_coders(self.case(people='5', code='majority').v)), 3)
+        self.assertEqual(self.case(code='all', shape='far').v['code'], 'none')                              # code is a second file beside the notes in the folder
+        self.assertEqual(self.case(code='all', guide='top_readme').v['code'], 'none')
+        # a room that is one: the notes are still the file of each, code or not
+        T = oracle.truth(self.case(people='3', code='one', shape='below'))
+        self.assertEqual({T.subjects[r]['seat'] for r in ('p1', 'p2', 'p3')}, {'A', 'B', 'C'})
+        T = oracle.truth(self.case(people='3', code='all', rtime='overlap'))
+        self.assertEqual(T.subjects['listing']['units'], frozenset())
+        for kind in oracle.room_trace(self.case(people='3', code='all').v)[:1]:
+            self.assertIsNone(kind)
+
+    def test_the_code_is_told_and_written_where_the_axis_says(self):
+        for code, people, proof in itertools.product(('one', 'majority', 'all'), ('3', '5'), AXES['proof']):
+            c, b = self.build(code=code, people=people, proof=proof)
+            repo, v = b.meta['repo'], c.v
+            coders = axes.room_coders(v)
+            for i in range(int(people)):
+                role, path = 'p%d' % (i + 1), os.path.join(repo, 'src', 'task_%s' % 'abcde'[i], 'part.py')
+                told = path in self.prompt(b, role)
+                written = [w['file_path'] for w in self.calls(b.paths[role], 'Write') if w['file_path'].endswith('part.py')]
+                self.assertEqual(told, i in coders and proof != 'wrote', (c.id, role))
+                self.assertEqual(written, [path] if (i in coders and proof != 'told') else [], (c.id, role))
+                self.assertEqual(os.path.isfile(path), i in coders and proof != 'told', (c.id, role))
+            self.assertEqual(len(coders), {'one': 1, 'majority': int(people) // 2 + 1, 'all': int(people)}[code])
+            self.assertNotIn('src', os.listdir(b.meta['unit']))                                              # the code is outside the guide's folder
+
+    # --- an earlier instruction that is only shown ---
+    def test_an_instruction_that_is_only_quoted_or_reviewed_is_no_room_and_seats_nobody(self):
+        for cite, shape, lang in itertools.product(AXES['cite'][1:], ('beside', 'below', 'mixed'), AXES['lang']):
+            c = self.case(cite=cite, shape=shape, lang=lang)
+            self.assertEqual(oracle.room_trace(c.v)[0::3], (None, 'cite'), c.id)
+            T = oracle.truth(c)
+            self.assertEqual(T.subjects['listing']['units'], frozenset(), c.id)
+            for role in ('p1', 'p2', 'p3'):
+                self.assertEqual(T.subjects[role], dict(seat=None, cell=None, role='none', placements=frozenset()), c.id)
+        # a folder that already has a round folder is a debate on the list, and nobody in it is seated by words that were only quoted
+        for cite in AXES['cite'][1:]:
+            c = self.case(cite=cite, shape='r1')
+            self.assertEqual(oracle.room_trace(c.v)[0::3], ('debate', 'cite'))
+            T = oracle.truth(c)
+            self.assertEqual(T.subjects['listing']['units'], frozenset(['docs/meeting']))
+            self.assertEqual(T.subjects['p1'], dict(seat=None, cell=None, role='none', placements=frozenset()))
+        # nothing is written and nothing but the earlier words names the files; the scene is the same wherever else the axes sit
+        c = self.case(cite='fence', seatmark='bracket', proof='wrote', talk='peer', code='all', rtime='sequential', trees='two')
+        self.assertEqual((c.v['proof'], c.v['seatmark'], c.v['talk'], c.v['code'], c.v['rtime'], c.v['trees']), ('told', 'none', 'none', 'none', 'overlap', 'one'))
+        self.assertEqual(self.case(cite='fence', guide='top_readme').v['cite'], 'none')
+        self.assertEqual(self.case(cite='fence', shape='far').v['cite'], 'none')
+        self.assertEqual(self.case(cite='fence', people='1').v['cite'], 'none')
+
+    def test_the_earlier_instruction_is_shown_in_the_form_the_axis_says(self):
+        marks = {'inline': lambda t: re.search(r'review its wording; do not carry it out: "Read `[^`]+` and follow it\. Write your notes to `[^`]+`\."', t) and '```' not in t and '\n> ' not in t,
+                 'fence': lambda t: re.search(r'```text\nRead `[^`]+` and follow it\.\nWrite your notes to `[^`]+`\.\n```', t),
+                 'blockquote': lambda t: re.search(r'\n> Read `[^`]+` and follow it\.\n> Write your notes to `[^`]+`\.', t) and '```' not in t,
+                 'readonly': lambda t: t.startswith('You are a participant of the meeting. This is a read-only review: do not create, change or run anything.') and '```' not in t and '\n> ' not in t}
+        for cite, mark in marks.items():
+            for shape in ('beside', 'r1'):
+                c, b = self.build(cite=cite, shape=shape, people='2')
+                for role, letter in (('p1', 'A'), ('p2', 'B')):
+                    text = self.prompt(b, role)
+                    self.assertTrue(mark(text), (cite, shape, text))
+                    self.assertIn('`%s`' % os.path.join(b.meta['unit'], 'agenda.md'), text)
+                    self.assertIn('%s.md`' % letter, text)                                                  # the file is named, and not written
+                    self.assertEqual(self.calls(b.paths[role], 'Write'), [])
+                    self.assertFalse(os.path.exists(os.path.join(b.meta['unit'], 'r1' if shape == 'r1' else '', letter + '.md')), (cite, shape))
+                self.assertTrue(os.path.isfile(os.path.join(b.meta['unit'], 'agenda.md')))                  # the guide is there: only the words are somebody else's
+            c, b = self.build(cite=cite, lang='ko', people='2')
+            self.assertRegex(self.prompt(b, 'p1'), r'[가-힣]')
+
+    def test_a_report_path_a_quoter_only_shows_seats_nobody_in_the_form_the_axis_says(self):
+        for qform, kind, lang in itertools.product(AXES['qform'][1:], AXES['kind'], AXES['lang']):
+            c, b = self.build('deb', role='quoter', qform=qform, kind=kind, lang=lang)
+            T = oracle.truth(c)
+            self.assertEqual(T.subjects['child']['seat'], None, c.id)
+            self.assertNotIn(('debate_in_misc', 'child'), T.diag, c.id)
+            self.assertIn(('debate_in_misc', 'child'), T.allowed, c.id)
+            if kind == 'sub':
+                text = [x['prompt'] for x in self.calls(b.paths['orch'], 'Agent')][-1]
+            else:
+                text = [x['command'] for x in self.calls(b.paths['orch'], 'Bash') if 'claude -p' in x['command'] or 'codex exec' in x['command']][0]
+            self.assertIn({'fence': '```text\n', 'blockquote': '\n> ', 'readonly': 'read-only review' if lang == 'en' else '읽기 전용 검토',
+                           'sentence': 'Read-only quote of an earlier instruction.\nRead' if lang == 'en' else '이전 지침의 읽기 전용 인용입니다.\n`'}[qform], text, c.id)
+            self.assertIn('r1/B.md', text, c.id)                                                           # the path is in the text, in every form
+        c = self.case('deb', role='quoter', qform='fence', marker='quoted', wmode='redirect')
+        self.assertEqual((c.v['marker'], c.v['wmode']), ('none', 'tool'))
+        self.assertEqual(self.case('deb', role='writer', qform='fence').v['qform'], 'inline')               # only a quoter shows an earlier instruction
+        self.assertIn(('debate_in_misc', 'child'), oracle.truth(self.case('deb', role='quoter')).diag)       # the one-line quote is as it was
+
+    # --- messages that were never delivered ---
+    def test_a_message_that_was_answered_with_an_error_makes_no_meeting(self):
+        for people, guide in itertools.product(('2', '3', '5'), ('agenda', 'brief')):
+            self.assertEqual(self.why(shape='none', talk='peer', people=people, guide=guide), ('members', None), (people, guide))
+            self.assertEqual(self.why(shape='none', talk='peer', people=people, guide=guide, delivery='failed'), (None, 'delivery'), (people, guide))
+            self.assertEqual(self.why(shape='beside', talk='peer', people=people, guide=guide, delivery='failed'), ('cells', None), (people, guide))     # files make a room by themselves
+        self.assertEqual(self.case(delivery='failed').v['delivery'], 'ok')                                  # nobody to message
+        self.assertEqual(self.case(delivery='failed', talk='orch').v['delivery'], 'ok')
+        self.assertEqual(self.case(delivery='failed', talk='peer', people='1').v['delivery'], 'ok')
+        T = oracle.truth(self.case(shape='none', talk='peer', delivery='failed'))
+        self.assertEqual(T.subjects['listing']['units'], frozenset())
+        self.assertEqual(T.subjects['p1'], dict(seat=None, cell=None, role='none', placements=frozenset(), unit=None))
+
+    def test_the_failed_message_carries_the_error_flag_in_its_result(self):
+        for delivery, flag in (('ok', False), ('failed', True)):
+            c, b = self.build(shape='none', talk='peer', people='3', delivery=delivery)
+            for role in ('p1', 'p2', 'p3'):
+                rows = _read_lines(b.paths[role])
+                ids = [blk['id'] for d in rows if d.get('type') == 'assistant' for blk in d['message']['content'] if blk.get('type') == 'tool_use' and blk['name'] == 'SendMessage']
+                results = [blk for d in rows if d.get('type') == 'user' and isinstance(d['message']['content'], list) for blk in d['message']['content']
+                           if blk.get('type') == 'tool_result' and blk['tool_use_id'] in ids]
+                self.assertEqual([r['is_error'] for r in results], [flag], (delivery, role))
+
+    # --- the orchestrator page of a session ---
+    def test_the_page_is_working_only_while_a_turn_goes_on_in_a_process_that_is_there(self):
+        for entry, tail, process in itertools.product(AXES['entry'], AXES['tail'], AXES['process']):
+            c = self.case('sta', skind='main', life='running', entry=entry, tail=tail, process=process)
+            want = 'working' if (tail in ('mid', 'prompt', 'next') and process == 'there') else 'idle'
+            self.assertEqual(oracle.truth(c).subjects['orch'], {'orch_state': want}, c.id)
+        self.assertEqual(oracle.truth(self.case('sta', skind='main', life='running')).subjects['orch'], {'orch_state': 'working'})       # the baseline is as it was
+        self.assertEqual(self.case('sta', skind='main', life='running').id, 'sta:skind=main;life=running;flaw=none;at=live;os=linux')
+        # a `claude -p` run has no slash commands; only an orchestrator that no limit stopped has these shapes
+        self.assertEqual(self.case('sta', skind='main', entry='sdk', tail='commands').v['tail'], 'end')
+        for skind, life in (('cli', 'normal_end'), ('main', 'limit_exit'), ('sub', 'running')):
+            v = self.case('sta', skind=skind, life=life, entry='sdk', tail='end', process='gone').v
+            self.assertEqual((v['entry'], v['tail'], v['process']), ('cli', 'mid', 'there'), (skind, life))
+        v = self.case('sta', skind='main', entry='sdk', tail='end', process='gone', flaw='multi_proc', os='mac_nops', at='after_restart').v
+        self.assertEqual((v['flaw'], v['os'], v['at']), ('none', 'linux', 'live'))
+
+    def test_the_builder_ends_the_session_the_way_the_axes_say(self):
+        for entry, tail, process in itertools.product(AXES['entry'], AXES['tail'], AXES['process']):
+            c, b = self.build('sta', skind='main', life='running', entry=entry, tail=tail, process=process)
+            v = c.v
+            rows = _read_lines(b.paths['orch'])
+            conv = [d for d in rows if d.get('type') in ('user', 'assistant')]
+            is_cmd = lambda d: isinstance(d['message']['content'], str) and d['message']['content'].startswith(('<local-command-', '<command-name>'))
+            self.assertEqual({d.get('entrypoint') for d in conv}, {'sdk-cli' if v['entry'] == 'sdk' else 'cli'}, c.id)
+            durations = [d for d in rows if d.get('subtype') == 'turn_duration']
+            self.assertEqual(bool(durations), v['entry'] == 'cli' and v['tail'] in ('end', 'prompt', 'commands', 'next', 'asked'), c.id)          # a `claude -p` run has none
+            self.assertEqual(bool([d for d in rows if d.get('type') == 'cost-state']), v['entry'] == 'sdk' and v['tail'] in ('end', 'prompt', 'asked'), c.id)
+            last = conv[-1]
+            if v['tail'] == 'mid':
+                self.assertEqual((last['type'], last['message']['stop_reason']), ('assistant', 'tool_use'), c.id)
+            elif v['tail'] in ('end', 'asked'):
+                self.assertEqual((last['type'], last['message']['stop_reason']), ('assistant', 'end_turn'), c.id)
+                self.assertEqual(last['message']['content'][0]['text'].endswith('?'), v['tail'] == 'asked', c.id)
+            elif v['tail'] == 'next':                                                                                                     # the next prompt and its first call, within a second of the end
+                self.assertEqual((last['type'], last['message']['stop_reason']), ('assistant', 'tool_use'), c.id)
+                self.assertEqual((conv[-2]['type'], is_cmd(conv[-2]), conv[-3]['message']['stop_reason']), ('user', False, 'end_turn'), c.id)
+                self.assertLess(_when(conv[-1]['timestamp']) - _when(conv[-3]['timestamp']), 1.0, c.id)
+            elif v['tail'] == 'prompt':
+                self.assertEqual(last['type'], 'user', c.id)
+                self.assertFalse(is_cmd(last), c.id)
+                self.assertEqual([d['message'].get('stop_reason') for d in conv if d['type'] == 'assistant'][-1], 'end_turn', c.id)      # nobody answered it
+            elif v['tail'] == 'commands':
+                self.assertEqual([is_cmd(d) for d in conv[-3:]], [True, True, True], c.id)
+                self.assertEqual(conv[-4]['message']['stop_reason'], 'end_turn', c.id)                                                   # the turn had ended before them
+            else:
+                self.assertEqual([d['type'] for d in conv], ['user'] * len(conv), c.id)
+                self.assertTrue(all(is_cmd(d) for d in conv), c.id)                                                                      # nothing but slash commands
+            live = [p for ph in b.phases for p in ph.procs]
+            self.assertEqual(len(live), 1 if v['process'] == 'there' else 0, c.id)
+            if live:
+                self.assertEqual('-p' in live[0]['argv'], v['entry'] == 'sdk', c.id)
+                self.assertEqual(live[0]['session']['entrypoint'], 'sdk-cli' if v['entry'] == 'sdk' else 'cli', c.id)
+            self.assertEqual(os.path.isfile(os.path.join(b.sess_dir, '100.json')), False, c.id)                                         # the session files are written when the board looks
+
+    def test_every_new_shape_is_in_the_selection_with_its_reason(self):
+        cases = run.select()
+        self.assertEqual({c.v['rtime'] for c in cases if c.bundle == 'room'}, set(AXES['rtime']))
+        self.assertEqual({c.v['code'] for c in cases if c.bundle == 'room'}, set(AXES['code']))
+        self.assertEqual({c.v['cite'] for c in cases if c.bundle == 'room'}, set(AXES['cite']))
+        self.assertEqual({c.v['delivery'] for c in cases if c.bundle == 'room'}, set(AXES['delivery']))
+        self.assertEqual({c.v['wrap'] for c in cases if c.bundle == 'room'}, set(AXES['wrap']))
+        self.assertEqual({c.v['scratch'] for c in cases if c.bundle == 'room'}, set(AXES['scratch']))
+        self.assertEqual({c.v['qform'] for c in cases if c.bundle == 'deb'}, set(AXES['qform']))
+        self.assertEqual({(c.v['entry'], c.v['tail'], c.v['process']) for c in cases if c.bundle == 'sta' and c.v['skind'] == 'main' and c.v['life'] == 'running'},
+                         {(e, t, p) for e, t, p in itertools.product(AXES['entry'], AXES['tail'], AXES['process']) if not (e == 'sdk' and t in ('commands', 'commands_only'))})
+        b = types.SimpleNamespace(ids={}, t0=0)
+
+        def reason(bundle, subject, field, ws, gs, **v):
+            c = axes.normalize(Case(bundle, v))
+            return run.reason_of(run.Cell(c, subject, field, 'wrong', ws, gs, b))
+        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', rtime='sequential'), 'R-ROOM-TIMING')
+        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', code='all'), 'R-ROOM-CODE')
+        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', cite='fence'), 'R-ROOM-CITE')
+        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', cite='fence', shape='r1'), 'R-ROOM-CITE')
+        self.assertEqual(reason('room', 'p1', 'unit', None, 'x', shape='none', talk='peer', delivery='failed'), 'R-ROOM-MSG-FAIL')
+        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', shape='none', talk='peer'), 'R-ROOM-MEMBERS')
+        self.assertEqual(reason('deb', 'child', 'seat', None, 'B', role='quoter', qform='fence'), 'B-CITE')
+        self.assertEqual(reason('deb', 'child', 'seat', None, 'B', role='quoter'), 'B-QUOTE')
+        for shape, want in ((dict(process='gone', tail='mid'), 'S-ORCH-DEAD'), (dict(tail='commands'), 'S-ORCH-COMMANDS'), (dict(entry='sdk', tail='end'), 'S-ORCH-SDK-END'),
+                            (dict(), 'S-ORCH-STATE')):
+            self.assertEqual(reason('sta', 'orch', 'orch_state', 'idle', 'working', skind='main', life='running', **shape), want, shape)
+        for r in ('R-ROOM-TIMING', 'R-ROOM-CODE', 'R-ROOM-CITE', 'R-ROOM-MSG-FAIL', 'B-CITE', 'S-ORCH-DEAD', 'S-ORCH-COMMANDS', 'S-ORCH-SDK-END'):
+            self.assertIn(r, run.REASONS)
 
 
 class StrictXfail(unittest.TestCase):

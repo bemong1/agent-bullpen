@@ -14,6 +14,7 @@ import io
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -35,7 +36,7 @@ from test_release import FakeServer, Home, live_server, main_env, run_main, writ
 from board import i18n, plans, procs, tokens, util, views  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-ZONES = ('cli', 'alert', 'event', 'plan')
+ZONES = ('cli', 'alert', 'event')
 
 
 def load_messages(code):
@@ -232,17 +233,17 @@ class AlertFields(SessionCase):
     def test_choice_question_say_and_turn(self):
         s = self.claude()
         s._feed_main(tool_use('AskUserQuestion', {'questions': [{'question': 'Which?', 'options': [{'label': 'A'}, {'label': 'B'}]}]}, tid='tuq'))
-        s.orch['turn_end_ts'] = s.orch['last_ts'] = T
+        s.orch['last_ts'] = T
         (a,) = self.alerts(s)
         self.check(a, '오케스트레이터가 선택지를 묻고 있습니다', 'alert.ask.title', {}, 'Which? — A / B')
         s = self.claude()
         s._feed_main(say('Shall I go ahead?'))
-        s.orch['turn_end_ts'] = s.orch['last_ts'] = T
+        s.orch['last_ts'] = T
         (a,) = self.alerts(s)
         self.check(a, '오케스트레이터가 답을 기다립니다', 'alert.say.title', {}, 'Shall I go ahead?')
         s = self.claude()
         s._feed_main(say('All done.'))
-        s.orch['turn_end_ts'] = s.orch['last_ts'] = T
+        s.orch['last_ts'] = T
         (a,) = self.alerts(s)
         self.check(a, '진행 중인 에이전트가 없고 오케스트레이터가 다음 지시를 기다립니다', 'alert.turn.title', {}, 'All done.')
         self.assertEqual(a['level'], 'info')
@@ -258,7 +259,7 @@ class AlertFields(SessionCase):
 
     def test_stall_failed_and_stopped(self):
         s, a = self.agents_session()
-        s.orch['turn_end_ts'] = s.orch['last_ts'] = T
+        s.orch['last_ts'] = T
         stalled = self.alerts(s, {a.id: 'stalled'}, now=T + 7 * 60 + 5)
         (x,) = stalled
         self.check(x, 'T1-A — 7분째 활동 없음', 'alert.stall.title', {'name': 'T1-A', 'minutes': 7}, 'running tests')
@@ -270,14 +271,14 @@ class AlertFields(SessionCase):
 
     def test_report_with_a_decision_item(self):
         s, a = self.agents_session()
-        s.orch['turn_end_ts'] = s.orch['last_ts'] = T
+        s.orch['last_ts'] = T
         s.feed.append({'ts': T, 'kind': 'handback', 'from': a.id, 'to': 'orch', 'title': '최종 보고', 'text': 'done\n- user decision: pick A or B', 'agent': a.id})
         (x,) = self.alerts(s, {a.id: 'done'})
         self.check(x, 'T1-A 보고에 사용자 결정·승인 항목', 'alert.hb.title', {'name': 'T1-A'}, 'user decision: pick A or B')
 
     def test_codex_weekly_limit(self):
         s = self.claude()
-        s.orch['turn_end_ts'] = s.orch['last_ts'] = T
+        s.orch['last_ts'] = T
         s._codex_busy = lambda statuses, now: True
         as_of, resets = 1790726400.0, 1791000000.0
         stamp = lambda ts: datetime.datetime.fromtimestamp(ts).strftime('%m/%d %H:%M')
@@ -298,69 +299,6 @@ class AlertFields(SessionCase):
         with mock.patch.object(views, 'CODEX', types.SimpleNamespace(limit=lambda: full)):
             (x,) = views.alerts(s, {}, T + 100)
         self.assertEqual((x['text'], x['text_i18n']['params']), ('계정 전체 값 · 기록 - · 재설정 -', {'as_of': None, 'resets_at': None}))
-
-
-class PlanErrors(unittest.TestCase):
-    """Plans: error_info {code, params} beside the old `error`; both are hidden together by the 429 rule."""
-
-    def setUp(self):
-        self.h = Home(self)
-        plans._CL_CONF.update(key=None, v=None)
-        self.addCleanup(plans._CL_CONF.update, key=None, v=None)
-        self.u = plans.ClaudeUsage(os.path.join(self.h.home, 'u.json'))
-
-    def credentials(self, expires_in):
-        write(os.path.join(self.h.claude, '.credentials.json'), json.dumps({'claudeAiOauth': {'accessToken': 'FAKE', 'expiresAt': (time.time() + expires_in) * 1000}}))
-
-    def check(self, error, info, text):
-        self.assertEqual((self.u.error, self.u.error_info), (error, info))
-        self.assertEqual(ko('plan.error.' + info['code'], **info['params']), error)
-        self.assertEqual(text, i18n.fill(EN['plan.error.' + info['code']], info['params']))
-
-    def test_login_missing_and_token_expired(self):
-        self.u.poll()
-        self.check('로그인 정보 없음', {'code': 'login_missing', 'params': {}}, 'No login found')
-        self.credentials(-60)
-        self.u.poll()
-        self.check('토큰 만료 — Claude Code를 쓰면 갱신', {'code': 'token_expired', 'params': {}}, 'Token expired — using Claude Code renews it')
-
-    def test_http_error_and_other_failure(self):
-        self.credentials(3600)
-        err = urllib.error.HTTPError('https://x/', 429, 'Too Many', {'Retry-After': '120'}, None)
-        with mock.patch('urllib.request.urlopen', side_effect=err):
-            self.u.poll()
-        self.check('조회 실패(HTTP 429)', {'code': 'http_error', 'params': {'status': 429}}, 'Fetch failed (HTTP 429)')
-        self.assertEqual((self.u.code, self.u.retry_after), (429, 120.0))
-        with mock.patch('urllib.request.urlopen', side_effect=urllib.error.URLError('down')):
-            self.u.poll()
-        self.check('조회 실패(URLError)', {'code': 'fetch_failed', 'params': {'error': 'URLError'}}, 'Fetch failed (URLError)')
-        self.assertEqual(self.u.code, None)
-
-    def test_success_clears_both(self):
-        self.credentials(3600)
-        self.u.error, self.u.error_info = 'x', {'code': 'login_missing', 'params': {}}
-        body = io.BytesIO(json.dumps({'five_hour': {'utilization': 3.0, 'resets_at': None}}).encode())
-        with mock.patch('urllib.request.urlopen', return_value=contextlib.closing(body)):
-            self.u.poll()
-        self.assertEqual((self.u.error, self.u.error_info, self.u.code), (None, None, None))
-
-    def test_the_429_rule_hides_the_code_with_the_text(self):
-        now = 5000.0
-        self.u.v, self.u.code = {'as_of': now - 60}, 429
-        self.u.error, self.u.error_info = '조회 실패(HTTP 429)', {'code': 'http_error', 'params': {'status': 429}}
-        self.assertEqual((self.u.shown_error(now), self.u.shown_error_info(now)), (None, None))
-        self.assertEqual(self.u.shown_error_info(now + 10 * 60), self.u.error_info)
-        self.assertEqual(self.u.shown_error(now + 10 * 60), self.u.error)
-
-    def test_the_plan_carries_both_fields(self):
-        write(os.path.join(self.h.home, '.claude.json'), json.dumps({'oauthAccount': {'userRateLimitTier': 'default_claude_max_5x'}, 'cachedUsageUtilization': {}}))
-        with patched(CL_USAGE=self.u):
-            c = server.plan_status()['claude']
-            self.assertEqual((c['error'], c['error_info']), (None, None))
-            self.u.error, self.u.error_info = '로그인 정보 없음', {'code': 'login_missing', 'params': {}}
-            c = server.plan_status()['claude']
-        self.assertEqual((c['error'], c['error_info']), ('로그인 정보 없음', {'code': 'login_missing', 'params': {}}))
-        self.assertEqual(list(c).index('error_info'), list(c).index('error') + 1)
 
 
 class TokenModels(unittest.TestCase):
@@ -483,26 +421,24 @@ class TerminalTexts(unittest.TestCase):
     def test_start_lines(self):
         row = lambda name, where, n, label: '  %-13s %-28s %s  (%s)' % (name, where, n, label)
         for lang, want in (
-                ('ko', [row('Claude Code', '/h/.claude/projects', '세션 3 · 에이전트 있는 세션 1', '기본'), row('◆ Codex', '/h/.codex/sessions', '최근 7일 2', 'CODEX_HOME'),
-                        '  사용량 조회 꺼짐 · 프로세스 판정 /proc']),
-                ('en', [row('Claude Code', '/h/.claude/projects', 'sessions 3 · with agents 1', 'default'), row('◆ Codex', '/h/.codex/sessions', 'last 7 days: 2', 'CODEX_HOME'),
-                        '  Usage API off · process check /proc'])):
+                ('ko', [row('Claude Code', '/h/.claude/projects', '세션 3 · 에이전트 있는 세션 1', '기본'), row('◆ Codex', '/h/.codex/sessions', '단독 대화, 최근 7일: 2', 'CODEX_HOME'),
+                        '  프로세스 판정 /proc']),
+                ('en', [row('Claude Code', '/h/.claude/projects', 'sessions 3 · with agents 1', 'default'), row('◆ Codex', '/h/.codex/sessions', 'standalone sessions, last 7 days: 2', 'CODEX_HOME'),
+                        '  Process check /proc'])):
             with terminal_lang(lang), mock.patch.object(procs, 'method', lambda: 'proc'):
-                self.assertEqual(server.startup_lines(self.srcs(), False), want, lang)
+                self.assertEqual(server.startup_lines(self.srcs()), want, lang)
 
-    def test_usage_and_method_variants_and_a_missing_folder(self):
+    def test_method_variants_and_a_missing_folder(self):
         srcs = self.srcs()
         srcs[1].update(exists=False)
-        want = {'ko': {'none': '없음(세션 상태는 모름으로 보임)', 'ps': 'ps(Codex가 연 파일은 모름)', 'proc': '/proc', 'on': '켬(Anthropic API, 60초마다)', 'no': '폴더 없음'},
-                'en': {'none': 'none (session state shows as unknown)', 'ps': 'ps (cannot see files Codex has open)', 'proc': '/proc', 'on': 'on (Anthropic API, every 60 s)',
-                       'no': 'folder not found'}}
+        want = {'ko': {'none': '없음(세션 상태는 모름으로 보임)', 'ps': 'ps(Codex가 연 파일은 모름)', 'proc': '/proc', 'no': '폴더 없음'},
+                'en': {'none': 'none (session state shows as unknown)', 'ps': 'ps (cannot see files Codex has open)', 'proc': '/proc', 'no': 'folder not found'}}
         for lang in ('ko', 'en'):
             for method in ('proc', 'ps', 'none'):
                 with terminal_lang(lang), mock.patch.object(procs, 'method', lambda m=method: m):
-                    lines = server.startup_lines(srcs, True)
+                    lines = server.startup_lines(srcs)
                 self.assertIn(want[lang]['no'], lines[1])
                 self.assertTrue(lines[2].endswith(want[lang][method]), lines[2])
-                self.assertIn(want[lang]['on'], lines[2])
 
     def test_process_method_is_a_code(self):
         self.assertIn(procs.method(), ('proc', 'ps', 'none'))
@@ -517,28 +453,31 @@ class TerminalTexts(unittest.TestCase):
         want = {'ko': {errno.EADDRINUSE: '현황판을 열지 못했습니다: 127.0.0.1:8790 — 포트를 이미 쓰고 있습니다. 이미 띄운 현황판이면 http://localhost:8790/ 을 여세요. 다른 포트로 띄우려면 --port 8791 처럼 주세요.',
                        errno.EACCES: '현황판을 열지 못했습니다: 127.0.0.1:8790 — 권한이 없습니다(1024 미만 포트는 관리자만 열 수 있습니다). --port 8790 처럼 큰 포트를 주세요.',
                        errno.EADDRNOTAVAIL: '현황판을 열지 못했습니다: 127.0.0.1:8790 — 이 기기에 없는 주소입니다(VPN이 꺼져 있으면 그 주소도 없습니다). --host 값을 확인하세요.',
-                       errno.EIO: '현황판을 열지 못했습니다: 127.0.0.1:8790 — Input/output error. 다른 포트는 --port 8791 처럼 주세요.'},
+                       errno.EIO: '현황판을 열지 못했습니다: 127.0.0.1:8790 — Input/output error. 다른 포트는 --port 8791 처럼 주세요.',
+                       'name': '현황판을 열지 못했습니다: 127.0.0.1:8790 — 호스트 이름을 찾을 수 없습니다. --host 값을 확인하세요.'},
                 'en': {errno.EADDRINUSE: "Couldn't start the dashboard on 127.0.0.1:8790 — the port is already in use. If it is a dashboard you already started, open http://localhost:8790/. For another port, pass --port 8791.",
                        errno.EACCES: "Couldn't start the dashboard on 127.0.0.1:8790 — permission denied (ports below 1024 need administrator rights). Pass a higher port such as --port 8790.",
                        errno.EADDRNOTAVAIL: "Couldn't start the dashboard on 127.0.0.1:8790 — this machine has no such address (a VPN address disappears while the VPN is down). Check --host.",
-                       errno.EIO: "Couldn't start the dashboard on 127.0.0.1:8790 — Input/output error. For another port, pass --port 8791."}}
+                       errno.EIO: "Couldn't start the dashboard on 127.0.0.1:8790 — Input/output error. For another port, pass --port 8791.",
+                       'name': "Couldn't start the dashboard on 127.0.0.1:8790 — the host name cannot be resolved. Check --host."}}
         for lang in ('ko', 'en'):
             for no, text in want[lang].items():
                 err = io.StringIO()
-                with terminal_lang(lang), contextlib.redirect_stderr(err), mock.patch.object(server, 'BoardServer', side_effect=OSError(no, os.strerror(no))), \
+                failure = socket.gaierror(-2, 'Name or service not known') if no == 'name' else OSError(no, os.strerror(no))
+                with terminal_lang(lang), contextlib.redirect_stderr(err), mock.patch.object(server, 'BoardServer', side_effect=failure), \
                         self.assertRaises(SystemExit) as cm:
                     server.bind_servers(['127.0.0.1'], 8790)
                 self.assertEqual((cm.exception.code, err.getvalue()), (1, text + '\n'), (lang, no))
 
     def test_argument_errors(self):
         import argparse
-        host = {'ko': "열 수 없는 주소입니다: '0.0.0.0' (127.0.0.0/8, ::1, localhost, 100.64.0.0/10, fd7a:115c:a1e0::/48만 가능)",
-                'en': "Cannot listen on this address: '0.0.0.0' (only 127.0.0.0/8, ::1, localhost, 100.64.0.0/10, fd7a:115c:a1e0::/48 are allowed)"}
+        host = {'ko': "열 수 없는 주소입니다: 'a b' (127.0.0.1, 0.0.0.0, :: 같은 IP 주소나 호스트 이름을 포트 없이 주세요)",
+                'en': "Cannot listen on this address: 'a b' (give an IP address such as 127.0.0.1, 0.0.0.0 or ::, or a host name, with no port)"}
         other = {'ko': ("이름이 아닙니다: 'a b' (예: my.box, .example.net)", "UUID 모양이 아닙니다: 'zz'", '빈 경로입니다'),
                  'en': ("Not a host name: 'a b' (e.g. my.box, .example.net)", "Not a UUID: 'zz'", 'Empty path')}
         for lang in ('ko', 'en'):
             with terminal_lang(lang):
-                for fn, arg, text in ((server._host_arg, '0.0.0.0', host[lang]), (server._allow_host_arg, 'a b', other[lang][0]),
+                for fn, arg, text in ((server._host_arg, 'a b', host[lang]), (server._allow_host_arg, 'a b', other[lang][0]),
                                       (server._session_arg, 'zz', other[lang][1]), (server._dir_arg, ' ', other[lang][2])):
                     with self.assertRaises(argparse.ArgumentTypeError) as cm:
                         fn(arg)
@@ -580,8 +519,8 @@ class StartOutputInEnglish(unittest.TestCase):
         self.assertEqual(lines[0], 'Dashboard: http://localhost:8790/')
         self.assertTrue(lines[1].startswith('  Claude Code   '), lines[1])
         self.assertIn('sessions 0 · with agents 0', lines[1])                  # the empty HOME has the folders but no session
-        self.assertIn('last 7 days: 0', lines[2])
-        self.assertTrue(re.fullmatch(r'  Usage API off · process check (/proc|ps \(cannot see files Codex has open\)|none \(session state shows as unknown\))', lines[-1]), lines[-1])
+        self.assertIn('standalone sessions, last 7 days: 0', lines[2])
+        self.assertTrue(re.fullmatch(r'  Process check (/proc|ps \(cannot see files Codex has open\)|none \(session state shows as unknown\))', lines[-1]), lines[-1])
         self.assertFalse(any('가' <= c <= '힣' for c in out), out)
 
     def test_counts_and_sources(self):
@@ -591,20 +530,24 @@ class StartOutputInEnglish(unittest.TestCase):
         claude = next(ln for ln in out.splitlines() if 'Claude Code' in ln)
         self.assertIn('sessions 2 · with agents 1', claude)
         self.assertIn('(default)', claude)
-        self.assertIn('last 7 days: 0', next(ln for ln in out.splitlines() if 'Codex' in ln))
-        out, _, _ = self.run_with(['--port', '0', '--claude-usage-api'])
-        self.assertIn('Usage API on (Anthropic API, every 60 s)', out)
+        self.assertIn('standalone sessions, last 7 days: 0', next(ln for ln in out.splitlines() if 'Codex' in ln))
 
-    def test_warnings_and_the_notice(self):
+    def test_the_unprotected_warning_and_the_token_lines(self):
         with main_env(self, self.h, run_inline=False):
-            out, err, code = run_main(['--port', '0', '--host', '127.0.0.1', '--host', '100.100.0.7', '--allow-host', 'box.example.net', '--claude-usage-api'],
+            out, err, code = run_main(['--port', '0', '--host', '127.0.0.1', '--host', '100.100.0.7', '--allow-host', 'box.example.net', '--no-auth'],
                                       servers=[FakeServer(), FakeServer()], lang='en')
-        warn, notice = err.splitlines()
-        self.assertTrue(warn.startswith('Warning: no authentication — this server has no login. Every device that can reach the addresses below can read your Claude and Codex conversations'), warn)
+        bar, title, warn, bar2 = err.splitlines()
+        self.assertEqual((bar, title, bar2), ('!' * 72, 'WARNING — NO AUTHENTICATION', '!' * 72))
+        self.assertTrue(warn.startswith('This server has no login and no token. Every device that can reach the addresses below can read your Claude and Codex conversations'), warn)
         self.assertTrue(warn.endswith('(access control is up to your VPN and firewall): listening on 100.100.0.7 · allowed names box.example.net'), warn)
-        self.assertTrue(notice.startswith("Notice: --claude-usage-api — calls Anthropic's unofficial (internal) usage API (api.anthropic.com/api/oauth/usage) every 60 s with the token in "), notice)
-        self.assertTrue(notice.endswith('.credentials.json. To turn it off, restart without this flag.'), notice)
         self.assertEqual(out.count('Dashboard: http://'), 2)
+        with main_env(self, self.h, run_inline=False):
+            out, err, code = run_main(['--port', '0', '--host', '100.100.0.7'], servers=[FakeServer()], lang='en')
+        lines = out.splitlines()
+        self.assertEqual(err, '')
+        self.assertEqual(lines[0], 'Dashboard — an access token is needed. Open one of these:')
+        self.assertTrue(re.fullmatch(r'  http://100\.100\.0\.7:8790/\?token=[A-Za-z0-9_-]{43}', lines[1]), lines[1])
+        self.assertTrue(lines[2].startswith('The browser keeps the token in a cookie after the first visit'), lines[2])
 
     def test_the_order_of_the_choice(self):
         for env, argv, want in (({'LANG': 'C'}, [], 'en'), ({'LANG': 'ko_KR.UTF-8'}, [], 'ko'), ({'LANG': 'ko_KR.UTF-8'}, ['--lang', 'en'], 'en'),
@@ -654,8 +597,9 @@ class HelpAndHostBody(unittest.TestCase):
         self.assertFalse(any('가' <= c <= '힣' for c in en_text), en_text)
         self.assertNotIn('Supported:', ko_text)
         for text in (ko_text, en_text):
-            for flag in ('--session SESSION', '--host HOST', '--allow-host NAME', '--claude-config-dir DIR', '--codex-home DIR', '--lang CODE', '--claude-usage-api'):
+            for flag in ('--session SESSION', '--host HOST', '--allow-host NAME', '--claude-config-dir DIR', '--codex-home DIR', '--lang CODE', '--token VALUE', '--no-auth', '--version'):
                 self.assertIn(flag, text)
+            self.assertNotIn('usage-api', text)
             self.assertNotIn('netbird.cloud', text.lower())
         self.assertEqual(self.help(['--help'], {'LANG': 'ko_KR.UTF-8'}), ko_text)                     # the environment picks the same
         self.assertEqual(self.help(['--help'], {'LANG': 'C'}), self.help(['--help', '--lang', 'en']))
@@ -671,8 +615,8 @@ class HelpAndHostBody(unittest.TestCase):
             self.assertIn(word, ko_text)
         with open(os.path.join(ROOT, 'docs', 'configuration.md'), encoding='utf-8') as f:
             (row,) = [ln for ln in f if ln.startswith('| `XDG_CACHE_HOME`')]
-        self.assertIn('links.json', row)                                                          # the folder holds the link record as well as the usage cache
-        self.assertIn('usage.json', row)
+        self.assertIn('links.json', row)                                                          # the folder holds the link record as well as the status line reading
+        self.assertIn('statusline.json', row)
 
     def test_descriptions_and_help_have_no_percent_trouble(self):
         for lang in ('ko', 'en'):
@@ -705,7 +649,7 @@ class HelpAndHostBody(unittest.TestCase):
     def test_403_over_http_from_a_live_english_terminal(self):
         with tempfile.TemporaryDirectory() as home:
             os.makedirs(os.path.join(home, '.claude', 'projects'))
-            with live_server(['--port', '0', '--lang', 'en'], home, wait=('Usage API',)) as run:
+            with live_server(['--port', '0', '--lang', 'en'], home, wait=('Process check',)) as run:
                 port = run.port()
                 c = http.client.HTTPConnection('127.0.0.1', port, timeout=10)
                 c.request('GET', '/api/plans', headers={'Host': 'box.example.net:%d' % port})
@@ -729,9 +673,9 @@ class EnglishTerminalEndToEnd(unittest.TestCase):
               json.dumps({'type': 'user', 'timestamp': '2026-09-30T00:00:00Z', 'cwd': '/w', 'message': {'content': 'hi'}}) + '\n')
 
     def test_lang_c_gives_english_and_ko_gives_korean(self):
-        for env, first, status in (({'AGENT_BULLPEN_LANG': 'auto', 'LANG': 'C', 'LC_ALL': 'C'}, 'Dashboard: http://localhost:', '  Usage API off · process check '),
-                                   ({'AGENT_BULLPEN_LANG': 'ko'}, '현황판: http://localhost:', '  사용량 조회 꺼짐 · 프로세스 판정 ')):
-            with live_server(['--port', '0'], self.home, extra_env=env, wait=(status.split(' · ')[0],)) as run:      # the ready line differs by language
+        for env, first, status in (({'AGENT_BULLPEN_LANG': 'auto', 'LANG': 'C', 'LC_ALL': 'C'}, 'Dashboard: http://localhost:', '  Process check '),
+                                   ({'AGENT_BULLPEN_LANG': 'ko'}, '현황판: http://localhost:', '  프로세스 판정 ')):
+            with live_server(['--port', '0'], self.home, extra_env=env, wait=(status.strip(),)) as run:      # the ready line differs by language
                 pass
             lines = run.out_text.splitlines()
             self.assertTrue(lines[0].startswith(first), lines[0])
@@ -740,24 +684,19 @@ class EnglishTerminalEndToEnd(unittest.TestCase):
 
 
 class KeysAreUsed(unittest.TestCase):
-    """Every cli.* alert.* event.* plan.* key that the code names exists (in both languages), and every key of those areas is used by the code."""
+    """Every cli.* alert.* event.* key that the code names exists (in both languages), and every key of those areas is used by the code."""
 
     def named(self):
         names, files = set(), [os.path.join(ROOT, 'server.py')] + [os.path.join(ROOT, 'board', f) for f in sorted(os.listdir(os.path.join(ROOT, 'board'))) if f.endswith('.py')]
         for f in files:
             with open(f, encoding='utf-8') as fh:
                 src = fh.read()
-            for m in re.finditer(r"""['"]((?:cli|alert|event|plan)\.[A-Za-z_.%]+)['"]""", src):
+            for m in re.finditer(r"""['"]((?:cli|alert|event)\.[A-Za-z_.%]+)['"]""", src):
                 names.add(m.group(1))
         return names
 
-    def codes(self):
-        """The failure codes of the usage query: plans.py says them as 'code': '<name>' and the dictionary words them as plan.error.<name>."""
-        with open(os.path.join(ROOT, 'board', 'plans.py'), encoding='utf-8') as f:
-            return sorted(set(re.findall(r"'code': '([a-z_]+)'", f.read())))
-
     def test_named_keys_exist_in_both_languages(self):
-        dynamic = {'cli.start.method.': ('proc', 'ps', 'none'), 'alert.fail.%s.title': ('failed', 'killed'), 'plan.error.': self.codes()}
+        dynamic = {'cli.start.method.': ('proc', 'ps', 'none'), 'alert.fail.%s.title': ('failed', 'killed')}
         for name in sorted(self.named()):
             if name == 'event.notify.':                       # a prefix test in the event code, not a key
                 continue
@@ -767,8 +706,7 @@ class KeysAreUsed(unittest.TestCase):
                 self.assertIn(k, KO, k)
 
     def test_every_key_of_the_areas_is_used(self):
-        used = {'plan.error.' + c for c in self.codes()}
-        self.assertEqual(self.codes(), ['fetch_failed', 'http_error', 'login_missing', 'token_expired'])
+        used = set()
         for name in self.named():
             if name.endswith('.'):
                 used.update(k for k in EN if k.startswith(name))
@@ -781,7 +719,7 @@ class KeysAreUsed(unittest.TestCase):
             if k.split('.')[0] in ZONES and not k.endswith('._') and k not in page_only:
                 self.assertIn(k, used, 'unused key ' + k)
 
-    def test_the_four_areas_have_the_same_keys_in_both_languages_and_no_hangul_in_english(self):
+    def test_the_areas_have_the_same_keys_in_both_languages_and_no_hangul_in_english(self):
         for zone in ZONES:
             ek, kk = [k for k in EN if k.startswith(zone + '.')], [k for k in KO if k.startswith(zone + '.')]
             self.assertEqual(ek, kk, zone)

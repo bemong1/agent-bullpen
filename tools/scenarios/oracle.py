@@ -34,8 +34,8 @@ Choices the truth makes beyond the ranks:
      a flat review whose guide declares no reviewers shows a title only (`declaration_missing`).
   7. A Codex overload is `interrupted/api_error`, like a Claude 529 (`apiErrorStatus` first); a 400 is `failed/api_error`. A sub-agent's limit is judged by its
      own 429 line, never by the words of the notice.
-  8. `format_drift` is a known field gone inside the observed range, or a version outside it (older than 2.1.235, newer than 2.1.286); a line type the board
-     does not read is ignored, no diagnostic.
+  8. `format_drift` is a known field gone inside the observed range (`field_gone`). A version outside the range (older than 2.1.235, newer than 2.1.286) is no drift
+     by itself: every release would raise it for every user. A line type the board does not read is ignored, no diagnostic.
   9. A `claude -p` child that launches a `claude -p` or `codex exec` is the tree of that grand-child; the screen puts it under that child on the top orchestrator's page.
  10. The environment of a macOS process is readable through `ps -E` (same user), the lineage through the `ps` parent table; neither when `ps` fails.
  11. An instruction file that somebody else wrote (`author`): the text is in the author's records, not in the launcher's, and the author's running call (a server,
@@ -62,9 +62,61 @@ Choices the truth makes beyond the ranks:
  21. A guide declares a participant by a letter and a description (`**A — flow**`); a bold number (`**C-12**`, `**Codex X-2 · Claude C-36**`) names a finding, not a
      participant. A folder with a guide that declares no participant, no reviewer, no report path and has no round folder (an editing job beside the topics of a
      review, `edits=beside`) is listed as a title and has no row and no round.
+ 22. A room is a folder, whatever its guide is called and whatever the instruction calls the work. Four things together make one, all facts of the records and the disk:
+     (1) two or more agents of the orchestrator whose page is read have a first instruction that points at the same guide (a `.md` of any name) that is on disk,
+     (2) those agents are told, or have, each a file of their own in the guide's folder or one folder below it,
+     (3) their runs overlap in time (the latest start is before the earliest end; a run that has not ended counts as going on), and
+     (4) most of them are not told to change, and have not changed, code or other files outside the guide's folder (rules 27 and 28).
+     The room is the guide's folder, its title the guide's first heading, round 1 its only round (no round folder), the cell of a seat that participant's file. The words
+     `debate`, `meeting`, `agenda` and their Korean are never read (`word` changes the text only).
+ 23. A guide that everybody reads is no room: the documents at the top of a repository (`README.md`, `CLAUDE.md`, `AGENTS.md`) and `docs/guide.md` are common
+     documents. A participant that points at a guide of its own, at one that is not on disk, or at none in its first instruction (a later message names it), is not
+     in a room with the others. One file all of them write is no per-participant file; code written in other repositories, files in another folder or two folders below
+     the guide are outside the room: none of these is a room, whatever the participants say to each other.
+ 24. A meeting by message only: two or more agents share a guide of the room's own folder and none of them has a file of its own anywhere (`shape=none`), and
+     the participants send each other `SendMessage` (a ring: each one to the next of its orchestrator). The room is the guide's folder with its participants and no
+     cell. Messages from the orchestrator to each of them are no meeting, and neither are messages beside files that are outside the room.
+ 25. A folder with a round folder is a debate already: its participants are seated by the rules of the debate (the path they are told or write, the file's name)
+     whatever the guide is called and however many they are, and the room rules add nothing. Whether a folder with a lone `brief.md` and no room is listed
+     depends on who works there (the flat review): not asked of a room case.
+ 26. The seat of a room participant: the letter its first instruction names (`[ROOM-B]`, `B 담당`, `B(...) 담당`, `You are participant B`, `Work as B (...)`,
+     `You hold seat B`, at the start of the instruction, and meant for the participant itself), else the one-letter tag of its description, else the stem of its file.
+     A letter that is quoted as an example, negated (`You are not participant C`), or means something else (`as C (not C++)`, `seat C` on a train, `participant C` of a
+     study, a team in charge of the C language) is no marker: the words `as C (`, `seat C` and `participant C` alone say nothing, only the sentence that addresses the
+     participant does, so a reader that matches the bare words seats the lookalikes (the English markers are worth adding only in the framed forms). The file of a
+     seat is the file the participant is told to write or wrote (`notes_B.md`, `out/B.md`); with the plain names (`B.md`) the stem and the letter are one.
+ 27. Runs that never overlap are no room: participants that are started one after the other, each only after the one before has finished (`rtime=sequential`), share a
+     guide and write each a file of their own in its folder, and still they did not work together. Participants that are all still running, or whose runs share a moment,
+     are together. Messages cannot be sent between runs that never coexist, so a meeting by message only needs overlapping runs as well.
+ 28. Code is no room: when more than half of the participants of a guide are told to change a file outside the guide's folder (code in the repository's source folder),
+     or changed one, they are doing parallel work that happens to report beside a plan, whatever else sits in the folder (`code=majority|all`). Exactly half or fewer
+     (`code=one`, or one of two) leave the folder a room: the notes still are a file of each one's own. The count is of the participants of the guide.
+ 29. A guide and a notes file that an instruction only quotes or reviews seat nobody and make no room: a quote in one line, a code fence, a Markdown block quote, or a
+     read-only review of the earlier words, or the lines after a sentence that says they are a read-only quote of them (`cite`) are the words of somebody else's instruction,
+     not the participant's own; nothing is written either way. A folder that has a round folder is still a debate on the list (rule 25), but nobody in it is seated by words that were only quoted. The same holds for a `quoter` of the debate
+     bundle (`qform`): a report path in a fence, a block quote, a read-only review or the lines after a "read-only quote" sentence seats nobody. The same words in a code
+     fence under a line that tells the participant to carry them out ("Execute these instructions:", `wrap=exec_fence`) are the participant's own instruction.
+ 30. A message that was answered with an error was not delivered, so it is no meeting: participants that share a guide and message each other with `delivery=failed`
+     are no room by message (a room that is one by files stays one: it never needed the messages).
+ 31. The orchestrator page of a session is `working` only while a turn is going on: its last record is a tool call or a result, or a real prompt that nobody has answered
+     yet (also when it came within a second of the end of the turn before: what opens a turn is the line, not the time since the last end), and the process of the session is there. A turn that ended (the last assistant line is `end_turn`, whether or not the record has a turn-duration line: a
+     `claude -p` run has none), local slash commands typed after it (`/usage` and the like: they start no turn), a session that holds nothing but such commands, and a
+     session whose process is gone are `idle`, however fresh the file is (`entry`, `tail`, `process`).
+ 32. A session whose process is gone has nobody to answer: the page does not say that the orchestrator waits for the answer (a turn that ended with a question) or for
+     the next instruction (`process=gone`).
+ 34. The document view opens the guide of a room the page shows, whatever the states of its participants are: the room is the one the page has, not one worked out again as
+     if everybody had finished (`rtime=quiet`: each participant started after the one before had gone quiet, and all of them are still running). Nothing under a dot folder
+     (`site=dot`) is opened: that is the rule of the document view for hidden paths, not one about rooms.
+ 33. What an agent only saves is no change of the work (rule 28 counts the files of the work): the output of a command in a log (`scratch=log`) and the files it keeps in a
+     folder for scratch work outside the repository (`scratch=tmp`), whoever of the participants does it. Parallel implementers whose instruction names no path and who write no
+     code (`code=implied`) are indistinguishable from reviewers in the records: the truth is that there is no room, and the room the board shows is accepted (a known false room, left as it is).
 """
 
-from .axes import EDIT_DIR, FILE_WAYS, FLAW_VERSION, RESUMABLE, ROUND_DIR, WAY, aux_file_exists, launcher_writes
+import collections
+import os
+
+from .axes import (ABOVE_DOC, COMMON_DOCS, EDIT_DIR, FILE_WAYS, FLAW_VERSION, RESUMABLE, ROUND_DIR, SEAT_LETTERS, WAY, aux_file_exists, launcher_writes, room_coders, room_folder,
+                   room_guide, room_out, room_stem, room_title, room_tree)
 
 
 class Truth:
@@ -118,7 +170,7 @@ AFF_CODES = frozenset(('evidence_conflict', 'content_author_differs', 'content_o
 STA_CODES = frozenset(('limit_group', 'not_resumed', 'silent_live', 'torn_lines', 'multi_process', 'format_drift', 'parse_errors', 'stray_notice', 'proc_unknown',
                        'cache_error', 'orphan_launch'))
 DEB_CODES = frozenset(('path_unresolved', 'path_ambiguous', 'alias_collision', 'seat_tie_held', 'debate_in_misc', 'declaration_missing', 'listing_capped', 'orphan_launch'))
-BUNDLE_CODES = {'aff': AFF_CODES, 'sta': STA_CODES, 'deb': DEB_CODES}
+BUNDLE_CODES = {'aff': AFF_CODES, 'sta': STA_CODES, 'deb': DEB_CODES, 'room': DEB_CODES}
 
 
 def diag_scope(case):
@@ -365,7 +417,7 @@ def _sta_truth(case):
     sk, life, at, flaw = v['skind'], v['life'], v['at'], v['flaw']
     T = Truth()
     if sk == 'main':
-        return main_truth(T, life, at)
+        return main_truth(T, life, at, v)
     status, reason, resets = life_state(sk, life, at, v['os'] == 'mac_nops')
     T.set('child', status=status, reason=reason, resets_at=resets)
     if sk == 'cli' and at in ('after_resume', 'resume_stopped') and life in RESUMABLE:
@@ -389,17 +441,25 @@ def _flaw_diag(T, flaw):
         T.expect('torn_lines')
     elif flaw == 'multi_proc':
         T.expect('multi_process', pids=2)
-    elif flaw in ('old_format', 'future_version', 'field_gone'):
-        T.expect('format_drift', version=FLAW_VERSION[flaw])   # a version outside the observed range, or a known field gone inside it
+    elif flaw == 'field_gone':
+        T.expect('format_drift', version=FLAW_VERSION[flaw])   # a known field gone inside the observed range; a version outside it says nothing (old_format, future_version)
     elif flaw == 'child_bg':
         T.expect('stray_notice', count=1)
         T.deny('orch', 'event', 'notify_stray')
 
 
-def main_truth(T, life, at):
+def main_working(v):
+    """Whether the orchestrator page of a session that was not stopped by a limit is working (rule 31): a turn is going on and the process is there."""
+    return v['tail'] in ('mid', 'prompt', 'next') and v['process'] == 'there'
+
+
+def main_truth(T, life, at, v):
     """The orchestrator that hit the usage limit: waiting for the reset (with or without an automatic continue), and one of its agents stopped by the same limit."""
     if life == 'running':
-        T.set('orch', orch_state='working')
+        T.set('orch', orch_state='working' if main_working(v) else 'idle')
+        if v['process'] == 'gone':                    # nobody is there to answer, or to give the next instruction
+            T.deny('orch', 'alert', 'say')
+            T.deny('orch', 'alert', 'turn')
         return T
     T.set('child', status='interrupted', reason='limit', resets_at=('T', 7200))
     T.deny('child', 'alert', 'fail')
@@ -507,7 +567,10 @@ def deb_truth(case, T=None, kind=None):
         return T
     if role in ('quoter', 'negator', 'tag_only', 'failed_write'):
         T.set('child', seat=None, cell=None, role='none', placements=place(None, None, None))
-        T.expect('debate_in_misc')
+        if v['qform'] == 'inline':
+            T.expect('debate_in_misc')
+        else:
+            T.allow('debate_in_misc')                  # a path in a fence, a block quote or a read-only review: whether the board says so is not asked, only that nobody is seated
         return T
     if role == 'rival':
         T.set('child', unit=unit, seat=None, cell=None, role='none', placements=place(None, None, None))
@@ -542,6 +605,125 @@ def deb_truth(case, T=None, kind=None):
     file_ok = v['fstate'] == 'written' or (v['nstyle'] == 'collide' and seat == 'B')
     folder = None if rnd is None else ROUND_DIR[v['rdir']] % 1
     T.set('child', unit=unit, round=rnd, seat=seat, role='writer', placements=place(unit, rnd, seat, folder), cell=cell_state(life, file_ok))
+    return T
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# room
+# ---------------------------------------------------------------------------------------------------------------------
+SEAT_MARKS = ('bracket', 'dam', 'dam_paren', 'en_participant', 'en_as', 'en_seat')      # the ways the first instruction names the participant's own seat letter
+
+
+def room_seat(v, i):
+    """The seat of participant i of a room: the letter its instruction names, else the one-letter tag of its description, else the stem of its file."""
+    if v['seatmark'] in SEAT_MARKS or v['seatmark'] == 'tag':
+        return SEAT_LETTERS[i]
+    return room_stem(v, i)
+
+
+def below_folder(path, folder):
+    """The file below the room's folder without the extension (`out/B`)."""
+    return os.path.splitext(os.path.relpath(path, folder))[0]
+
+
+def in_reach(path, folder):
+    """A file is in the guide's folder or one folder below it."""
+    return os.path.dirname(path) == folder or os.path.dirname(os.path.dirname(path)) == folder
+
+
+def room_veto(v, mine):
+    """Why a folder that has a shared guide and a file of each participant's own is no room anyway: 'timing' (the runs never overlap, rule 27) or 'code' (most of the
+    participants change files outside the folder, rule 28); None when nothing speaks against it."""
+    if v['rtime'] == 'sequential' and len(mine) >= 2:
+        return 'timing'
+    if 2 * len(room_coders(v) & set(mine)) > len(mine):
+        return 'code'
+    return None
+
+
+def room_trace(v):
+    """(kind, participants of the page that are in it, folder, why) of the guide's folder, where kind is 'cells' (a room whose participants have a file each), 'members'
+    (a meeting by message only), 'debate' (it has a round folder: the rules of the debate) or None; `why` names what spoke against a room that the files and the guide
+    alone would make ('cite', 'timing', 'code', 'delivery'), else None."""
+    n = int(v['people'])
+    page = [i for i in range(n) if room_tree(v, i) == 1]
+    cited = 'cite' if v['cite'] != 'none' else None
+    if v['shape'] == 'r1':
+        return 'debate', page, room_folder(v), cited
+    if cited:
+        return None, [], None, cited                                                               # the guide and the files are the words of an earlier instruction (rule 29)
+    points = collections.Counter(room_guide(v, i)[0] for i in page if room_guide(v, i)[1])         # the guide the first instruction points at, when it is on disk
+    shared = [g for g, k in points.items() if k >= 2]
+    if not shared:
+        return None, [], None, None
+    guide = shared[0]
+    folder = os.path.dirname(guide)
+    mine = [i for i in page if room_guide(v, i)[0] == guide]
+    files = {room_out(v, i) for i in mine if room_out(v, i) is not None}
+    if len({f for f in files if in_reach(f, folder)}) >= 2:
+        why = room_veto(v, mine)
+        return (None, [], None, why) if why else ('cells', mine, folder, None)
+    if v['shape'] == 'none' and v['talk'] == 'peer' and guide not in COMMON_DOCS.values():
+        if v['delivery'] == 'failed':
+            return None, [], None, 'delivery'                                                      # nothing was delivered (rule 30)
+        return 'members', mine, folder, None
+    return None, [], None, None
+
+
+def room_kind(v):
+    """What the evidence of the scene makes of the guide's folder (see room_trace): the kind, the participants of the page that are in it and the folder."""
+    return room_trace(v)[:3]
+
+
+def room_truth(case):
+    v = case.v
+    kind, mine, folder = room_kind(v)
+    T = _room_truth(v, kind, mine)
+    if v['code'] == 'implied' and kind == 'cells':
+        # Known false room, left as it is: the participants are told to implement their step with no path and write no code, so the records give no sign of parallel work, and
+        # the same words in a meeting that is about code would be a room. The truth is that there is none; the room the board shows is accepted (a board that reads the path of
+        # the code gets it right either way).
+        none = _room_truth(v, None, [])
+        for role, fields in T.subjects.items():
+            for field, value in fields.items():
+                T.accept(role, field, value)
+        T.subjects = none.subjects
+    return T
+
+
+def _room_truth(v, kind, mine):
+    T = Truth()
+    unit = room_folder(v)
+    life = 'running' if v['phase'] == 'working' else 'normal_end'
+    file_ok = v['proof'] in ('wrote', 'both')
+    listed = kind is not None
+    if v['guide'] == 'brief':
+        T.allow('declaration_missing', 'child')                            # the flat review that declares nobody: whether it says so is not asked of a room
+    if kind is not None or v['guide'] != 'brief':
+        T.set('listing', units=frozenset([unit]) if listed else frozenset())       # whether the folder of a lone `brief.md` is listed depends on who works there: not asked
+    if kind in ('cells', 'members'):
+        T.set('listing', titles=frozenset(['%s|%s' % (unit, room_title(v))]), guide_opens=frozenset([room_guide(v, mine[0])[0]] if v['site'] != 'dot' else []))
+    if v['bundle'] == 'root':
+        # the bundle's conclusion closes the room when it was written after the files (and names the room's folder, or names nobody and says nothing is left open), the files are all in
+        # and nobody is still working; its name is the one `auto_final` reads for a conclusion
+        closed = kind == 'cells' and v['phase'] == 'done' and file_ok and v['above'] in ('closing', 'unnamed')
+        T.set('listing', finals=frozenset(['%s|../%s' % (unit, ABOVE_DOC[v['above']])]) if closed else frozenset())
+    for i in range(int(v['people'])):
+        if room_tree(v, i) != 1:
+            continue                                                       # another orchestrator's agent is not on this page
+        role = 'p%d' % (i + 1)
+        if v['cite'] != 'none':
+            T.set(role, seat=None, cell=None, role='none', placements=frozenset())           # words that were only quoted seat nobody (a debate folder is listed all the same)
+        elif i in mine and kind in ('cells', 'debate'):
+            seat = room_seat(v, i)
+            below = below_folder(room_out(v, i), unit)
+            T.set(role, unit=unit, seat=seat, cell=cell_state(life, file_ok), role='writer', placements=frozenset(['%s|1|%s|%s' % (unit, seat, below)]))
+        elif i in mine and kind == 'members':
+            T.set(role, unit=unit, seat=None, cell=None, role='none', placements=frozenset())
+        else:
+            T.set(role, seat=None, cell=None, role='none', placements=frozenset())
+            if v['guide'] != 'brief':
+                T.set(role, unit=None)                                     # no debate folder is listed for it: it works in no debate
     return T
 
 
@@ -581,4 +763,6 @@ def truth(case):
         return sta_truth(case)
     if case.bundle == 'deb':
         return deb_truth(case)
+    if case.bundle == 'room':
+        return room_truth(case)
     return cpl_truth(case)

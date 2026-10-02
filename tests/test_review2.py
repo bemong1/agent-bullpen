@@ -353,8 +353,12 @@ class F07RegistryFailure(unittest.TestCase):
 
         ready = threading.Event()
         ready.set()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        record = os.path.join(tmp.name, '%s.jsonl' % self.SID)           # a record that is there: only a regular file is opened as a session
+        open(record, 'w').close()
         with patched(Session=Flaky), mock.patch.object(server.LINKS, 'ready', ready), \
-                mock.patch('glob.glob', lambda pat: ['/x/%s.jsonl' % self.SID]):
+                mock.patch('glob.glob', lambda pat: [record]):
             with self.assertRaises(OSError):
                 reg.get(self.SID)
             self.assertEqual(reg.sessions, {})

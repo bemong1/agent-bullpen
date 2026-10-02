@@ -26,9 +26,9 @@ Run boundaries, the one definition. A run is one process lifetime of a record fi
           instruction at start_ts). A caller that needs the instruction of run k reads runs[k-1].turns[0] and treats a missing turn or an empty prompt_text as unknown.
 
 Private formats. Every marker below is something Claude Code writes but never promised; the observed versions are in OBSERVED and FORMAT_WINDOWS.
-A marker that is present is used, whatever the version. `format_drift` is only (1) a record of a version outside OBSERVED, or (2) a known marker or field missing from a
-record whose version is inside the marker's window; in the second case the judgment falls back to the other evidence (the process, the launcher's notice). An unknown
-kind of line is ignored: a real session already has twenty or so.
+A marker that is present is used, whatever the version. `format_drift` is only a known marker or field missing from a record whose version is inside the marker's window;
+then the judgment falls back to the other evidence (the process, the launcher's notice). A version outside OBSERVED is not drift by itself (every Claude Code release would
+raise it for every user), and neither is an unknown kind of line: a real session already has twenty or so.
 """
 
 import functools
@@ -49,7 +49,7 @@ CODEX_GONE_GRACE = 60          # a Codex rollout nobody has open is only called 
 UNRESUMED_LIMIT_SEC = 600      # an interrupted limit stop is "not resumed" this long after its reset time
 UNRESUMED_OTHER_SEC = 1800     # any other interrupted stop, this long after the run ended
 
-OBSERVED = ('2.1.235', '2.1.286')    # the Claude Code versions the private formats were checked against (the window of `cost-state`); a record of another version is `format_drift`
+OBSERVED = ('2.1.235', '2.1.286')    # the Claude Code versions the private formats were checked against (the window of `cost-state`); `out_of_range` says whether a version is outside them
 FORMAT_WINDOWS = {             # marker -> (first, last) version it was observed in. A marker missing from a record whose version is inside its window is `format_drift`
     'cost-state': ('2.1.235', '2.1.286'),
     'quotaLimits': ('2.1.235', '2.1.286'),
@@ -93,7 +93,8 @@ def in_window(marker, version):
 
 
 def out_of_range(version):
-    """A version older or newer than anything the formats were checked against. Unknown record kinds are not drift (a real session has twenty or so)."""
+    """A version older or newer than anything the formats were checked against. Only a fact about the version: it is no `format_drift` by itself (see the module
+    docstring), and unknown record kinds are not drift either (a real session has twenty or so)."""
     k = _key(version)
     return k is not None and not (_vkey(OBSERVED[0]) <= k <= _vkey(OBSERVED[1]))
 
@@ -169,6 +170,81 @@ def is_command_text(text):
     """A slash command is recorded as its expansion (`<command-message>init is running</command-message><command-name>/init</command-name> ...`), which says
     nothing about the words the launcher typed."""
     return text.lstrip().startswith('<command-')
+
+
+def is_local_echo(text):
+    """What a session records when the user runs a command in the session itself (`/usage`, `/model`): the command, its output (`<local-command-stdout>`) and the caveat
+    before them (`<local-command-caveat>`). Nothing answers them, so they start no work."""
+    return is_command_text(text) or text.lstrip().startswith('<local-command-')
+
+
+def is_work(d, rc=None):
+    """Whether a line is the orchestrator at work or being given work: an assistant line, a line that starts a turn (`turn_source`: an instruction, the automatic continue
+    after a limit, a `claude -p "/init"` command line), or a user line (a tool result, a notice) that is not meta, a compaction summary, a line only the transcript shows
+    or the echo of a local command. A line that is not work does not start a turn, whatever its time."""
+    typ = d.get('type')
+    if typ == 'assistant':
+        return True
+    if typ != 'user':
+        return False
+    if turn_source(d) is not None:
+        return True
+    if d.get('isMeta') or d.get('isCompactSummary') or d.get('isVisibleInTranscriptOnly'):
+        return False
+    return not is_local_echo((rc or rec(d)).text(d))
+
+
+def ends_turn(d):
+    """Whether an assistant line closes the turn: its closing text with stop_reason end_turn (`assistant_end`), not the synthetic line of an API error. A `claude -p`
+    record has no `turn_duration`: this line is the only mark of the end."""
+    return d.get('type') == 'assistant' and not d.get('isApiErrorMessage') and assistant_end(d) == 'end_turn'
+
+
+TOGETHER_SEC = 1.0                 # a notice written this soon after the end of a turn was written together with it
+
+
+class TurnMarks:
+    """Whether the orchestrator is in the middle of a turn, kept from its lines in the order they come: a line of work opens the turn, the end of a turn closes it, and what
+    stands last decides. The time between two lines decides nothing, so a turn that starts at once after the end of the one before is open, with its first call still waiting."""
+    __slots__ = ('open', 'end_ts')
+
+    def __init__(self):
+        self.open = False
+        self.end_ts = None                                 # the time of the last end that had one: what a notice is measured from
+
+    def begin(self):
+        self.open = True
+
+    def end(self, ts=None):
+        self.open = False
+        if ts:
+            self.end_ts = max(self.end_ts or 0.0, ts)
+
+    def notice(self, ts):
+        """A notice (a finished background task) that no instruction or call goes with: it wakes the orchestrator, unless it was written together with the end of the turn,
+        when what the orchestrator does about it is the work that opens the next one."""
+        if not (ts and self.end_ts and ts <= self.end_ts + TOGETHER_SEC):
+            self.open = True
+
+    def feed_line(self, d, ts, rc=None):
+        """One line of a Claude record (see `is_work` for the lines that count)."""
+        typ = d.get('type')
+        if typ not in ('assistant', 'user') or not is_work(d, rc):
+            return
+        if typ == 'assistant':
+            if ends_turn(d):
+                self.end(ts)
+            elif d.get('isApiErrorMessage') or assistant_end(d) == 'mid_turn':
+                self.begin()                               # a line with no text and no call (the rest of a message that closed the turn) opens nothing
+        elif turn_source(d) is not None or any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in (rc or rec(d)).blocks):
+            self.begin()                                   # an instruction, or what the orchestrator goes on with after a call
+        else:
+            self.notice(ts)
+
+
+def turn_open(marks, proc=None):
+    """Whether the orchestrator is in the middle of a turn (`TurnMarks`) and its process is not known to be gone. An unseen process (alive None) leaves it to the record."""
+    return not (proc is not None and proc.alive is False) and marks.open
 
 
 def prompt_text(d):
@@ -403,7 +479,7 @@ class RunTracker:
         self.runs = []                                     # List[RunRec]
         self.cur = None                                    # the open run, or None
         self.last_ts = None                                # the last assistant/user line
-        self.turn_end_ts = None                            # the last system/turn_duration line (orchestrator)
+        self.turn = TurnMarks()                            # whether the orchestrator is in the middle of a turn: a line of work opens it; turn_duration, an assistant line that ends the turn (ends_turn) and the exit marker close it
         self.pending = {}                                  # tool_use id -> time of a call without a result
         self.version = None
         self._vraw = None                                  # the last `version` value a line carried, as written (not kept anywhere else)
@@ -438,6 +514,7 @@ class RunTracker:
         self._meta(d, typ)
         if is_exit_marker(d):
             return self._exit(d)
+        self.turn.feed_line(d, ts, rc)
         t = turn_of(d, self.sid)                           # the one place that decides which lines start a turn (and so a run)
         if t is not None:
             kind, side = None, bool(d.get('isSidechain')) or 'agentId' in d
@@ -522,6 +599,7 @@ class RunTracker:
         total = total if isinstance(total, int) and not isinstance(total, bool) else None
         if total is None:
             self._lost('cost-state', 'cost-state.totalDuration')           # the line is there but a field the judgment reads is gone
+        self.turn.end()                                                    # the process that was in the middle of a turn has exited: nothing is left to do
         r = self.cur
         if r is not None:
             r.exited, r.end_ts, r.total_ms = True, r.last_ts, total
@@ -533,7 +611,7 @@ class RunTracker:
 
     def _system(self, d, ts):
         if d.get('subtype') == 'turn_duration':
-            self.turn_end_ts = ts
+            self.turn.end(ts)
             return
         k = notice_kind(d)
         r = self.cur
@@ -823,8 +901,6 @@ def facts_of(tracker, kind, ledger=None, agent_id=None, tool_use_id=None, launch
     f = RunFacts(kind=kind, runs=list(tracker.runs), last_ts=tracker.last_ts, spawn_ts=spawn_ts, pending=tracker.waiting(), handbacks=list(handbacks),
                  parent_over=parent_over, torn=tracker.torn, lost=tracker.lost, stray=tracker.stray, drift=list(tracker.drift), version=tracker.version,
                  entrypoint=tracker.entrypoint)
-    if out_of_range(tracker.version):
-        f.drift.append(('out_of_range', tracker.version))
     if ledger is not None:
         if kind == 'subagent':
             ids = {agent_id} if agent_id else set()
@@ -996,13 +1072,14 @@ class OrchVerdict:
 
 def orch_state(t, proc, now):
     """The orchestrator's state from its own tracker. `limit_wait`: its last turn ended on a usage limit, no instruction (typed or automatic) came since, and the
-    process is not known to be gone. Otherwise the plain rule of the page: working while the last line is newer than the last turn end, else idle."""
+    process is not known to be gone. Otherwise `working` while a turn is open (`turn_open`: the lines of work and the ends of turns, in the order they were written, leave
+    one open, and the process is not known to be gone), else idle."""
     r = t.runs[-1] if t.runs else None
     diag = (('proc_unknown', {}),) if proc.alive is None else ()
     if r is not None and not r.exited and r.end_kind == 'error' and r.err is not None and classify_error(r.err) == ('interrupted', 'limit') \
             and proc.alive is not False:
         return OrchVerdict('limit_wait', r.err.resets_at, r.auto_ts is not None and r.auto_ts >= (r.streak_ts or 0.0) - 1e-6, diag)
-    return OrchVerdict('working' if (t.last_ts or 0.0) > (t.turn_end_ts or 0.0) + 1 else 'idle', diag=diag)
+    return OrchVerdict('working' if turn_open(t.turn, proc) else 'idle', diag=diag)
 
 
 @dataclass

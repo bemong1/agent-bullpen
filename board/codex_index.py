@@ -4,6 +4,7 @@ import copy
 import glob
 import json
 import os
+import stat
 import threading
 import time
 
@@ -14,6 +15,11 @@ from .codex_parse import CX_BIG, CX_HEAD_RE, CX_LINE_MAX, codex_user_text
 CX_TAIL = 4 << 20          # for the list: the first line + the last 4 MB
 
 CX_ORIGIN = {'codex-tui': 'tui', 'Codex Desktop': 'desktop', 'codex_exec': 'exec'}
+
+
+def _num(x):
+    """x when it is a plain number (not a bool), else None: a reset time or a percent of another shape does not reach a comparison."""
+    return x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
 
 
 def _snapshot(e):
@@ -35,6 +41,7 @@ class CodexIndex:
         self.by_id = {}
         self.version = 0
         self._last = 0
+        self._bad = {}              # rollout path -> (size, mtime) of a file that is not a rollout (no usable first line): left alone until it changes
         self._names = (None, {})
 
     def refresh(self, force=False):
@@ -46,46 +53,67 @@ class CodexIndex:
             for p in glob.glob(os.path.join(CODEX_SESSIONS, '*', '*', '*', 'rollout-*.jsonl')):
                 seen.add(p)
                 try:
-                    st = os.stat(p)
-                except OSError:
-                    continue
-                e = self.files.get(p)
-                if e and e['size'] == st.st_size and e['mtime'] == st.st_mtime:
-                    continue
-                if e is None or st.st_size < e['size']:
-                    e = self._new(p)
-                    if not e:
-                        continue
-                    self.files[p] = e
-                    self.by_id[e['id']] = e
-                try:
-                    self._scan(e, st)
-                except (OSError, ValueError) as ex:
+                    changed |= self._refresh_one(p)
+                except Exception as ex:   # noqa: BLE001 — one rollout must not stop the list
                     print('codex index', os.path.basename(p), type(ex).__name__, flush=True)
-                changed = True
             for p in [p for p in self.files if p not in seen]:
                 self.by_id.pop(self.files.pop(p)['id'], None)
                 changed = True
+            for p in [p for p in self._bad if p not in seen]:
+                del self._bad[p]
             if changed:
                 self.version += 1
 
+    def _refresh_one(self, p):
+        """Looks at one rollout again if it changed. True when the list changed."""
+        try:
+            st = os.stat(p)
+        except OSError:
+            return False
+        if not stat.S_ISREG(st.st_mode) or self._bad.get(p) == (st.st_size, st.st_mtime):
+            return False
+        e = self.files.get(p)
+        if e and e['size'] == st.st_size and e['mtime'] == st.st_mtime:
+            return False
+        dropped = False
+        if e is None or st.st_size < e['size']:
+            new = self._new(p)
+            if not new:
+                self._bad[p] = (st.st_size, st.st_mtime)
+                if e is None:
+                    return False
+                self.by_id.pop(self.files.pop(p)['id'], None)         # it was a rollout and is not any more
+                return True
+            e = self.files[p] = new
+            self.by_id[e['id']] = e
+            self._bad.pop(p, None)
+        try:
+            self._scan(e, st)
+        except (OSError, ValueError) as ex:
+            print('codex index', os.path.basename(p), type(ex).__name__, flush=True)
+        return True
+
     def _new(self, p):
+        """The entry of a rollout from its first line, or None when that line is not a session_meta-like object (valid JSON of another shape is no rollout either)."""
         try:
             with open(p, 'rb') as f:
                 line = f.readline(4 << 20)
             d = json.loads(line)
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             return None
-        m = d.get('payload') or {}
+        m = d.get('payload') if isinstance(d, dict) else None
+        if not isinstance(m, dict):
+            return None
         tid = m.get('id') or m.get('session_id')
-        if not tid:
+        if not tid or not isinstance(tid, str):
             return None
-        src = m.get('source')
+        src, cwd, parent, origin = m.get('source'), m.get('cwd'), m.get('parent_thread_id'), m.get('originator')
+        stamp = m.get('timestamp') or d.get('timestamp')
         return {'path': p, 'id': tid, 'size': 0, 'mtime': 0, 'pos': len(line),
-                'origin': CX_ORIGIN.get(m.get('originator'), 'tui'),
-                'cwd': m.get('cwd') or '', 'meta_ts': parse_ts(m.get('timestamp') or d.get('timestamp')),
-                'parent': m.get('parent_thread_id'),
-                'guardian': bool(m.get('parent_thread_id')) or m.get('thread_source') == 'guardian_review' or
+                'origin': CX_ORIGIN.get(origin if isinstance(origin, str) else None, 'tui'),
+                'cwd': cwd if isinstance(cwd, str) else '', 'meta_ts': parse_ts(stamp) if isinstance(stamp, str) else None,
+                'parent': parent if isinstance(parent, str) else None,
+                'guardian': bool(parent) or m.get('thread_source') == 'guardian_review' or
                 isinstance(src, dict),
                 'partial': False, 'turns': [], 'calls': 0, 'open': False, 'last_ts': None,
                 'thread_total': None, 'limit': None, 'model': '', 'first_user': None}
@@ -138,13 +166,14 @@ class CodexIndex:
             elif pt in (b'task_complete', b'turn_aborted'):
                 e['open'] = False
             elif pt == b'token_count' and small and b'"rate_limits"' in raw:
-                p = (json.loads(raw).get('payload') or {})
-                rl = p.get('rate_limits') or {}
-                if rl.get('primary') and ts and (not e['limit'] or ts >= e['limit']['ts']):
-                    cr = rl.get('credits') or {}
-                    e['limit'] = {'ts': ts, 'primary': rl['primary'], 'secondary': rl.get('secondary'),
+                p = json.loads(raw).get('payload')
+                rl = p.get('rate_limits') if isinstance(p, dict) else None
+                rl = rl if isinstance(rl, dict) else {}
+                if isinstance(rl.get('primary'), dict) and rl['primary'] and ts and (not e['limit'] or ts >= e['limit']['ts']):
+                    cr, sec = rl.get('credits'), rl.get('secondary')
+                    e['limit'] = {'ts': ts, 'primary': rl['primary'], 'secondary': sec if isinstance(sec, dict) else None,
                                   'reached': rl.get('rate_limit_reached_type') is not None, 'plan': rl.get('plan_type'),
-                                  'credits': {k: cr.get(k) for k in ('has_credits', 'unlimited', 'balance')} if cr else None}
+                                  'credits': {k: cr.get(k) for k in ('has_credits', 'unlimited', 'balance')} if isinstance(cr, dict) and cr else None}
         elif typ == b'token_usage_record' and small:
             p = json.loads(raw).get('payload') or {}
             if not e['partial']:
@@ -189,9 +218,9 @@ class CodexIndex:
                     for ln in f:
                         try:
                             x = json.loads(ln)
-                        except ValueError:
+                        except (ValueError, RecursionError):
                             continue
-                        if x.get('id') and x.get('thread_name'):
+                        if isinstance(x, dict) and isinstance(x.get('id'), str) and isinstance(x.get('thread_name'), str) and x['id'] and x['thread_name']:
                             names[x['id']] = x['thread_name']     # the later one is the latest name
             except OSError:
                 pass
@@ -205,9 +234,9 @@ class CodexIndex:
         if not best:
             return None
         p, sec = best['primary'], best.get('secondary')
-        resets = p.get('resets_at')
-        win = lambda w: {'used_percent': w.get('used_percent'), 'window_minutes': w.get('window_minutes'), 'resets_at': w.get('resets_at'),
-                         'stale': bool(w.get('resets_at') and w['resets_at'] <= time.time())} if w else None
+        resets = _num(p.get('resets_at'))
+        win = lambda w: {'used_percent': w.get('used_percent'), 'window_minutes': w.get('window_minutes'), 'resets_at': _num(w.get('resets_at')),
+                         'stale': bool(_num(w.get('resets_at')) and w['resets_at'] <= time.time())} if w else None
         return {'used_percent': p.get('used_percent'), 'window_minutes': p.get('window_minutes'),
                 'resets_at': resets, 'as_of': best['ts'], 'stale': bool(resets and resets <= time.time()),
                 'reached': best['reached'], 'secondary': win(sec), 'plan_type': best.get('plan'), 'credits': best.get('credits')}

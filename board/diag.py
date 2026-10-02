@@ -185,9 +185,8 @@ def collect(s, now, verdicts, groups):
     runs = getattr(s, 'runs', None)
     if runs is not None and (runs.torn or runs.lost):
         out.append(_entry('torn_lines', 'orch', None, recovered=runs.torn, lost=runs.lost))
-    if runs is not None and (runs.drift or RS.out_of_range(runs.version)):
-        out.append(_entry('format_drift', 'orch', None, what=sorted('%s:%s' % x for x in runs.drift) + (['out_of_range:%s' % runs.version] if RS.out_of_range(runs.version) else []),
-                          version=runs.version))
+    if runs is not None and runs.drift:                                  # a known marker gone from its window, or a value that is no version; a version outside what was checked says nothing by itself
+        out.append(_entry('format_drift', 'orch', None, what=sorted('%s:%s' % x for x in runs.drift), version=runs.version))
     if getattr(s, 'parse_errors', 0):
         out.append(_entry('parse_errors', 'session', None, n=s.parse_errors))
     ln = LINKS.lineage

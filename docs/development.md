@@ -6,6 +6,7 @@ Python 3.9+ for the server and the tests, standard library only. Node.js is need
 
 ```
 server.py        HTTP entry point: argument checks, the request handler, static files, start-up
+statusline.py    optional Claude Code status line command that keeps the plan usage for the bottom bar (does not import board/; see docs/configuration.md)
 board/           reading and interpreting transcripts, and the shapes the pages read
 static/          the pages: plain HTML, CSS and <script> files (no bundler); fonts in static/fonts/; the text of the screen in static/locales/
 tests/           unittest suites
@@ -13,10 +14,11 @@ tools/           regression, synthetic-data, scenario and measurement helpers
 docs/            guides
 ```
 
-`python3 server.py` is the only way in; everything else is imported from it.
+`python3 server.py` is the only way in; everything else is imported from it. The version is written once, in `board/__init__.py` (`server.py --version` prints it; `CHANGELOG.md` starts with the same number, and a test compares them).
 
 | Module | Role |
 |---|---|
+| `board/access.py` | the access token: making one, the `Gate` a listener checks (cookie, `Authorization: Bearer`, `?token=`; constant-time comparison), the 401 page, the redirect that takes the token out of the address, the loopback test, the addresses of this machine to print. Imports `i18n` only |
 | `board/util.py` | folders and their sources (`resolve_paths`), the never-open list (`DENY_FILES`), the file-opening policy (`hidden_or_secret`, `stat_regular`, `stat_plain`, `open_safe`), text and time helpers, incremental transcript reading (`Tail`), shared thresholds |
 | `board/procs.py` | one place that answers "is this process alive?" with yes / no / unknown (`/proc` on Linux, `ps` elsewhere); it never raises |
 | `board/tokens.py` | price table (`PRICES`) and `TokenMeter` (Claude and Codex) |
@@ -35,9 +37,9 @@ docs/            guides
 | `board/views.py` | what the pages read: `state`, `alerts`, `agent_detail`, `timeline`, `allowed_file`; also the system lines that stand for usage-limit and API-error records, and the `link` of an agent with the reason a `content_short` guess is one (`incomplete`, `assumed`) |
 | `board/sessions.py` | `Session` and `CodexSession`: read a transcript, accumulate events, judge each agent's status with `runstate.judge`, place child runs (grandchildren too) and cache the debate judgment (reused until an agent's record, a status or a debate file on disk changes; a Bash write counts as a change of the record) |
 | `board/catalog.py` | session list, per-project representative, `sources` for the diagnostic panel |
-| `board/plans.py` | plan and usage numbers, rate-limit hits, the optional usage API |
+| `board/plans.py` | plan and usage numbers (the status line file, the `.claude.json` cache), rate-limit hits; it makes no request and opens no credential file |
 
-There are no import cycles; a module imports only from an earlier group of this chain: `facts` · `fingerprint` · `procs` · `i18n` · `tokens` (these import no other `board` module) → `util` → `codex_parse` · `lineage` · `runstate` · `units` → `affil` · `codex_index` · `debates` → `link` · `agents` → `diag` · `plans` → `views` → `sessions` → `catalog` → `server.py`. The data flow: a background loop (every 2 s) scans, each session polls its files, and a request to `/api/state` renders the current shapes. The pages load their scripts in this order: `i18n.js`, `common.js`, `game-art.js`, `game.js`, `game-demo.js`, `board.js` (`game.html` has no `board.js`). If you add a static file, add it to `STATIC_FILES` in `server.py`; unlisted files are 404.
+There are no import cycles; a module imports only from an earlier group of this chain: `facts` · `fingerprint` · `procs` · `i18n` · `tokens` (these import no other `board` module) → `access` (imports `i18n`) · `util` → `codex_parse` · `lineage` · `runstate` · `units` → `affil` · `codex_index` · `debates` → `link` · `agents` → `diag` · `plans` → `views` → `sessions` → `catalog` → `server.py`. The data flow: a background loop (every 2 s) scans, each session polls its files, and a request to `/api/state` renders the current shapes. The pages load their scripts in this order: `i18n.js`, `common.js`, `game-art.js`, `game.js`, `game-demo.js`, `board.js` (`game.html` has no `board.js`). If you add a static file, add it to `STATIC_FILES` in `server.py`; unlisted files are 404.
 
 ## Dictionaries and languages
 
@@ -55,7 +57,7 @@ All the text of the screen and of the terminal output lives in one dictionary fi
 ```
 
 - `meta.code` must equal the file name; `name` is what the language selector shows; `locale` is the tag handed to `Intl`.
-- `messages` are flat dotted keys, the same keys in the same order in every file, named by meaning and place (`board.card.tokens`; a narrow place gets a `.short` key). They are grouped in areas, each opened by an empty marker key `<area>._`, in this order: `common status kind time unit`, `board`, `office demo`, `diag page`, `cli alert event plan`. A key starts with its area's name.
+- `messages` are flat dotted keys, the same keys in the same order in every file, named by meaning and place (`board.card.tokens`; a narrow place gets a `.short` key). They are grouped in areas, each opened by an empty marker key `<area>._`, in this order: `common status kind time unit`, `board`, `office demo`, `diag page`, `cli alert event`. A key starts with its area's name.
 - A value is a sentence with named placeholders (`{name}`), never a fragment to be glued to another. A plural value is an object `{"one": …, "other": …}` chosen with `Intl.PluralRules` from `count`; `other` is required. Two formatters exist: `{name:subject}` adds the Korean subject particle, `{n:number}` groups digits for the language.
 - A key missing in the chosen language falls back to English, then to `[key]`.
 - `formats` are `Intl.DateTimeFormat` options for `time`, `timeSec`, `dateTime` and `monthShort`. `limits` maps a key to the largest number of characters its English text may have (a placeholder counts as two), for the narrow spots of the office; the check enforces it for English and only notes it for other languages.
@@ -83,13 +85,9 @@ Look at the office strip in your language: some places are narrow (name tags, wh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 ```
 
-Run it with an empty or throwaway `HOME` if you want to be certain no real transcript is read:
+The test process never reads your real home: `tests/compat.py` points `HOME` and `XDG_CACHE_HOME` at a throwaway folder before `board` is imported (a status line reading in your real `~/.cache/agent-bullpen/` would otherwise change the plan bar), removes `CLAUDE_CONFIG_DIR`, `CODEX_HOME` and `AGENT_BULLPEN_TOKEN`, and gives every server it starts its own home and cache through `isolated_env`. `tests/test_sandbox.py` checks that. A test that imports `board` imports `compat` first.
 
-```bash
-HOME=$(mktemp -d) python3 -m unittest discover -s tests
-```
-
-The suites use temporary folders and ephemeral ports. They cover parsing, linking (process lineage, environment, scripts, loops, grandchild agents, the instruction-text match, ties, the link record file), run and status judgments (boundaries, errors, usage limits), debate recognition and seat assignment, the diagnostics, the scenario generator (`test_scenarios.py`, see below), the harvester and the benchmark tool (`test_harvest.py`, `test_bench.py`), the `/api/file` limits, path and option handling, the start-up sequence, the dictionaries and the language order (`test_i18n*.py`, `test_server_i18n.py`), the English decision-request detection (`test_decide_detect.py`), and that the default mode opens no credential file and makes no network call. Tests that start the server pin the terminal language themselves (`AGENT_BULLPEN_LANG=ko`), so they do not depend on your locale.
+The suites use temporary folders and ephemeral ports. They cover parsing, linking (process lineage, environment, scripts, loops, grandchild agents, the instruction-text match, ties, the link record file), run and status judgments (boundaries, errors, usage limits), debate recognition and seat assignment, the diagnostics, the scenario generator (`test_scenarios.py`, see below), the harvester and the benchmark tool (`test_harvest.py`, `test_bench.py`), the `/api/file` limits, path and option handling, the start-up sequence, the dictionaries and the language order (`test_i18n*.py`, `test_server_i18n.py`), the English decision-request detection (`test_decide_detect.py`), that no source holds code that opens a credential file or makes a network request, the access token (`test_access.py`: 401, cookie, redirect, Bearer, constant-time comparison, no token in a log or a response, `--token`, `--no-auth`, `--host` with any address or name, `--version`; `test_access_robust.py`: odd requests, odd files and odd shapes of valid JSON), that the link scan opens only regular record files (`test_link_files.py`), that the public text matches the program (`test_docs_checks.py` runs `tools/regress/docs_checks.py`), and the throwaway home. Tests that start the server pin the terminal language themselves (`AGENT_BULLPEN_LANG=ko`), so they do not depend on your locale.
 
 Two quick static checks:
 
@@ -114,16 +112,17 @@ This is what the CI `ui` job runs. `make_synth_fixture.py` fixes the clock in th
 
 | Tool | What it does |
 |---|---|
-| `run_board.py <src> --port N` | starts a copy of the server without the usage thread (no credentials read, no API call) |
-| `api_snap.py <portA> <portB> <session>...` | compares the API responses of two running servers: `ALL OK` or `DIFF`. The new fields that the language work and the status work added (`reason`, `resets_at`, `node`, `by`, `parent`, `runs`, `link.rule_class`, `diag`, …) are allowed as differences (`API_SNAP_ALLOW`); new values of old fields (`interrupted`, `unknown`, `limit_wait`) and the system lines in the flow are not, so a session that has such a state is an intended `DIFF`; `--raw` shows everything |
+| `run_board.py <src> --port N` | starts a copy of the server (this one, or an older one to compare with) with the link record off; for an older source it also switches off the account usage thread, so no credential file is read |
+| `api_snap.py <portA> <portB> <session>...` | compares the API responses of two running servers: `ALL OK` or `DIFF`. The new fields that the language work and the status work added (`reason`, `resets_at`, `node`, `by`, `parent`, `runs`, `link.rule_class`, `diag`, a work room's `room` and `guide`, …) are allowed as differences (`API_SNAP_ALLOW`); the fields of the removed account usage query (`usage_api`, `error`, `error_info` of `/api/plans`) are not, so an older server shows a `DIFF` there; new values of old fields (`interrupted`, `unknown`, `limit_wait`) and the system lines in the flow are not, so a session that has such a state is an intended `DIFF`; `--raw` shows everything |
 | `make_fixture_home.py <session> <dir>` | freezes one of *your own* sessions into a fixed `HOME` (set `AB_SRC` to the source folder) |
 | `render_snap.js`, `game_snap.js`, `demo_snap.js`, `lounge_snap.js`, `snap_diff.js` | run the page scripts under Node against a fixture and print hashes/snapshots to diff |
 | `ui_checks.js`, `lounge_checks.js`, `highlight_check.js` | synthetic checks of the page logic (exit status = number of failures); `ui_checks.js` runs in Korean, the Korean wording is its expected values |
 | `ui_checks_en.js` | the same fixture in English: cards, details panel tabs, the diagnostic panel in every state, the plan bar, the new server fields; it reads the expected words from the page's own `t('key')` and fails on any Hangul outside data or any `[key]` |
 | `i18n_checks.js`, `i18n_apply_checks.js` | the language runtime (`static/i18n.js`: language order, lookup, plurals, dates, picker) and the English fallback text in the HTML when the dictionary cannot be loaded |
-| `office_checks.js`, `diag_i18n_checks.js` | the office texts and a whole demo run, and the diagnostic card, in both languages |
+| `office_checks.js`, `diag_i18n_checks.js` | the office texts and a whole demo run, who walks in from the door and who is put at a desk when the rooms are laid out again, and the diagnostic card, in both languages |
 | `state_checks.js` | the new states in both languages: the orchestrator waiting on a usage limit (four wordings), Interrupted with each reason, Unknown and an unknown status, grandchild order and indentation, the header chips, the paused cell, system lines, alert titles, the details of a resumed run, the three reasons for a text-match guess, the Diagnostics list, and the fallback against an old server without the new fields. It reads a second fixture, `synth_stopped_*`. Without it the check is skipped on a laptop, and fails when `CI` or `REQUIRE_FIXTURES` is set (the CI job sets it), so a missing fixture cannot let CI pass unchecked |
 | `i18n_check.py` | the dictionary checks above |
+| `docs_checks.py` | the public text against the program (no browser, no fixture): no remnant of the removed usage request or of an earlier release in the README, changelog, guides and issue templates; the status line file's contents, the macOS wording and the start output shown in the README match the code and the dictionary. The unit tests run it too (`tests/test_docs_checks.py`) |
 | `i18n_boot.js` | not a check: the shared loader that puts `i18n.js` and the dictionaries into the fake browser; the loaders run in the language of `AB_LANG` (default `ko`, which is what the saved snapshots expect) |
 
 Each script has a `usage:` comment near the top; `<fixture prefix>` is the path of a fixture without the trailing `_state.json`. Example: `node tools/regress/ui_checks.js static /tmp/synth-fx/synth`.

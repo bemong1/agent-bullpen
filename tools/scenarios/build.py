@@ -294,6 +294,9 @@ def build_case(case, root):
     elif bundle == 'sta':
         from .scene_sta import build_sta
         build_sta(b)
+    elif bundle == 'room':
+        from .scene_room import build_room
+        build_room(b)
     else:
         from .scene_deb import build_cpl
         build_cpl(b)

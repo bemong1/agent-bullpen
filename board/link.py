@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shlex
+import stat
 import bisect
 import threading
 import time
@@ -17,7 +18,7 @@ import time
 from . import affil, facts
 from . import fingerprint as fp
 from .facts import NODE_ID_RE, Redirect, Span
-from .util import PROJECTS, SID_RE, line_error, open_safe, parse_ts, short_path, stat_plain
+from .util import PROJECTS, SID_RE, line_error, open_regular, open_safe, parse_ts, short_path, stat_plain
 from .codex_parse import CX_PROMPT_MIN, CX_WINDOW
 from .codex_index import CODEX
 from .lineage import Lineage
@@ -1853,7 +1854,7 @@ class LinkIndex:
                 fh.seek(off)
                 raw = fh.read(ln)
             else:
-                with open(f['path'], 'rb') as h:
+                with open_regular(f['path']) as h:
                     h.seek(off)
                     raw = h.read(ln)
         except OSError:
@@ -1884,7 +1885,7 @@ class LinkIndex:
         parts.sort(key=lambda x: -x[0])
         texts = []
         try:
-            with open(f['path'], 'rb') as fh:
+            with open_regular(f['path']) as fh:
                 size = 0
                 for ts, off, ln in parts:
                     t = self._line_text(f, off, ln, fh)
@@ -1949,7 +1950,7 @@ class LinkIndex:
             needles += list(NEEDLES_WE)
         pos, rest, first = start, b'', start == 0
         dropping = stop is None and f.get('drop_at') == start             # the position is inside a line that was dropped for its length: its end is looked for first
-        with open(p, 'rb') as fh:
+        with open_regular(p) as fh:
             fh.seek(pos)
             while True:
                 want = CHUNK if stop is None else min(CHUNK, stop - pos - len(rest))
@@ -2094,12 +2095,14 @@ class LinkIndex:
         with self.lock:
             present = set()
             for p in glob.glob(os.path.join(PROJECTS, '*', '*.jsonl')):
-                present.add(os.path.basename(p)[:-6])
                 f = self.files.get(p)
                 try:
                     st = os.stat(p)
                 except OSError:
                     continue
+                if not stat.S_ISREG(st.st_mode):
+                    continue                                         # a FIFO, a folder or a device with a record's name is not a record
+                present.add(os.path.basename(p)[:-6])
                 if f is None or st.st_size < f['pos']:
                     if f is not None:
                         self.tcache.drop_prefix(p)
@@ -2153,16 +2156,18 @@ class LinkIndex:
             self._sub_listed, self._grew = now, False
         for p in self._sub_paths:
             f = self.sub.get(p)
+            try:
+                st = os.stat(p)
+            except OSError:
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue                                             # a FIFO, a folder or a device with a record's name is not a record
             if f is None:
                 m = re.fullmatch(r'agent-(%s)\.jsonl' % NODE_ID_RE.pattern, os.path.basename(p))
                 if not m:
                     continue
                 f = self.sub[p] = self._new_file(p, os.path.basename(os.path.dirname(os.path.dirname(p))), m.group(1))
                 f['sid'] = m.group(1)
-            try:
-                st = os.stat(p)
-            except OSError:
-                continue
             if st.st_size < f['pos']:
                 self.tcache.drop_prefix(p)
                 f = self.sub[p] = self._new_file(p, f['tree'], f['node'])
@@ -2270,7 +2275,7 @@ class LinkIndex:
         now that it is asked for (a call is asked about when it was running as a child started). Both tools, assumed, when the line cannot be read: it cannot be
         ruled out and it shows nothing."""
         try:
-            with open(f['path'], 'rb') as fh:
+            with open_regular(f['path']) as fh:
                 fh.seek(off)
                 d = json.loads(fh.read(ln))
             message = d.get('message') if isinstance(d, dict) else None
@@ -2406,7 +2411,7 @@ class LinkIndex:
             return h
         ts = cwd = None
         try:
-            with open(p, 'rb') as fh:
+            with open_regular(p) as fh:
                 head = fh.read(256 << 10)
         except OSError:
             return (None, None)

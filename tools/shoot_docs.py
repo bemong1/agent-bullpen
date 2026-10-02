@@ -30,7 +30,7 @@ LIMIT = 500 * 1024
 
 
 def start(home, port, ready, src):
-    env = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CACHE_HOME', 'AGENT_BULLPEN_LOG')}
+    env = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CACHE_HOME', 'AGENT_BULLPEN_LOG', 'AGENT_BULLPEN_TOKEN')}
     env.update(HOME=home, PYTHONDONTWRITEBYTECODE='1', AGENT_BULLPEN_LANG='ko')     # the ready lines matched in main() are Korean, whatever LANG the runner has
     log = tempfile.TemporaryFile('w+')
     p = subprocess.Popen([sys.executable, os.path.join(src, 'server.py'), '--port', str(port)], stdout=log, stderr=subprocess.STDOUT, env=env, stdin=subprocess.DEVNULL, cwd=src)
@@ -83,7 +83,7 @@ def main():
         empty = os.path.join(os.path.realpath(tmp.name), 'empty-home')
         os.makedirs(empty)
         procs.append(start(info['home'], args.ports[0], '세션 %s 읽음' % info['orch'], src))
-        procs.append(start(empty, args.ports[1], '사용량 조회', src))
+        procs.append(start(empty, args.ports[1], '프로세스 판정', src))
         if info.get('stopped'):
             wait_links(args.ports[0], info)
         env = dict(os.environ)

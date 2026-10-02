@@ -7,7 +7,7 @@ import os
 import re
 
 from . import runstate as RS
-from .util import STALL_SEC, TOOL_STALL_SEC, as_text, norm_key, parse_ts, short_path, strip_reminders, trunc
+from .util import as_text, norm_key, parse_ts, short_path, strip_reminders, trunc
 from .tokens import TokenMeter
 from .codex_parse import CX_CALL_ID_RE, codex_call, codex_say_text, codex_user_text, cx_usage_add
 from .codex_index import CODEX
@@ -157,13 +157,13 @@ class Agent:
         self.texts = collections.deque(maxlen=40)
         self.cwd = ''                                    # working folder from the first record that carries one (Codex: set from its index entry)
         self.received = []                               # {ts, text}
-        self.writes = []                                 # {ts, path, id, ok}: ok (True/False) appears when the tool result of that Write/Edit is known, not before
-        self._write_by_id = {}                           # Write/Edit/Bash tool_use id -> its entry of `writes` or `shell_writes`
+        self.writes = []                                 # {ts, path, id, ok}: ok (True/False) appears when the tool result of that Write/Edit is known, not before. An entry kept at completion (Codex) has neither
+        self._by_call = {}                               # Write/Edit/Bash/SendMessage tool_use id -> its entry of `writes`, `shell_writes` or `sent`, until the result comes
         self.shell_writes = []                           # {ts, paths, id, ok}: the markdown files a Bash call writes by a shell redirect or tee (shell_writes()); ok as in `writes`. Kept apart: `writes` is what the tools wrote
         self.redirects = []                              # cli: the output redirects of the launching command (facts.Redirect) that name this child's report
         self.reads = {}                                  # path -> ts
         self.read_log = []                               # (ts, path) in the order read
-        self.sent = []                                   # SendMessage calls this agent sent
+        self.sent = []                                   # {ts, to, summary, text, id, ok}: the SendMessage calls this agent made; ok as in `writes` (a message that was not delivered is no talk)
         self.pending = {}                                # tool calls with no result yet: id -> {ts, name, text}
         self.tokens = TokenMeter()
         self.last_stop = None
@@ -235,7 +235,7 @@ class Agent:
                         w = {'ts': ts, 'path': os.path.normpath(inp['file_path']), 'id': b.get('id')}
                         self.writes.append(w)
                         if b.get('id'):
-                            self._write_by_id[b['id']] = w
+                            self._by_call[b['id']] = w
                     elif name == 'Read' and inp.get('file_path'):
                         self.reads[os.path.normpath(inp['file_path'])] = ts
                         self.read_log.append((ts, os.path.normpath(inp['file_path'])))
@@ -245,11 +245,14 @@ class Agent:
                             w = {'ts': ts, 'paths': paths, 'id': b.get('id')}
                             self.shell_writes.append(w)
                             if b.get('id'):
-                                self._write_by_id[b['id']] = w
+                                self._by_call[b['id']] = w
                     if name == 'SendMessage':
                         msg = inp.get('message')
-                        self.sent.append({'ts': ts, 'to': str(inp.get('to', '')), 'summary': inp.get('summary') or '',
-                                          'text': msg if isinstance(msg, str) else json.dumps(msg, ensure_ascii=False)})
+                        m = {'ts': ts, 'to': str(inp.get('to', '')), 'summary': inp.get('summary') or '', 'id': b.get('id'),
+                             'text': msg if isinstance(msg, str) else json.dumps(msg, ensure_ascii=False)}
+                        self.sent.append(m)
+                        if b.get('id'):
+                            self._by_call[b['id']] = m
             if self.origin == 'cli' and m.get('stop_reason') == 'end_turn':
                 self._cli_end(ts, d, m)
         elif typ == 'attachment':
@@ -273,9 +276,9 @@ class Agent:
                         called = self.pending.pop(b.get('tool_use_id'), None)
                         if called and called['name'] == 'Agent':
                             self._child_result(ts, b, d.get('toolUseResult'))
-                        w = self._write_by_id.pop(b.get('tool_use_id'), None)
+                        w = self._by_call.pop(b.get('tool_use_id'), None)
                         if w is not None:
-                            w['ok'] = not b.get('is_error')         # a failed write is no report and no seat
+                            w['ok'] = not b.get('is_error')         # a failed write is no report and no seat; a message that was not delivered is no talk
                     if b.get('type') == 'tool_result' and b.get('is_error'):
                         self.errors += 1
                         self.ticks.append((ts, 'error'))
@@ -372,17 +375,6 @@ def model_numbers(items, base_of):
         seen[base] += 1
         out[a.id] = base if seen[base] == 1 else '%s-%d' % (base, seen[base])
     return out
-
-
-def pending_or_stall(a, last, now):
-    """An agent with no ending record: while it waits on a long tool (docker run etc.) the record does not grow, so it is running up to TOOL_STALL_SEC,
-    otherwise stalled only when STALL_SEC has passed since last. last is set by the caller (Claude: last_ts and spawn_ts; Codex: last_ts only. The difference is deliberate)."""
-    waiting = [p['ts'] for p in a.pending.values() if p['ts']]
-    if waiting and now - min(waiting) < TOOL_STALL_SEC:
-        return 'running'
-    if now - last > STALL_SEC:
-        return 'stalled'
-    return 'running'
 
 
 def cx_sync_base(meter, partial, thread_total, seen, model):

@@ -15,12 +15,21 @@ Rules that the code below keeps:
     report write that succeeded (the tag alone seats nobody, and neither does a bare mention of the report the tag names, or a path that could not be resolved). A reader,
     a quotation (of a path or of a marker), a negation ("no need to write r1/B.md") and a failed write are not a seat. A marker or a tag seats in one debate, never in
     several. Two live agents at the same rank hold the seat (`seat_tie_held`); a later agent takes over from one that is already over, but only with a claim at least
-    as strong as the one it takes over from.
+    as strong as the one it takes over from. What an instruction only shows is not told: a code fence, a Markdown block quote, an earlier instruction that is said not to be
+    carried out, and the write words of a text that forbids writing anything are quoted (`dead_spans`), for a path, a marker and a guide alike; a write that succeeded stays a
+    seat whatever the instruction quotes.
   - The spelling of a round folder (r01, round1) and of a file (A.md, a.md, A_flow.md) is kept as written; physically different files are never merged. The output file of
     a launch command is compared with the report the instruction names by its whole path, and one agent has one file of a seat.
   - A review with no round folder is a seat only for the reviewers and result files its guide declares; with no declaration it is a title and a
     diagnostic. A round, a seat or a file is never made up. A guide declares a participant by a letter and a description (`**A — development flow**`), never by a
     number: the finding numbers an editing job lists in bold (`**C-23**`) are no participants, so such a folder is a title with no cell.
+  - A room is a folder that the structure of the records makes one, whatever its guide is called and whatever the work is called (the words debate, meeting,
+    agenda are never read): two or more agents of one orchestrator whose first instruction points at the same guide (any `.md` that is on disk), who were at work at the
+    same moment, and who are told, or have, each a file of their own in the guide's folder or one folder below it (a cell each, one round), or who share the guide, have no
+    file anywhere and message each other (a room of participants only; a message that failed is none). Agents that run one after the other, or most of whom change
+    something outside the guide's folder (code of their own part), are parallel work on a plan, not a room. A document everybody reads (the guide at the top of a repository or directly in its `docs` folder), a folder that is a
+    debate already (it keeps its rules), one file that all of them write, files elsewhere, a guide of each one's own, one that is not on disk or that a later message
+    names, and a lone agent are no room.
 
 Standard library only; Python 3.9 compatible.
 """
@@ -31,6 +40,7 @@ import functools
 import os
 import re
 import stat
+import tempfile
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
@@ -63,8 +73,12 @@ GUIDE_BARE_RE = re.compile(r'(?<![\w/~.…$-])brief\.md')       # `brief.md` wit
 _HAS_DIR_RE = re.compile(r'/(?:r|round)\d+/')       # characters that must be present for the path regexes to match; text without them skips the slow ones
 _HAS_REL_RE = re.compile(r'(?:r|round)\d+/')
 
-# Seat markers at the start of an instruction: "[REVIEW11-C]", "C(GitHub ops) 담당", "C 담당" (Korean for "C in charge")
-MARKER_RE = re.compile(r'\[[A-Za-z0-9_]+-([A-Z])\]|(?<![A-Za-z0-9])([A-Z])\s*\([^)\n]{1,60}\)\s*담당|(?<![A-Za-z0-9])([A-Z])\s*담당')
+# Seat markers at the start of an instruction: "[REVIEW11-C]", "C(GitHub ops) 담당", "C 담당" (Korean for "C in charge"), and the English sentences that address the
+# participant itself: "You are participant C", "You hold seat C", "Work as C (...)". The bare words `participant C`, `seat C` and `as C (` are no marker (a user study's
+# participant, a seat on a train, a language), and neither are "C 담당자" (the person in charge of C) and "C(언어) 담당 팀" (a team in charge of C): only the framed
+# sentence, at the start of a sentence, is meant for the participant.
+_ENGLISH_MARK = r'(?:^|(?<=\n)|(?<=[.!?\]]\s))(?:You\s+are\s+participant\s+([A-Z])(?![\w+#])|You\s+hold\s+seat\s+([A-Z])(?![\w+#])|Work\s+as\s+([A-Z])\s*\()'
+MARKER_RE = re.compile(r'\[[A-Za-z0-9_]+-([A-Z])\]|(?<![A-Za-z0-9])([A-Z])\s*\([^)\n]{1,60}\)\s*담당(?!자|\s*팀)|(?<![A-Za-z0-9])([A-Z])\s*담당(?!자|\s*팀)|' + _ENGLISH_MARK)
 MARKER_SCAN = 300                       # only the first characters of the spawn prompt: a later message or a long text that merely quotes a marker is not a seat
 MARKER_NEG_AFTER_RE = re.compile(r'^\s*(?:이|은|는|가)?\s*(?:아니|아님|아닙|아닌)')                   # "B 담당이 아니다" (Korean: "is not B in charge")
 MARKER_NEG_BEFORE_RE = re.compile(r"(?:\bnot|\bnever|\bisn't|\baren't|아닌)\s+(?:the\s+|a\s+)?$", re.I)
@@ -91,6 +105,33 @@ READ_ONLY_RE = re.compile(r"\b(?:do\s+not|don'?t|never)\s+(?:write|modify|edit|c
                           r'파일(?:을|은)?\s*(?:쓰지|작성하지|수정하지)\s*(?:않|마|말)')
 QUOTE_MAX = 300                          # a quoted instruction is one short line; a longer span is two unrelated quotation marks paired by mistake
 _CLOSERS = {'"': '"', '“': '”', '「': '」', '『': '』'}
+# Text that is shown to the agent and not meant for it: a code fence, a Markdown block quote, and what follows a sentence that says it is only for review. See `dead_spans`.
+FENCE_RE = re.compile(r'^ {0,3}(`{3,}|~{3,})(.*)$')
+BLOCK_QUOTE_RE = re.compile(r'^ {0,3}>')
+SENTENCE_END_RE = re.compile(r'[.!?](?:\s|$)|[:：](?:\s|$)|\n')           # a semicolon does not end it: "do not execute them; write your findings to X" keeps X in the same sentence
+# something is said not to be carried out: "do not execute them", "never follow the above", "실행하지 마세요". The object has to be an instruction, not a task ("do not run the tests")
+NOT_RUN_RE = re.compile(r"\b(?:do\s+not|don'?t|never|must\s+not|should\s+not|without)\s+(?:\w+\s+){0,2}?(?:execut|carry\s+out|follow|perform|obey|act\s+on|run|apply|implement)\w*"
+                        r"(?:\s+(?P<obj>(?P<back>the\s+above|above)\b|it\b|them\b|this\b|these\b|those\b|that\b|any\s+of\s+(?:it|them|this|these)\b|the\s+(?:following|below|previous|earlier|prior|quoted|old)\b)|\s*[.!;:)]|$)|"
+                        r'(?:실행|수행|따르|적용|이행)(?:하)?지\s*(?:마|말|않)', re.I)
+READ_ONLY_WORD_RE = re.compile(r'\bread[- ]only\b|읽기\s*전용', re.I)
+# a sentence that says the text after it is only a quote: "Read-only quote of an earlier instruction.", 읽기 전용 인용입니다. The quote runs to the next blank line.
+QUOTE_DECL_RE = re.compile(r'(?:\bread[- ]only|읽기\s*전용)\s+(?:(?:quot(?:e|ation)s?|cop(?:y|ies)|excerpts?|extracts?|transcripts?)\b|인용|원문|사본)', re.I)
+BLANK_LINE_RE = re.compile(r'\n[ \t]*\n')
+# a line that tells the reader to carry out what is in the code fence it opens: "Execute these instructions:", "Follow the instructions below:", 다음 지시를 따르라:
+EXEC_LEAD_RE = re.compile(r'\b(?:execute|follow|carry\s+out|perform|complete|do|run|apply|obey)\s+(?:all\s+of\s+)?(?:these|this|the\s+following|the\s+instructions?|the\s+steps?|the\s+tasks?|your\s+instructions?)\b|'
+                          r'(?:다음|아래|이)\s*(?:지시|지침|명령|단계|작업|내용)(?:사항)?(?:을|를)?\s*(?:따르|수행|실행|이행)', re.I)
+NEGATION_RE = re.compile(r"\b(?:do\s+not|don'?t|never|must\s+not|should\s+not|not|without)\b|지\s*(?:마|말|않)", re.I)
+# words that make what a fence holds somebody's earlier text, whatever the line says to do with it (not `below` or `following`: they stand in "Follow the instructions below:")
+PAST_WORD_RE = re.compile(r'\b(?:earlier|previous|prior|past|old|quote[sd]?|quotation|verbatim|for\s+reference|executed|carried\s+out)\b|이전|지난|인용|예시|참고|앞선', re.I)
+# the words that make an instruction a text under review: they stand in the sentence that says not to carry it out, or in the 200 characters before it
+REVIEW_WORD_RE = re.compile(r'\b(?:earlier|previous|prior|past|old|below|following|above|quote[sd]?|verbatim|for\s+reference)\b|이전|지난|아래|위의|다음|인용|예시|참고|앞선', re.I)
+# a text that forbids writing anything ("do not create, change or run anything", "Do not write any file", 파일을 만들거나 고치거나 실행하지 마세요) is not telling the agent to write:
+# the write words in it are about somebody else's instruction. A prohibition with an exception ("any file other than", "anything outside") is none.
+_VERBS = r'(?:create|change|modify|edit|write|run|execute|delete|touch|alter|save)\w*'
+NO_WRITING_RE = re.compile(r"\b(?:do\s+not|don'?t|never|must\s+not)\s+(?:" + _VERBS + r"(?:\s*,\s*(?:or\s+)?|\s+(?:or|and)\s+|\s+)){1,6}?(?:anything|any\s+files?|any\s+reports?)\b"
+                           r"(?!\s+(?:else|other|outside|except|besides|but|apart|in|under|inside|beyond|elsewhere|than|that|which|you|unless|if)\b)|"
+                           r'(?:만들|고치|수정|변경|작성|쓰|삭제)(?:하)?(?:거나|고)\s*(?:[가-힣]+(?:거나|고)\s*){0,3}(?:만들|고치|수정|변경|작성|쓰|실행|삭제)(?:하)?지\s*(?:마|말|않)|'
+                           r'아무것도\s*(?:만들|쓰|수정|변경|작성|실행)(?:하)?지\s*(?:마|말|않)|파일(?:을|은)?\s*(?:쓰지|작성하지|수정하지)\s*(?:않|마|말)', re.I)
 
 # bare files of a flat review's declaration and of a debate guide
 CUE_RE = re.compile(r'reviewers?\b|검토자|리뷰어', re.I)                  # a result file is declared next to the reviewer who writes it
@@ -236,10 +277,31 @@ class Catalog:
         self._seen = {}              # path -> (generation, key, Unit|None)
         self._alias = {}             # a path as it was asked for -> the same path normalised
         self._lists = {}             # folder -> (generation, the .md stems in it)
+        self._rooms = {}             # folder -> the Unit of a room of this generation (a room lives for one build: the records make it, not the disk)
+        self._files = {}             # path -> (generation, whether it is a regular file)
         self.gen = 0
 
     def begin(self):
         self.gen += 1
+        self._rooms = {}
+
+    def add_room(self, unit):
+        """Makes `unit` what the folder is for the rest of this generation."""
+        self._rooms[unit.path] = unit
+
+    def is_file(self, path):
+        """Whether the path is a regular file, looked at once per generation."""
+        c = self._files.get(path)
+        if c and c[0] == self.gen:
+            return c[1]
+        try:
+            ok = stat.S_ISREG(os.stat(path).st_mode)
+        except OSError:
+            ok = False
+        if len(self._files) > self.LIMIT:
+            self._files.clear()
+        self._files[path] = (self.gen, ok)
+        return ok
 
     @staticmethod
     def _key(path):
@@ -261,12 +323,16 @@ class Catalog:
     def unit_at(self, path):
         """The Unit that is exactly this folder, or None."""
         path = self._alias.get(path, path)
+        if path in self._rooms:
+            return self._rooms[path]
         c = self._seen.get(path)
         if c and c[0] == self.gen:
             return c[2]
         raw, path = path, os.path.normpath(path)
         if path != raw:
             self._alias[raw] = path
+            if path in self._rooms:
+                return self._rooms[path]
             c = self._seen.get(path)
             if c and c[0] == self.gen:
                 return c[2]
@@ -415,12 +481,21 @@ REMEMBER_TEXTS = 1024              # at most this many texts per function: the k
 
 def _remembered(fn):
     """Remembers a pure function of one text. The instructions of an agent do not change between two state builds, and the regexes over them are the
-    cost of a debate build: the first build pays, the next ones read the answer."""
+    cost of a debate build: the first build pays, the next ones read the answer. A text too long for that is remembered only as the last one asked about (the same object),
+    so that the answer is not worked out again for each path in it."""
     cached = functools.lru_cache(maxsize=REMEMBER_TEXTS)(fn)
+    last = [None]                                           # (the last long text, its answer): replaced as one value
 
     @functools.wraps(fn)
     def call(text):
-        return cached(text) if len(text) <= REMEMBER_CHARS else fn(text)
+        if len(text) <= REMEMBER_CHARS:
+            return cached(text)
+        slot = last[0]
+        if slot is not None and slot[0] is text:
+            return slot[1]
+        answer = fn(text)
+        last[0] = (text, answer)
+        return answer
     call.cache_info, call.cache_clear = cached.cache_info, cached.cache_clear
     return call
 
@@ -475,9 +550,104 @@ def _before(text, start):
         width *= 3
 
 
+def _carried_out(before):
+    """Whether the text before a code fence ends with a line that tells the reader to carry out what the fence holds ("Execute these instructions:", 다음 지시를 따르라:): the
+    line ends with a colon, its last sentence says to carry something out, and nothing in the line says it is somebody's earlier text, a read-only quote or not to be done."""
+    line = before.rstrip().rsplit('\n', 1)[-1].strip()
+    if not line.endswith((':', '：')):
+        return False
+    last = re.split(r'(?<=[.!?])\s+', line)[-1]
+    return EXEC_LEAD_RE.search(last) is not None and not (NEGATION_RE.search(line) or READ_ONLY_WORD_RE.search(line) or PAST_WORD_RE.search(line))
+
+
+def _dead_spans(text):
+    """The spans of a text that are shown to the agent and are no instruction to it, sorted and merged: a fenced code block (a fence that never closes holds the rest of
+    the text) unless the line before it tells the agent to carry out what is in it, a run of Markdown block-quote lines, what follows a sentence that says an earlier
+    instruction is not to be carried out ("do not execute them"; "the above" looks back) or that opens a read-only quotation ("Read-only quote of the earlier instruction:"),
+    and the lines after a sentence that says they are a read-only quote ("Read-only quote of an earlier instruction."), up to the blank line. A path, a seat marker or a
+    guide inside them is quoted, not told."""
+    spans = []
+    fence, quote, pos = None, None, 0                           # fence: (character, length, start, whether it is carried out); quote: start of the run of quote lines
+    for line in text.splitlines(True):
+        body = line.rstrip('\r\n')
+        m = FENCE_RE.match(body)
+        if fence is not None:
+            if m and m.group(1)[0] == fence[0] and len(m.group(1)) >= fence[1] and not m.group(2).strip():
+                if not fence[3]:
+                    spans.append((fence[2], pos + len(line)))
+                fence = None
+        elif m and not (m.group(1)[0] == '`' and '`' in m.group(2)):          # "```x```" on one line is code in a line, not a fence
+            fence = (m.group(1)[0], len(m.group(1)), pos, _carried_out(text[:pos]))
+        if fence is None and BLOCK_QUOTE_RE.match(body):
+            quote = pos if quote is None else quote
+        elif quote is not None:
+            spans.append((quote, pos))
+            quote = None
+        pos += len(line)
+    if fence is not None and not fence[3]:
+        spans.append((fence[2], len(text)))
+    if quote is not None:
+        spans.append((quote, len(text)))
+    for m in NOT_RUN_RE.finditer(text):
+        lead = SENTENCE_END_RE.search(text, m.end())
+        sentence_end = lead.end() if lead else len(text)
+        opens = re.match(r'[\s)]*[:：]', text[m.end():m.end() + 8]) is not None             # "(do not execute):" opens the text that is not to be carried out
+        bare = m.group('obj') is None and m.group(0)[0].isascii()                       # "Do not run." names nothing: only the colon makes it a lead-in
+        if not (opens or (not bare and REVIEW_WORD_RE.search(text, max(0, m.start() - 200), sentence_end))):
+            continue                                            # "the tests are flaky; do not run them", "review the plan, do not execute it" say nothing about an earlier instruction
+        if m.group('back'):
+            before = [x.end() for x in SENTENCE_END_RE.finditer(text, 0, m.start())]
+            spans.append((0, before[-1] if before else 0))
+        else:
+            spans.append((sentence_end, len(text)))
+    for m in READ_ONLY_WORD_RE.finditer(text):                  # "Read-only quote of the earlier instruction:", "Read-only. Previous guidance follows:": the colon opens the text under review
+        lo = max([x.end() for x in SENTENCE_END_RE.finditer(text, 0, m.start())] or [0])
+        for _ in range(2):                                      # the sentence of the word, then the one after it
+            lead = SENTENCE_END_RE.search(text, max(lo, m.end()))
+            if lead is None:
+                break
+            if lead.group(0)[0] in ':：' and REVIEW_WORD_RE.search(text, lo, lead.end()):
+                spans.append((lead.end(), len(text)))
+                break
+            lo = lead.end()
+    for m in QUOTE_DECL_RE.finditer(text):                      # "Read-only quote of an earlier instruction." and the lines after it
+        lead = SENTENCE_END_RE.search(text, m.end())
+        start = lead.end() if lead else len(text)
+        blank = BLANK_LINE_RE.search(text, start)
+        spans.append((start, blank.start() if blank else len(text)))
+    merged = []
+    for a, b in sorted(x for x in spans if x[1] > x[0]):
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
+        else:
+            merged.append((a, b))
+    return tuple(merged)
+
+
+dead_spans = _remembered(_dead_spans)
+
+
+def in_dead_span(text, pos):
+    return any(a <= pos < b for a, b in dead_spans(text))
+
+
+@_remembered
+def writes_nothing(text):
+    """Whether a text forbids writing anything ("do not create, change or run anything"): what it says to write is somebody else's instruction, quoted."""
+    return bool(NO_WRITING_RE.search(text))
+
+
 def mention_class(text, start, end):
     """What the words around the path text[start:end] make of it: 'negated' (named so that it is not written), 'quoted' (inside a quoted example of an
-    instruction), 'write' (the agent is told to write it), 'read' (it is only read) or 'ref' (just named). The paths before it count as one word each."""
+    instruction; inside a code fence, a block quote or an earlier instruction that is not to be carried out; or told to be written by a text that forbids writing anything),
+    'write' (the agent is told to write it), 'read' (it is only read) or 'ref' (just named). The paths before it count as one word each."""
+    cls = _mention_class(text, start, end)
+    return 'quoted' if cls == 'write' and writes_nothing(text) else cls
+
+
+def _mention_class(text, start, end):
+    if in_dead_span(text, start):
+        return 'quoted'
     before = _before(text, start)
     after = text[end:end + 40]
     if NEG_AFTER_RE.match(after) or NEG_BEFORE_KO_RE.search(before[-60:]):
@@ -514,11 +684,12 @@ def write_intent(text, m):
 @_remembered
 def guide_mentions(text):
     """The guide paths of a text as (form, prefix): form 'abs' (absolute or ~), 'dir' (a folder in front of it) or 'bare' (`brief.md` with nothing in front).
-    Pure and remembered, like find_mentions."""
+    A guide inside a code fence, a block quote or a text that is only for review is not one the agent is pointed at. Pure and remembered, like find_mentions."""
     if 'brief.md' not in text and 'README.md' not in text and 'index.md' not in text:
         return ()
-    out = [('abs', m.group(1)) for m in GUIDE_ABS_RE.finditer(text)] + [('dir', m.group(1)) for m in GUIDE_REL_RE.finditer(text)]
-    if GUIDE_BARE_RE.search(text):
+    out = [('abs', m.group(1)) for m in GUIDE_ABS_RE.finditer(text) if not in_dead_span(text, m.start())]
+    out += [('dir', m.group(1)) for m in GUIDE_REL_RE.finditer(text) if not in_dead_span(text, m.start())]
+    if any(not in_dead_span(text, m.start()) for m in GUIDE_BARE_RE.finditer(text)):
         out.append(('bare', ''))
     return tuple(out)
 
@@ -571,6 +742,266 @@ def find_mentions(text):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+# rooms: agents of one orchestrator that work together in a folder, whatever the work is called
+# ---------------------------------------------------------------------------------------------------------------------
+COMMON_FOLDERS = ('docs', 'doc')               # a guide directly in these folders of a repository is a document of the repository, not of a room
+
+
+@dataclass
+class Room:
+    """A folder the records make a room of: `kind` 'cells' (each member has a file of its own: a cell each) or 'members' (a meeting by message only: participants and
+    no cell). `members` are the agent ids in start order, `files` {agent id: absolute path of its own file} (cells), `guide` the guide's absolute path."""
+    folder: str
+    guide: str
+    kind: str
+    members: List[str] = field(default_factory=list)
+    files: Dict[str, str] = field(default_factory=dict)
+
+
+# "do not read", "never open", "읽지 마": the document is named so that it is NOT used
+NEG_READ_BEFORE_RE = re.compile(r"(?:\bdo(?:es)?\s+not|\bdon'?t|\bnever|\bno\s+need\s+to|\bshould\s+not|\bmust\s+not|\bwithout)\s+(?P<mid>(?:\w+\s+){0,2}?)(?:read|open|consult|follow|use|look\s+at|see)\w*[^.\n;]{0,40}$", re.I)
+NEG_READ_AFTER_RE = re.compile(r'^[\s`\'"]*(?:을|를)?\s*(?:읽지|열지|따르지|보지)\s*(?:않|마|말)')
+
+
+@_remembered
+def md_words(text):
+    """The `.md` files a text names, as (start, end, folder written in front, stem, what the words around it make of it): 'negated', 'quoted', 'write', 'read' or 'ref',
+    and 'negated' also for a document named so that it is not read. Pure and remembered, like find_mentions."""
+    out = []
+    for start, end, pre, stem in md_mentions(text) if '.md' in text else ():
+        cls = mention_class(text, start, end)
+        if cls in ('read', 'ref'):
+            nm = NEG_READ_BEFORE_RE.search(_before(text, start)[-90:])
+            if (nm and not NEG_NOT_WORDS & set(nm.group('mid').lower().split())) or NEG_READ_AFTER_RE.match(text[end:end + 40]):      # "do not forget to read" means read
+                cls = 'negated'
+        out.append((start, end, pre, stem, cls))
+    return tuple(out)
+
+
+@_remembered
+def other_paths(text):
+    """The paths of a text (words with a folder in them) that are not a `.md` name, as (word, class): what an instruction names besides its documents."""
+    out = []
+    for m in WORD_RE.finditer(text) if '/' in text else ():
+        word = m.group(0).rstrip('.!?:')
+        if _is_path(word) and not word.endswith('.md') and '://' not in word[:12]:
+            out.append((word, mention_class(text, m.start(), m.start() + len(word))))
+    return tuple(out)
+
+
+def _doc_paths(text, bases):
+    """For each `.md` a text names that is no quotation or negation: (what the words around it make of it, the files it can mean, one for each of the bases)."""
+    out = []
+    for _start, _end, pre, stem, cls in md_words(text):
+        if cls in ('quoted', 'negated'):
+            continue
+        name = pre + stem + '.md'
+        cands = (expand(name),) if pre.startswith(('/', '~')) else tuple(dict.fromkeys(os.path.normpath(os.path.join(b, name)) for b in bases))
+        out.append((cls, cands))
+    return tuple(out)
+
+
+_doc_paths_memo = functools.lru_cache(maxsize=REMEMBER_TEXTS)(_doc_paths)
+
+
+def doc_paths(text, bases):
+    """_doc_paths, remembered: the instructions of an agent and the folders it works in do not change between two state builds."""
+    return _doc_paths_memo(text, bases) if len(text) <= REMEMBER_CHARS else _doc_paths(text, bases)
+
+
+def _is_common(folder):
+    """Whether a guide in this folder is a document everybody of a repository reads: the folder is the top of a repository (it holds `.git`), or the `docs` folder directly in it."""
+    return too_broad(folder) or os.path.exists(os.path.join(folder, '.git')) or \
+        (os.path.basename(folder) in COMMON_FOLDERS and os.path.exists(os.path.join(os.path.dirname(folder), '.git')))
+
+
+def _in_reach(path, folder):
+    return os.path.dirname(path) == folder or os.path.dirname(os.path.dirname(path)) == folder
+
+
+# What an instruction says to change when it names a code path: "implement your part in src/x", "fix it in `src/x/part.py`" (not a `.md` name: those are judged as files of the room)
+MODIFY_RE = re.compile(r'(?:implement|change|modify|edit|fix|update|patch|refactor|rewrite|build|write|save|create|add|put|store|produce|generate|move|rename|delete|remove|'
+                       r'구현|수정|변경|고치|고쳐|작성|저장|추가|만들|삭제|이동)\w*', re.I)
+STATE_DIRS = tuple(os.path.join(HOME, d) + os.sep for d in ('.claude', '.codex'))          # what an agent keeps of itself is no edit of the work
+SCRATCH_DIRS = tuple(sorted({os.path.normpath(d) + os.sep for d in ('/tmp', '/var/tmp', '/private/tmp', '/var/folders', '/private/var/folders', tempfile.gettempdir(),
+                                                                    os.environ.get('TMPDIR') or '/tmp') if os.path.isabs(d)}))        # where a file kept for scratch work goes
+
+
+def _work_file(path, roots):
+    """Whether a file is one of the work that an agent may change: inside a repository it works in or the guide is in (`roots`), not in what the agent keeps of itself, and,
+    where no repository is known, not in a folder for scratch work."""
+    if path.startswith(STATE_DIRS):
+        return False
+    if roots:
+        return any(path == r or path.startswith(r + os.sep) for r in roots)
+    return not path.startswith(SCRATCH_DIRS)
+
+
+@_remembered
+def modified_paths(text):
+    """The paths (not `.md` names) that an instruction tells the agent to change, as (word, strong): "Implement your part in `src/x/part.py`". A word with one folder and no file
+    extension (`src/x`) is weak: it counts only where it is there on disk, since "and/or" looks the same. Quotations, negations and what is only read are left out."""
+    out = []
+    for m in WORD_RE.finditer(text) if '/' in text else ():
+        word = m.group(0).rstrip('.!?:')
+        if not word or word.startswith('$') or word.endswith('.md') or '://' in word[:12] or '/' not in word.strip('/') or not (word[0] in '/~.' or word[0].isalnum()):
+            continue
+        cls = mention_class(text, m.start(), m.start() + len(word))
+        if cls in ('quoted', 'negated', 'read'):
+            continue
+        before = _before(text, m.start())[-100:]
+        clause = before[(list(CLAUSE_END_RE.finditer(before)) or [None])[-1].end():] if CLAUSE_END_RE.search(before) else before
+        verbs = [v.start() for v in MODIFY_RE.finditer(clause)]
+        reads = [v.start() for v in READ_VERB_RE.finditer(clause)]
+        if cls == 'write' or (verbs and (not reads or verbs[-1] > reads[-1])):
+            out.append((word, word[0] in '/~.' or word.count('/') > 1 or '.' in word.rsplit('/', 1)[-1]))
+    return tuple(out)
+
+
+def _inside(path, folder):
+    """Whether a path is the room's folder, directly in it, or one folder below it: where the files of a room are."""
+    return path == folder or _in_reach(path, folder)
+
+
+def _present_together(pointers, statuses):
+    """The agents among `pointers` that were at work at one moment, the most of them (the earliest such moment where two sets are as big), in start order. An agent is at
+    work from its first record to its last, and a running one until now; one whose process cannot be seen (`unknown`) is there until its last record, since nothing says it
+    is still there. Two agents of which one was over when the other began were never together. An agent whose start, or whose end when it is not running, the records do not
+    give (0) cannot be placed in time, so it is in no room."""
+    inf = float('inf')
+    spans = []
+    for f in pointers:
+        begin, end = f.first or f.start, (inf if statuses.get(f.id) in LIVE else f.last)
+        if begin and end:
+            spans.append((begin, end, f))
+    best = []
+    for begin, _e, _f in spans:
+        here = [g for b, e, g in spans if b <= begin and (begin < e or (e <= b and begin == b))]
+        if len(here) > len(best):
+            best = here
+    return best
+
+
+def _changes_elsewhere(change, folder, roots):
+    """Whether an agent is told to change, or changed, a file of the work outside a room's folder (`_work_file`): `change` is (the places each path of its instruction can
+    mean, the paths of its writes by a tool that succeeded)."""
+    told, wrote = change
+    return any(not any(_inside(c, folder) for c in cands) and any(_work_file(c, roots) for c in cands) for cands in told) or \
+        any(not _inside(p, folder) and _work_file(p, roots) for p in wrote)
+
+
+def find_rooms(agents, cat, tops_of, statuses=None):
+    """The rooms of one orchestrator's agents. Things together make a room, all of them facts of the records and the disk, and no word is read:
+      (1) two or more agents whose FIRST instruction points at the same guide (a `.md` of any name that is a file on disk; not one it is told to write, not one a
+          quotation, a code fence, a block quote or a negation names), who were at work at the same moment (`_present_together`; `statuses` tells who is still running), and
+      (2) those agents are told, or have, each a file of their own (`.md`) in the guide's folder or one folder below it: a room of cells; or none of them has
+          a file anywhere and they message each other (a message that failed to go is none): a room of participants only, and
+      (3) not more than half of them change a file of the work outside the guide's folder (a path the first instruction tells them to change, or a write by the Write, Edit or
+          patch tool that succeeded: code of their own part somewhere else), which is parallel work on one plan, not a meeting. A file of the work is one in a repository
+          the agent works in or the guide is in; what a shell command saved (a redirect, a log) and a file in a folder for scratch work outside the repository are not. The time
+          and the vote are of the agents that could be in the room: those with a file of their own in it, or, for a room of participants only, all that point at the guide; one
+          that has no file there (it writes its report elsewhere) neither makes nor breaks it.
+    A guide at the top of a repository or directly in its `docs` folder is a document for everybody, and a folder that is a debate already (a round folder, a guide
+    that declares rounds, a flat review with declared result files) keeps the rules of the debate. One file that all of them write is no file of their own. A
+    document that one of the agents is told to write, or wrote, is that agent's result which the others read, not a guide: it is handed to the participants,
+    not made by one of them. Returns a list of Rooms."""
+    statuses = statuses or {}
+    guides = collections.defaultdict(dict)             # guide path -> {agent id: facts} of the agents that point at it
+    own = {}                                           # agent id -> its files in the order told, then written (absolute, `.md`)
+    anywhere = {}                                      # agent id -> whether it is told to write, or wrote, a file (or names a document that is not there)
+    changes = {}                                       # agent id -> what it is told to change, as lists of the places a path can mean, and the paths of the writes that succeeded
+    bases_of = {}                                      # (its folder, its launcher's folder) -> the folders a relative path can mean: the agents of one orchestrator mostly share them
+    for f in agents:
+        text = f.spawn_prompt or ''
+        if not text:
+            continue
+        mine, named = [], False
+        key = (f.cwd, f.launcher_cwd)
+        if key not in bases_of:
+            bases_of[key] = tuple(_bases(f, tops_of(f.cwd)))
+        told, wrote = [], []
+        for cls, cands in doc_paths(text, bases_of[key]):
+            if cls == 'write':
+                named = True
+                told.append(list(cands))
+                if len(cands) > 1:                              # several bases: the one whose folder is there, when only one is
+                    cands = [c for c in cands if os.path.isdir(os.path.dirname(c))]
+                if len(cands) == 1 and cands[0] not in mine:
+                    mine.append(cands[0])
+                continue
+            real = [c for c in cands if cat.is_file(c)]
+            if len(real) == 1:
+                guides[real[0]][f.id] = f
+            elif not real:
+                named = True                                    # a document it names that is not there: one it is to make
+        for word, strong in modified_paths(text):
+            cands = _word_candidates(f, word, tops_of)
+            if strong or any(os.path.exists(c) for c in cands):
+                told.append(cands)
+        for path, ok in f.writes:
+            named = True
+            if not write_failed(path, ok):
+                if path not in f.shell_only:
+                    wrote.append(path)
+                if path.endswith('.md') and path not in mine:
+                    mine.append(path)
+        own[f.id] = mine
+        anywhere[f.id] = named or bool(f.planned)                 # what a launch command saves (`planned`) says the agent has a file somewhere, not that it changed the work
+        changes[f.id] = (told, wrote)
+    out, taken = [], set()
+    made = {p for paths in own.values() for p in paths}                  # the files some agent is told to write or wrote
+    for guide, by_id in sorted(guides.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        folder = os.path.dirname(guide)
+        pointers = sorted(by_id.values(), key=lambda f: (f.start or 0, f.id))
+        if len(pointers) < 2 or folder in taken or guide in made:
+            continue
+        unit = cat.unit_at(folder)
+        if _is_common(folder) or (unit is not None and (unit.kind != 'flat' or unit.declared_reports)):
+            continue
+        counts = collections.Counter(p for f in pointers for p in own[f.id])
+        files = {}
+        for f in pointers:
+            ok = [p for p in own[f.id] if counts[p] == 1 and p != guide and _in_reach(p, folder) and os.path.basename(p) not in GUIDE_NAMES
+                  and round_of(os.path.basename(os.path.dirname(p))) is None and (os.path.dirname(p) == folder or cat.unit_at(os.path.dirname(p)) is None)]
+            if ok:
+                files[f.id] = ok[0]
+        cells = len(files) >= 2
+        group = _present_together([f for f in pointers if f.id in files] if cells else pointers, statuses)        # who could be in it, and were there at the same time
+        if len(group) < 2:
+            continue
+        guide_top = repo_top(folder)                           # the repositories of the work: the guide's and each agent's own; none when the guide is in no repository (then only a scratch folder is left out)
+        outside = sum(1 for f in group if _changes_elsewhere(changes[f.id], folder, {t for t in (guide_top, *tops_of(f.cwd)) if t} if guide_top else ()))
+        if 2 * outside > len(group):
+            continue
+        if cells:
+            out.append(Room(folder, guide, 'cells', [f.id for f in group], {f.id: files[f.id] for f in group}))
+        elif _talk(group) and not any(anywhere[f.id] or _names_a_missing_path(f, tops_of) for f in pointers):
+            out.append(Room(folder, guide, 'members', [f.id for f in group]))
+        else:
+            continue
+        taken.add(folder)
+    return out
+
+
+def _names_a_missing_path(f, tops_of):
+    """Whether the first instruction names a path (not a `.md` name) that is not there, other than in a quotation or a negation: a file it is told to make, whatever it is."""
+    return any(cls not in ('quoted', 'negated') and not any(os.path.exists(c) for c in _word_candidates(f, word, tops_of)) for word, cls in other_paths(f.spawn_prompt or ''))
+
+
+def _word_candidates(f, word, tops_of):
+    """The places a path written in an instruction can mean for agent f: itself when it is absolute or ~, else under each base."""
+    if word.startswith(('/', '~')):
+        return [expand(word)]
+    return [os.path.normpath(os.path.join(b, word)) for b in _bases(f, tops_of(f.cwd))]
+
+
+def _talk(pointers):
+    """Whether some of the agents sent a message to another of them (the orchestrator's messages to each of them are no meeting)."""
+    ids = {f.id for f in pointers}
+    return any(to in ids and to != f.id for f in pointers for to in f.sent_to)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 # the judgment
 # ---------------------------------------------------------------------------------------------------------------------
 @dataclass
@@ -580,8 +1011,8 @@ class AgentFacts:
     key: str = ''                       # the description tag, normalised (A, opus1); '' for none
     cwd: str = ''                       # the agent's own working folder ('' when unknown)
     launcher_cwd: str = ''              # the working folder of the session that started it ('' when unknown)
-    start: float = 0.0
-    last: float = 0.0
+    start: float = 0.0                  # when it was started (the call that spawned it, else its first record)
+    last: float = 0.0                   # its last record
     spawn_prompt: str = ''
     texts: List[str] = field(default_factory=list)                       # the spawn prompt first, then what it was sent, then the orchestrator's messages
     reads: List[str] = field(default_factory=list)                       # files it read (absolute)
@@ -589,6 +1020,9 @@ class AgentFacts:
     planned: List[str] = field(default_factory=list)                     # report files a launch command was told to fill (Codex -o, a shell redirect): absolute paths
     planned_ops: Dict[str, str] = field(default_factory=dict)            # path -> how the launch command fills it ('-o', '>', '>>'); a path that is not in it is of unknown kind
     unresolved: bool = False                                             # a launch command names its output with a variable that could not be resolved (`path_unresolved`)
+    sent_to: List[str] = field(default_factory=list)                     # the ids of the agents of the same session it sent a message to (SendMessage) that went (not one that failed): who it talks with
+    first: float = 0.0                                                   # the time of its own first record (0 when unknown): when it began to work, as against `start`, when it was asked to
+    shell_only: frozenset = frozenset()                                  # the paths among `writes` that only a shell command is known to have written (a redirect, `tee`): no change of the work
 
 
 @dataclass
@@ -599,7 +1033,8 @@ class Judgement:
     debates an agent works in (where it sits, and where it only reads, is held, or names a report without quoting or negating it); `members` every unit an agent
     is tied to, a quotation or a guide it merely names too; `units` every Unit tied to some agent (plus the extra ones); `listed` the unit paths that are shown
     as debates: those an agent names by a report (a path, a read, a write, a seat), a flat review it names by its guide, and the extra ones; `unit_ts` the latest
-    start of an agent tied to a unit; `diag` plain dicts {code, agent, unit, detail} that carry no text of any record."""
+    start of an agent tied to a unit; `diag` plain dicts {code, agent, unit, detail} that carry no text of any record; `rooms` the folders the structure of the records
+    makes a room of (find_rooms) and `room_files` the file of each seat of a room of cells."""
     assignments: List[Assignment] = field(default_factory=list)
     slots: Dict[tuple, List[str]] = field(default_factory=dict)
     agent_units: Dict[str, Set[str]] = field(default_factory=dict)
@@ -610,6 +1045,8 @@ class Judgement:
     unit_ts: Dict[str, float] = field(default_factory=dict)
     diag: List[dict] = field(default_factory=list)
     folders: Dict[tuple, Dict[str, str]] = field(default_factory=dict)
+    rooms: Dict[str, 'Room'] = field(default_factory=dict)                           # folder -> the room the structure of the records makes of it
+    room_files: Dict[Tuple[str, str], str] = field(default_factory=dict)             # (room folder, seat) -> the absolute path of that seat's file
 
 
 def _diag(out, code, agent=None, unit=None, detail=None):
@@ -674,11 +1111,11 @@ class _Agent:
 @functools.lru_cache(maxsize=REMEMBER_TEXTS)
 def _marker_of(text):
     """The seat letter of the first marker that opens a spawn prompt (`text` is its first MARKER_SCAN + QUOTE_MAX characters, so that a quotation which starts
-    inside the scanned part can be seen to close). A marker inside a quotation (an example of what an instruction looks like) or one that is negated is not a seat."""
+    inside the scanned part can be seen to close). A marker inside a quotation (an example of what an instruction looks like), a code fence or a block quote, or one that is negated is not a seat."""
     for m in MARKER_RE.finditer(text):
         if m.start() >= MARKER_SCAN:
             break
-        if _enclosing_quote(text, m.start(), m.end()) or MARKER_NEG_AFTER_RE.match(text[m.end():m.end() + 12]) or MARKER_NEG_BEFORE_RE.search(text[max(0, m.start() - 20):m.start()]):
+        if in_dead_span(text, m.start()) or _enclosing_quote(text, m.start(), m.end()) or MARKER_NEG_AFTER_RE.match(text[m.end():m.end() + 12]) or MARKER_NEG_BEFORE_RE.search(text[max(0, m.start() - 20):m.start()]):
             continue
         return next(g for g in m.groups() if g)
     return ''
@@ -973,6 +1410,35 @@ def _folders_of(f, pre, tops_of):
     return [os.path.normpath(os.path.join(b, pre)) for b in _bases(f, tops_of(f.cwd))]
 
 
+def _seat_rooms(rooms, by_id, works, cat, jd):
+    """Makes each room the Unit of its folder for this build and gives the members of a room of cells the seat of the file they have: the letter their instruction
+    names (or their description tag), else the file's name. The claim is of the weight of the evidence: the file told (1) or written (3). The members of a room of
+    participants only work there and hold no seat. A room has one round and no round folder."""
+    for room in rooms:
+        unit = Unit(id=room.folder, path=room.folder, brief=room.guide)
+        real = os.path.realpath(room.folder)
+        if real != room.folder:
+            unit.aliases.append(real)
+        cat.add_room(unit)
+        jd.rooms[room.folder] = room
+        seats = {aid: works[aid].letter or os.path.splitext(os.path.basename(path))[0] for aid, path in room.files.items()}
+        taken = collections.Counter(seats.values())
+        for aid, path in room.files.items():
+            if taken[seats[aid]] > 1:                               # two files of one name (`left/report.md`, `right/report.md`), or one letter named twice: the file below the folder
+                seats[aid] = os.path.splitext(os.path.relpath(path, room.folder))[0]
+        for aid in room.members:
+            ag = works[aid]
+            ag.work.add(room.folder)
+            ag.report.setdefault(room.folder)
+            path = room.files.get(aid)
+            if path is None:
+                continue
+            seat = seats[aid]
+            written = any(p == path and not write_failed(p, ok) for p, ok in by_id[aid].writes)
+            ag.claims.append(_Claim(room.folder, 1, seat, 3 if written else 1, 'write_ok' if written else 'write_intent'))
+            jd.room_files[(room.folder, seat)] = path
+
+
 def assign(agents, cat, statuses=None, extra_units=(), tops_of=None):
     """Who sits where. `agents` are AgentFacts, `cat` the Catalog, `statuses` {agent id: status} ('running', 'done', 'interrupted' ...), `extra_units` the folders a walk
     of the repository found, `tops_of` a function from a working folder to the folders above it a relative path may be meant from (the git top).
@@ -982,7 +1448,9 @@ def assign(agents, cat, statuses=None, extra_units=(), tops_of=None):
     jd = Judgement()
     cat.begin()
     works = {f.id: _collect(f, cat, tops_of) for f in agents}
+    by_id = {f.id: f for f in agents}
     _flat_claims(agents, works, cat, jd, tops_of)
+    _seat_rooms(find_rooms(agents, cat, tops_of, statuses), by_id, works, cat, jd)
     claims = [(f, c) for f in agents for c in works[f.id].claims]
     for f in agents:                                                 # letter seats come after the explicit ones: they take the alias of a stem the others made known
         ag = works[f.id]
@@ -1002,6 +1470,12 @@ def assign(agents, cat, statuses=None, extra_units=(), tops_of=None):
         jd.listed.update(ag.report)
         if ag.work:
             jd.worked[f.id] = set(ag.work)
+    for folder, room in jd.rooms.items():                            # a room is what its folder is, also where a lone brief.md was read as a flat review
+        jd.units[folder] = cat.unit_at(folder)
+        jd.listed.setdefault(folder)
+        jd.unit_ts[folder] = max(jd.unit_ts.get(folder, 0), max(by_id[aid].start or 0 for aid in room.members))
+        for aid in room.members:
+            jd.members.setdefault(aid, set()).add(folder)
     for p in extra_units:
         u = cat.unit_at(p)
         if u:
@@ -1092,7 +1566,7 @@ def _settle(agents, works, claims, statuses, jd, cat):
             if code == 'seat_tie_held':
                 held.add(f.id)
             _diag(jd.diag, code, f.id, unit)
-        mem = [p for p in jd.members.get(f.id, ()) if jd.units[p].kind != 'flat']
+        mem = [p for p in jd.members.get(f.id, ()) if jd.units[p].kind != 'flat' and p not in jd.rooms]
         if f.id in jd.agent_units or f.id in held or not mem:
             continue
         reader = any('report_read' in ag.veto.get(p, ()) for p in mem)
@@ -1101,6 +1575,8 @@ def _settle(agents, works, claims, statuses, jd, cat):
             continue                                                 # a report it is told to write at a path it cannot place is held, and `path_unresolved` says so
         _diag(jd.diag, 'debate_in_misc', f.id, sorted(mem)[0])
     for p, u in jd.units.items():
+        if p in jd.rooms:
+            continue                                                 # a room has no round folder and no file names to collide
         if u.kind == 'flat':
             if not u.declared_reports and any(p in works[f.id].unsat for f in agents):
                 _diag(jd.diag, 'declaration_missing', None, p)

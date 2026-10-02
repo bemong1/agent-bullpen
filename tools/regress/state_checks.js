@@ -6,6 +6,7 @@
 //  - agent list: the pill of each state and reason, the sentence under it, held agents in the main list, no NaN in the sort, a grandchild one step in under its launcher
 //  - header: the interrupted and unknown chips, the diagnostics chip (hidden at 0, and for a server that does not send it)
 //  - debate table: a paused cell and the stage of its topic
+//  - rooms: a folder of people who work together (one result column, or participants only), in both languages
 //  - message flow and conversation card: system lines (dimmed, no sender and receiver), the last speaker ignores them
 //  - alerts: the grouped limit alert in the page's language and time; an old server's Korean title as the fallback
 //  - drawer: why it stopped, how it was linked (rule and how sure), runs and who handed the last one over, launched by
@@ -197,6 +198,70 @@ async function run(lang) {
   check(L('the draft of a running agent still types'), cellsOf().some(c => c.state === 'draft' && (agentsBy(a => a.id === c.agent)[0] || {}).status === 'running') ? /class="cell c-draft"[^]*?typing/.test(deb) : true, '');
   const openOf = state => P.run(`topicStage({ final: { exists: false }, deps: '', rows: [{ cells: [{ round: 1, state: ${JSON.stringify(state)}, agent: 'x' }, { round: 1, state: 'done', agent: 'y' }] }], rounds: [1] }).cls`);
   check(L('a round with a cell in a state this page does not know (or paused) is still open'), openOf('unknown') === 's-active' && openOf('paused') === 's-active' && openOf('done') !== 's-active', [openOf('unknown'), openOf('paused'), openOf('done')]);
+
+  // ---------- rooms: people who work together in a folder, whatever the work is called ----------
+  const live3 = STATE.agents.filter(a => a.status === 'running').slice(0, 2).concat(STATE.agents.filter(a => a.status === 'done').slice(0, 1));
+  const cellOf = (a, st) => ({ round: 1, state: st, path: '/r/meeting/' + a.id + '.md', agent: a.id, writer: null, readers: [], lines: 4, mtime: STATE.now - 60, planned: false });
+  const roomOf = (kind, ags, states) => ({ root: '/r/meeting', short: '~/r/meeting', name: 'meeting', title: 'Weekly sync', finals: [], last_ts: STATE.now, current: true, topics: [{
+    dir: '/r/meeting', key: 'meeting', title: 'Weekly sync', name: '', deps: '', kind: 'rounds', room: kind, guide: '/r/meeting/agenda.md', final: { path: null, rel: null, exists: false, auto: false, mtime: null, lines: 0 },
+    rounds: kind === 'cells' ? [1] : [], docs: [{ name: 'agenda.md', path: '/r/meeting/agenda.md' }], brief: true,
+    rows: ags.map((a, i) => ({ p: kind === 'cells' ? 'ABC'[i] : (a.tag || a.id.slice(0, 6)), role: '', agents: [a.id], cells: kind === 'cells' ? [cellOf(a, states[i])] : [] })) }] });
+  const withRoom = (kind, states) => over(s => { s.debates = [roomOf(kind, live3.map(a => s.agents.find(x => x.id === a.id)), states)]; });
+  const RC = await boot({ state: withRoom('cells', ['draft', 'writing', 'done']) });
+  const rc = RC.html('#topics');
+  check(L('a room of cells: one result column (no round 1 and 2), the guide chip, the "meeting" key, its own stage line'),
+    shows(rc, RC.T('board.room.col')) && !shows(rc, RC.T('board.round', { n: 1 })) && !shows(rc, RC.T('board.round', { n: 2 })) && shows(rc, RC.T('board.room.key')) && shows(rc, RC.T('board.foot.brief', { name: 'agenda.md' }))
+    && shows(rc, RC.T('board.stage.room.active', { done: 1, total: 3 })), rc.slice(0, 600));
+  check(L('a room of cells: a cell for each, the stepper is guide -> result -> final'), (rc.match(/class="cell c-/g) || []).length === 3 && shows(rc, RC.T('board.step.brief')) && shows(rc, RC.T('board.step.final')) && (rc.match(/class="step /g) || []).length === 3, rc.match(/class="step /g));
+  const RD = await boot({ state: withRoom('cells', ['done', 'done', 'done']) });
+  check(L('a room of cells whose every file is in but whose people still work: "all submitted"'), shows(RD.html('#topics'), RD.T('board.stage.room.ready', { total: 3 })), RD.html('#topics').match(/class="stage[^<]*</g));
+  const ended = s => { s.agents.forEach(a => { if (a.status === 'running') a.status = 'done'; }); };
+  const stageOf = html => { const m = html.match(/class="stage (s-[a-z]+)">([^<]*)</); return m ? m[1] + ' ' + m[2] : null; };      // the stage badge of the first topic: its class and its text
+  const RF = await boot({ state: over(s => { s.debates = [roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'done', 'done'])]; ended(s); }) });
+  const RT = await boot({ state: over(s => { const d = roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'done', 'done']); d.copies = 3; s.debates = [d]; ended(s); }) });
+  const tip = RT.T('board.debate.copies', { count: 3 });
+  check(L('a debate that stands for folded copies says how many, in the tab and in the title tooltip; one with none says nothing'), tip && RT.html('#debateTabs').includes('title="' + esc(tip) + '"') && RT.html('#debateMeta').includes(esc(tip)) && !RF.html('#debateTabs').includes('title='),
+    [RT.html('#debateTabs').slice(0, 200), RT.html('#debateMeta').slice(0, 200)]);
+  check(L('a room of cells whose every file is in and nobody works: "' + RF.T('board.stage.complete') + '" (no round to wait for), the green stage'), stageOf(RF.html('#topics')) === 's-final ' + RF.T('board.stage.complete'), stageOf(RF.html('#topics')));
+  const RG = await boot({ state: over(s => { s.debates = [roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'missing', 'done'])]; ended(s); }) });
+  check(L('a room with a seat that never handed in is stopped, not complete'), stageOf(RG.html('#topics')) === 's-ready ' + RG.T('board.stage.room.partial', { done: 2, total: 3 }), stageOf(RG.html('#topics')));
+  const RH = await boot({ state: over(s => { const d = roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'done', 'done']); d.topics[0].final = { path: '/r/CLOSING.md', rel: '../CLOSING.md', exists: true, auto: true, mtime: STATE.now, lines: 30 }; s.debates = [d]; ended(s); }) });
+  check(L('a room closed by the conclusion of its bundle above it: the final stage, and the document is named and opens'), stageOf(RH.html('#topics')) === 's-final ' + RH.T('board.stage.final') && shows(RH.html('#topics'), '../CLOSING.md') && RH.html('#topics').includes('data-path="/r/CLOSING.md"'), stageOf(RH.html('#topics')));
+  // a flat review (its result files are declared, there is no round folder): its cells carry no round
+  const flatOf = (ags, states) => ({ root: '/r/rev', short: '~/r/rev', name: 'rev', title: 'Release review', finals: [], last_ts: STATE.now, current: true, topics: [{
+    dir: '/r/rev', key: 'rev', title: 'Release review', name: '', deps: '', kind: 'flat', final: { path: null, rel: null, exists: false, auto: false, mtime: null, lines: 0 }, rounds: [], docs: [{ name: 'brief.md', path: '/r/rev/brief.md' }], brief: true,
+    rows: ags.map((a, i) => ({ p: ['sol', 'opus', 'mini'][i], role: '', agents: [a.id], cells: [{ round: null, state: states[i], path: '/r/rev/' + ['sol', 'opus', 'mini'][i] + '.md', agent: a.id, writer: null, readers: [], lines: 4, mtime: STATE.now - 60, planned: false }] })) }] });
+  const withFlat = (states, end) => over(s => { s.debates = [flatOf(live3.map(a => s.agents.find(x => x.id === a.id)), states)]; if (end) ended(s); });
+  const FD = await boot({ state: withFlat(['done', 'done', 'done'], true) });
+  const fd = FD.html('#topics');
+  check(L('a flat review whose every result is in and nobody works: complete, with one result column and a cell for each'), stageOf(fd) === 's-final ' + FD.T('board.stage.complete') && shows(fd, FD.T('board.room.col')) && !shows(fd, FD.T('board.round', { n: 1 })) && (fd.match(/class="cell c-done"/g) || []).length === 3, stageOf(fd));
+  const FW = await boot({ state: withFlat(['done', 'draft', 'writing'], false) });
+  check(L('a flat review with results still coming: working, in/total'), stageOf(FW.html('#topics')) === 's-active ' + FW.T('board.stage.room.active', { done: 1, total: 3 }), stageOf(FW.html('#topics')));
+  const FP = await boot({ state: withFlat(['done', 'waiting', 'waiting'], true) });
+  check(L('a flat review with only some results in and nobody working is stopped, not complete and not waiting'), stageOf(FP.html('#topics')) === 's-ready ' + FP.T('board.stage.room.partial', { done: 1, total: 3 }), stageOf(FP.html('#topics')));
+  check(L('a debate with round folders keeps its stage: round done, next stage waits'), P.run(`topicStage({ final: { exists: false }, deps: '', kind: 'rounds', rows: [{ agents: [], cells: [{ round: 1, state: 'done', agent: 'x' }, { round: 2, state: 'done', agent: 'x' }] }], rounds: [1, 2] }).text`) === P.T('board.stage.ready', { n: 2 }), '');
+  const RM = await boot({ state: withRoom('members', []) });
+  const rm = RM.html('#topics');
+  check(L('a room of participants only: no stepper, no round column, the stage says how many talk, a row for each'),
+    !rm.includes('class="stepper"') && !shows(rm, RM.T('board.round', { n: 1 })) && !shows(rm, RM.T('board.room.col')) && !rm.includes('class="cell') && shows(rm, RM.T('board.stage.room.members', { count: 3 })) && live3.every(a => rm.includes(`data-agent="${a.id}"`)), rm.slice(0, 600));
+  check(L('the participants of such a room are not "other work", and the progress card lists the room'), !shows(rm, RM.T('board.work.title')) || (rm.match(new RegExp('data-agent="' + live3[0].id + '"', 'g')) || []).length === 1,
+    (rm.match(new RegExp('data-agent="' + live3[0].id + '"', 'g')) || []).length);
+  check(L('they count as agents of the debate (the debate tab and the token card)'), live3.every(a => RM.run(`inDebate(S.agents.find(a => a.id === ${JSON.stringify(a.id)}), S.debates[0])`)), '');
+  // the words that name the unit of work: a room is "this work", a debate is "this debate" (token card, the agent filter tab, the timeline window)
+  const RU = await boot({ state: over(s => { s.debates = [roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['draft', 'writing', 'done'])]; live3.forEach(x => { s.agents.find(a => a.id === x.id).units = ['/r/meeting']; }); }) });
+  const tokHead = (Pg, key) => { const d = Pg.run('currentDebate()'); return (Pg.T(key, { name: d.name, count: Pg.run('S.agents.filter(a => inDebate(a, currentDebate())).length'), input: '', output: '', cost: '' }) || '').split(':')[0]; };
+  for (const [what, Pg] of [['cells', RU], ['participants only', RM]]) {
+    const tk = Pg.html('#tokCard');
+    check(L('a room of ' + what + ': the token card says "' + tokHead(Pg, 'board.tok.room') + '", not the debate wording'), shows(tk, tokHead(Pg, 'board.tok.room')) && !shows(tk, tokHead(Pg, 'board.tok.debate')), tk.slice(-700));
+    check(L('a room of ' + what + ': the agent filter tab and the timeline window say "' + Pg.T('board.agents.tab.room') + '" / "' + Pg.T('board.tl.win.room') + '", not the debate words'),
+      shows(Pg.html('#agentFilter'), Pg.T('board.agents.tab.room')) && !shows(Pg.html('#agentFilter'), Pg.T('board.agents.tab.debate')) && shows(Pg.html('#tlWin'), Pg.T('board.tl.win.room')) && !shows(Pg.html('#tlWin'), Pg.T('board.tl.win.debate')), [Pg.html('#agentFilter'), Pg.html('#tlWin')]);
+  }
+  check(L('a debate session keeps the debate words (token card, agent filter tab, timeline window)'), shows(P.html('#tokCard'), tokHead(P, 'board.tok.debate')) && !shows(P.html('#tokCard'), tokHead(P, 'board.tok.room'))
+    && shows(P.html('#agentFilter'), P.T('board.agents.tab.debate')) && !shows(P.html('#agentFilter'), P.T('board.agents.tab.room')) && shows(P.html('#tlWin'), P.T('board.tl.win.debate')), [P.html('#agentFilter'), P.html('#tlWin')]);
+  const RE = await boot({ state: over(s => { s.debates = [roomOf('members', live3.map(a => s.agents.find(x => x.id === a.id)), [])]; s.agents.forEach(a => { if (a.status === 'running') a.status = 'done'; }); }) });
+  check(L('a room of participants only whose participants have all ended says so'), shows(RE.html('#topics'), RE.T('board.stage.room.membersEnded', { count: 3 })), RE.html('#topics').match(/class="stage[^<]*</g));
+  const sr = scan(RC), sm = scan(RM);
+  check(L('the rooms show no [key]') + (ko ? '' : ' and no Hangul outside data'), !sr.keys.length && !sr.missing.length && !sm.keys.length && !sm.missing.length && (ko || (!sr.han.length && !sm.han.length)), [sr, sm]);
 
   // ---------- message flow and conversation ----------
   P.run("ui.feedFilter = 'all'; renderFeed();");

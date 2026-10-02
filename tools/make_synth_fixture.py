@@ -70,7 +70,7 @@ def snapshot(args, out, prefix, stopped=False):
     """Build a HOME under <out>/home[_stopped], serve it, save what the pages fetch as synth_<prefix>*.json, stop the server and the fake processes."""
     info = synth_home.build(os.path.join(out, 'home_stopped' if stopped else 'home'), stopped=stopped)
     pids = synth_home.start_live(info) if args.live or stopped else []
-    env = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CACHE_HOME', 'AGENT_BULLPEN_LOG')}
+    env = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CACHE_HOME', 'AGENT_BULLPEN_LOG', 'AGENT_BULLPEN_TOKEN')}
     env.update(HOME=info['home'], PYTHONDONTWRITEBYTECODE='1', AGENT_BULLPEN_LANG='ko')     # the ready line below is matched in Korean, whatever LANG the runner has
     log = tempfile.TemporaryFile('w+')
     srv = subprocess.Popen([sys.executable, SERVER, '--port', str(args.port)], stdout=log, stderr=subprocess.STDOUT, env=env, stdin=subprocess.DEVNULL)

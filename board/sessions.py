@@ -9,11 +9,11 @@ import re
 import threading
 import time
 
-from . import affil, procs
+from . import affil, lineage, procs
 from .facts import Redirect
 from . import runstate as RS
 from .util import (
-    CLAUDE_HOME, FILE_MAX, PROJECTS, STALL_SEC, Tail, as_text, claude_session_files, line_error, open_safe, parse_records, parse_ts,
+    CLAUDE_HOME, FILE_MAX, PROJECTS, STALL_SEC, Tail, as_text, line_error, open_safe, parse_records, parse_ts,
     stat_plain, strip_reminders, trunc,
 )
 from .tokens import TokenMeter, claude_model_short, cx_model_short
@@ -24,8 +24,7 @@ from .codex_parse import (
 from .codex_index import CODEX
 from .link import LINKS, _cx_expand, cx_parse_call
 from .agents import (
-    Agent, CodexAgent, cx_record_usage, cx_reprice, cx_sync_base, cx_sync_guardians, model_numbers,
-    pending_or_stall, tool_brief,
+    Agent, CodexAgent, cx_record_usage, cx_reprice, cx_sync_base, cx_sync_guardians, model_numbers, tool_brief,
 )
 from .debates import REPORT_RE, brief_table, judge as judge_debates, read_head, writer_table
 from . import units as U
@@ -119,17 +118,17 @@ def count_torn(tracker, recs, torn):
 
 
 def session_procs():
-    """{session id: runstate.Proc} of the processes that hold each Claude session, from ~/.claude/sessions/<pid>.json: alive True / False (no such process, or another
-    command) / None (it cannot be told, procs.cmdline_has). Several files for one session are one Proc (runstate.proc_snapshot). The `status` of the file (busy,
-    idle ...) is a hint the judgment may only use as a diagnostic."""
+    """{session id: runstate.Proc} of the processes that hold each Claude session, from ~/.claude/sessions/<pid>.json: alive True / False (no such process, another
+    command, or a pid that now belongs to another process, user or pid namespace: lineage.holds) / None (it cannot be told). Several files for one session are one Proc
+    (runstate.proc_snapshot). The `status` of the file (busy, idle ...) is a hint the judgment may only use as a diagnostic."""
     table = {}
-    for d in claude_session_files():
-        sid, pid = d.get('sessionId'), d.get('pid')
+    for pid, d, alive in lineage.claims():
+        sid = d.get('sessionId')
         if not isinstance(sid, str):
             continue
         ts = d.get('statusUpdatedAt') or d.get('updatedAt')
         ts = ts / 1000.0 if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 10 ** 11 else ts
-        table.setdefault(sid, []).append((pid, procs.cmdline_has(pid, b'claude'), d.get('status'), ts if isinstance(ts, (int, float)) else None))
+        table.setdefault(sid, []).append((pid, alive, d.get('status'), ts if isinstance(ts, (int, float)) else None))
     return {sid: RS.proc_snapshot(entries) for sid, entries in table.items()}
 
 
@@ -405,23 +404,6 @@ class CodexLinker:
         f.pending = [p['ts'] for p in a.pending.values() if p.get('ts')]
         return RS.judge(f, RS.Proc(cx_open(a.path, a.id, cx_procs())), now)
 
-    def status(self, a, alive, now):
-        """The last turn's end record → (open turn) TaskStop → the process (a codex process that has the rollout open, or the id in a command line) →
-        if none, the end notice of the run call (failed, stopped, finished) → a waiting tool, record growth. If the process cannot be known, it is judged by record growth."""
-        t = a.turns[-1] if a.turns else None
-        if t is not None and (t['end'] is not None or t['status'] == 'killed'):
-            return t['status']
-        c = self.calls.get(t['call']) if t else None
-        if c and c['stopped']:
-            return 'killed'
-        proc = cx_open(a.path, a.id, cx_procs())
-        if proc is False and now - (a.last_ts or a.spawn_ts or 0) > 60:
-            e = c['end'] if c else None      # a foreground result is looked at only here, since a process can remain, as with `nohup … &`
-            if e and (e['status'] == 'failed' or e['exit'] not in (None, 0)):
-                return 'failed'
-            return 'killed' if e and e['status'] == 'killed' else 'ended'
-        return pending_or_stall(a, a.last_ts or 0, now)
-
 
 class Session:
     def __init__(self, path):
@@ -436,7 +418,7 @@ class Session:
         self.slug = ''
         self.cwd = ''
         self.orch = {'state': 'idle', 'last_action': '', 'last_action_ts': None, 'last_say': '',
-                     'last_say_ts': None, 'turn_end_ts': None, 'last_ts': None, 'pending_bg': 0,
+                     'last_say_ts': None, 'last_ts': None, 'pending_bg': 0,
                      'model': '', 'effort': ''}
         self.orch_tokens = TokenMeter()
         self.spawns = {}          # toolUseId -> {ts, description, prompt}
@@ -464,6 +446,8 @@ class Session:
         self._cli_procs = {}                  # child session id -> runstate.Proc, rebuilt at every state()
         self._verdicts = {}                   # agent id -> runstate.Verdict of the last state()
         self._orch_verdict = RS.OrchVerdict('idle')
+        self._orch_proc = RS.Proc(None)       # the process of the orchestrator as the last state() saw it
+        self.cx_turn = RS.TurnMarks()         # a Codex thread's turn: `task_started` and what it does open it, `task_complete` and `turn_aborted` close it
         self._diag = None                     # the diagnostics of the last state() (board/diag.py)
         self.walked_units, self.walk_capped, self.walk_gen = [], False, 0
         self._walk_thread, self._walk_at = None, time.monotonic() - WALK_EVERY + 5       # the first walk comes a few seconds after the session is opened
@@ -673,7 +657,6 @@ class Session:
         if typ == 'ai-title':
             self.title = d.get('aiTitle') or self.title
         elif typ == 'system' and d.get('subtype') == 'turn_duration':
-            o['turn_end_ts'] = ts
             o['pending_bg'] = d.get('pendingBackgroundAgentCount') or 0
         elif typ == 'system' and d.get('subtype') == 'informational':
             self._sys_notice(ts, RS.notice_kind(d))
@@ -733,7 +716,8 @@ class Session:
                         if AGENT_ID_RE.match(tid):
                             self._event(ts, 'stop', 'orch', tid, '에이전트 중지', agent=tid, title_key='event.stop.title')
         elif typ == 'user':
-            o['last_ts'] = ts
+            if RS.is_work(d):                                     # a local command's echo or a meta line gives the orchestrator nothing to do
+                o['last_ts'] = ts
             origin = d.get('origin') or {}
             kind = origin.get('kind')
             c = (d.get('message') or {}).get('content')
@@ -889,14 +873,13 @@ class Session:
     def alive(self):
         """(alive?, pid, name): True / False / None (no way to know the process — the page shows "session state unknown")."""
         unknown = None
-        for s in claude_session_files():
-            if s.get('sessionId') != self.id:
+        for pid, d, r in lineage.claims():
+            if d.get('sessionId') != self.id:
                 continue
-            r = procs.cmdline_has(s.get('pid'), b'claude')
             if r:
-                return True, s.get('pid'), s.get('name')
+                return True, pid, d.get('name')
             if r is None:
-                unknown = (None, s.get('pid'), s.get('name'))
+                unknown = (None, pid, d.get('name'))
         return unknown or (False, None, None)
 
     def _attach_main_side(self):
@@ -987,10 +970,10 @@ class Session:
     # ---------- debates ----------
     def _debate_key(self, statuses):
         """What the debate judgment reads from the session, as a small comparable value: the statuses, the walk's generation, the launcher's folder and, per agent,
-        the sizes of the things its instructions, reads and writes are made of. A judgment is reused while this is the same and the folders on disk are too."""
+        the sizes of the things its instructions, reads, writes and messages to other agents (a room of participants only is made of them) are made of. A judgment is reused while this is the same and the folders on disk are too."""
         per = tuple((a.id, a.tag, a.cwd, a.spawn_ts, a.first_ts, a.last_ts, a.spawn_prompt is not None, len(a.received), len(a.orch_msgs), len(a.reads),
                      len(a.writes), sum(1 for w in a.writes if w.get('ok') is not None), len(a.shell_writes), sum(1 for w in a.shell_writes if w.get('ok') is not None),
-                     len(a.out_paths), len(a.redirects), (a.cli or {}).get('sid'))
+                     len(a.out_paths), len(a.redirects), (a.cli or {}).get('sid'), len(a.sent), sum(1 for m in a.sent if m.get('ok') is not None))
                     for a in self.agents.values())
         return (tuple(sorted(statuses.items())), getattr(self, 'walk_gen', 0), getattr(self, 'cwd', ''), per)
 
@@ -1198,29 +1181,34 @@ class CodexSession(Session):
                 self.orch_tokens.ctx_limit = w
             if pt == 'task_started':
                 o['last_ts'] = ts
+                self.cx_turn.begin()
             elif pt in ('task_complete', 'turn_aborted'):
-                o['turn_end_ts'] = ts
+                self.cx_turn.end(ts)
         elif typ == 'response_item':
             if pt == 'message' and p.get('role') == 'user':
                 text = codex_user_text(p)
                 if text:
                     o['last_ts'] = ts
+                    self.cx_turn.begin()
                     self.pending_q.clear()       # the answer to request_user_input_async comes as the next user message
                     self._user_say(ts, text, raw=True)
             elif pt == 'message' and p.get('role') == 'assistant':
                 text = codex_say_text(p)
                 if text:                          # both commentary and final_answer (the same treatment as a Claude orchestrator's text block)
                     o['last_ts'] = ts
+                    self.cx_turn.begin()
                     o['last_say'], o['last_say_ts'] = text, ts
                     self._event(ts, 'orch_say', 'orch', 'user', '사용자에게 보고', text, title_key='event.orch_say.title')
             elif pt in ('custom_tool_call', 'function_call'):
                 o['last_ts'] = ts
+                self.cx_turn.begin()
                 name, text = codex_call(pt, p)
                 self._orch_tool(ts, name, text)
                 if name == 'request_user_input_async':
                     self._codex_ask(ts, p)
             elif pt in ('custom_tool_call_output', 'function_call_output'):
                 o['last_ts'] = ts
+                self.cx_turn.begin()
 
     def _codex_ask(self, ts, p):
         try:
@@ -1246,8 +1234,7 @@ class CodexSession(Session):
         return self._alive, None, self.title
 
     def _codex_busy(self, statuses, now):
-        o = self.orch
-        if (o['last_ts'] or 0) > (o['turn_end_ts'] or 0) + 1:
+        if self.cx_turn.open:
             return True
         try:
             recent = now - os.path.getmtime(self.path) < STALL_SEC

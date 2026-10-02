@@ -173,6 +173,8 @@ def read_final(b, obs, objs):
         read_aff(b, obs, objs)
     if bundle in ('deb', 'cpl'):
         read_deb(b, obs, objs)
+    if bundle == 'room':
+        read_room(b, obs, objs)
     if bundle in ('sta', 'cpl'):
         read_sta(b, obs, objs)
     read_diag(b, obs, objs)
@@ -281,14 +283,10 @@ def file_below(path, unit_dir):
     return os.path.splitext(os.path.relpath(path, unit_dir))[0]
 
 
-def read_deb(b, obs, objs):
-    if not b.main_path:
-        return
-    s, st = open_state(b, objs)
-    repo = b.meta['repo']
-    rel = lambda p: os.path.relpath(p, repo) if p else None
-    G = b.ids.get('child')
-    placed = []                                    # every cell of the agent: (unit, round, seat, state, file). The board may show it in more than one place; all of them count
+def deb_view(st, rel, G):
+    """What the board's debate list says about the agent G: (its API dict or None, its cells as (unit, round, seat, state, file), whether somebody reads one of its cells,
+    the debate folders listed). The board may show an agent in more than one place; every one of them counts."""
+    placed = []
     readers = False
     names = set()
     a = agent_api(st, G) if G else None
@@ -304,22 +302,56 @@ def read_deb(b, obs, objs):
                         placed.append((rel(t['dir']), cell['round'] if len(t['rounds']) else None, row['p'], cell['state'], file_below(cell.get('path'), t['dir'])))
                     if names & set(cell.get('readers') or ()):
                         readers = True
+    return a, placed, readers, listed
+
+
+def set_places(obs, role, a, placed, readers, rel):
+    """The fields of a participant: where it sits (unit, round, seat, cell, role, placements)."""
+    unit = _one(p[0] for p in placed)
+    if not placed and a is not None and a.get('work_units'):       # a reader, or a held agent: the debate it works in (`units` is where it sits)
+        unit = rel(sorted(a['work_units'])[0])
+    obs.set(role, 'unit', unit)
+    obs.set(role, 'round', _one(p[1] for p in placed))
+    obs.set(role, 'seat', _one(p[2] for p in placed))
+    obs.set(role, 'cell', _one(p[3] for p in placed))
+    obs.set(role, 'role', 'writer' if placed else ('reader' if readers else 'none'))
+    obs.set(role, 'placements', frozenset('%s|%s|%s|%s' % (p[0], p[1], p[2], p[4]) for p in placed))
+
+
+def read_deb(b, obs, objs):
+    if not b.main_path:
+        return
+    s, st = open_state(b, objs)
+    repo = b.meta['repo']
+    rel = lambda p: os.path.relpath(p, repo) if p else None
+    G = b.ids.get('child')
+    a, placed, readers, listed = deb_view(st, rel, G)
     if G:
-        unit = _one(p[0] for p in placed)
-        if not placed and a is not None and a.get('work_units'):       # a reader, or a held agent: the debate it works in (`units` is where it sits)
-            unit = rel(sorted(a['work_units'])[0])
-        obs.set('child', 'unit', unit)
-        obs.set('child', 'round', _one(p[1] for p in placed))
-        obs.set('child', 'seat', _one(p[2] for p in placed))
-        obs.set('child', 'cell', _one(p[3] for p in placed))
-        obs.set('child', 'role', 'writer' if placed else ('reader' if readers else 'none'))
-        obs.set('child', 'placements', frozenset('%s|%s|%s|%s' % (p[0], p[1], p[2], p[4]) for p in placed))
+        set_places(obs, 'child', a, placed, readers, rel)
     obs.set('listing', 'unit', next(iter(listed), None))
     obs.set('listing', 'units', frozenset(listed))
     if b.meta.get('edit'):                          # the rows and rounds the board gives the editing job beside the topics (none when it is not listed at all)
         edit = [t for d in st['debates'] for t in d['topics'] if rel(t['dir']) == rel(b.meta['edit'])]
         obs.set('listing', 'edit_rows', frozenset(row['p'] for t in edit for row in t['rows']))
         obs.set('listing', 'edit_rounds', frozenset(r for t in edit for r in t['rounds']))
+
+
+def read_room(b, obs, objs):
+    """The room scene: every participant of the page where it sits, the folders the board lists and the title each is given."""
+    if not b.main_path:
+        return
+    s, st = open_state(b, objs)
+    repo = b.meta['repo']
+    rel = lambda p: os.path.relpath(p, repo) if p else None
+    for role in b.meta['page']:
+        a, placed, readers, _ = deb_view(st, rel, b.ids.get(role))
+        set_places(obs, role, a, placed, readers, rel)
+    obs.set('listing', 'units', frozenset(rel(t['dir']) for d in st['debates'] for t in d['topics']))
+    obs.set('listing', 'titles', frozenset('%s|%s' % (rel(t['dir']), t['title']) for d in st['debates'] for t in d['topics']))
+    obs.set('listing', 'finals', frozenset('%s|%s' % (rel(t['dir']), t['final']['rel']) for d in st['debates'] for t in d['topics']
+                                           if t['final']['exists'] and t['final']['auto'] and (t['final']['rel'] or '').startswith('../')))      # a topic closed by the conclusion of its bundle
+    guide = b.meta.get('guide')
+    obs.set('listing', 'guide_opens', frozenset([rel(guide)]) if guide and s.allowed_file(guide) else frozenset())      # the document view opens the guide of a room the page shows
 
 
 def read_sta(b, obs, objs):

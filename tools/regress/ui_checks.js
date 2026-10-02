@@ -581,6 +581,9 @@ const AGENT_ITEMS = [
   P.status = { 'api/sessions': 403 }; await P.load();
   check('server refuses (403, text/plain body): "서버가 요청을 받지 않았습니다 (403)" shows the server\'s text in the page language (a body has one line per language, the last is Korean; it carries the fix)', diagHtml_(P).includes('(403)') && diagHtml_(P).includes('second line') && !diagHtml_(P).includes('ERR-403 plain') && diagHtml_(P).includes('dg-detail'), diagHtml_(P).slice(0, 300));
   P = makePage('index.html', { search: '', sessions: J('_sessions') });
+  P.status = { 'api/sessions': 401 }; await P.load();
+  check('server wants an access token (401): the card names the token address in the page language, not the raw error text', diagHtml_(P).includes('(401)') && diagHtml_(P).includes('?token=') && diagHtml_(P).includes('접속 토큰') && !diagHtml_(P).includes('ERR-401'), diagHtml_(P).slice(0, 300));
+  P = makePage('index.html', { search: '', sessions: J('_sessions') });
   P.status = { 'api/sessions': 500 }; await P.load();
   check('server error (500, JSON body): the "error" text is shown, no --allow-host hint', diagHtml_(P).includes('(500)') && diagHtml_(P).includes('ERR-500') && !diagHtml_(P).includes('--allow-host'), diagHtml_(P).slice(0, 300));
 
@@ -620,6 +623,14 @@ const AGENT_ITEMS = [
   P = makePage('index.html'); await P.load();
   P.down = true; await P.run('tick()'); await sleep(20);
   check('later outage keeps the "연결 끊김" label and no diagnostic card', P.els.get('#updated').innerHTML.includes('연결 끊김') && diagEl(P).innerHTML === '' && !nodata(P), P.els.get('#updated').innerHTML);
+  // 5b) a tab that was open when the server restarted gets 401 (the token is new at every start): it says the token is needed, not "disconnected"
+  P = makePage('index.html'); await P.load();
+  P.status = { 'api/state': 401 }; await P.run('tick()'); await sleep(20);
+  check('later 401 (server restarted, new token): the header names the token and the way back, not "연결 끊김", with the full sentence as its tooltip; no diagnostic card, the board stays',
+    P.els.get('#updated').innerHTML.includes('토큰') && P.els.get('#updated').innerHTML.includes('dead') && P.els.get('#updated').innerHTML.includes('?token=') && !P.els.get('#updated').innerHTML.includes('연결 끊김') && !P.els.get('#updated').innerHTML.includes('ERR-401')
+      && diagEl(P).innerHTML === '' && !nodata(P) && P.run('!!S'), P.els.get('#updated').innerHTML);
+  P.status = null; await P.run('tick()'); await sleep(20);
+  check('later 401, then the token works again (the address was opened in this browser): the header is live again', P.els.get('#updated').innerHTML.includes('실시간') && !P.els.get('#updated').innerHTML.includes('토큰'), P.els.get('#updated').innerHTML);
 
   // 6) /game: same card, same 5 s recheck
   let G = makePage('game.html', { search: '', sessions: EMPTY() });
@@ -631,6 +642,12 @@ const AGENT_ITEMS = [
   G = makePage('game.html', { search: '', sessions: J('_sessions') });
   G.down = true; await G.load();
   check('/game connection failure: its own card', diagHtml_(G).includes('서버에 연결할 수 없습니다') && !diagHtml_(G).includes('폴더 없음'), diagHtml_(G).slice(0, 160));
+  G = makePage('game.html'); await G.load();
+  G.status = { 'api/state': 401 }; await G.run('tick()'); await sleep(20);
+  check('/game later 401 (server restarted, new token): the red line gives the token sentence, not "서버 응답 없음 … (401 …)"', G.els.get('#err').style.display === 'block' && G.els.get('#err').textContent.includes('접속 토큰') && G.els.get('#err').textContent.includes('?token=')
+    && !G.els.get('#err').textContent.includes('서버 응답 없음') && !G.els.get('#err').textContent.includes('401 api/state') && !diagHtml_(G).length, G.els.get('#err').textContent);
+  G.status = null; await G.run('tick()'); await sleep(20);
+  check('/game later 401, then the token works again: the red line goes away', G.els.get('#err').style.display === 'none', G.els.get('#err').style.display);
 
   // 7) solo sessions (Claude conversations without sub-agents) are grouped apart
   const SESS0 = J('_sessions'), mkSolo = (id, proj, title, age) => ({ id, project: '-x-' + proj, proj, mtime: STATE.now - age, agents: 0, agents_mtime: 0, provider: 'claude', active: 0, solo: true, title, last: STATE.now - age, rep: false });
@@ -661,26 +678,39 @@ const AGENT_ITEMS = [
   check('orchestration session: no "일반 대화" wording anywhere on the orchestrator card', !Q.els.get('#orchCard').innerHTML.includes('일반 대화') && Q.els.get('#orchCard').innerHTML.includes('서브에이전트'), Q.els.get('#orchCard').innerHTML.slice(0, 200));
   check('solo session opens: no "목록 밖 세션" option (it is in the list now)', !selHtml_(P).includes('목록 밖 세션'), selHtml_(P).slice(0, 120));
 
-  // 8) plan bar with the usage API off (usage_api === false): gray cache label, never the yellow error
+  // 8) plan bar: the status line and the .claude.json cache are the only sources; gray label, no error line
   const bar = c => { P.run('renderPlanBar(' + JSON.stringify({ now: STATE.now, claude: c, codex: null }) + ')'); return P.els.get('#planBar').innerHTML; };
   const W = (pct, d) => ({ percent: pct, resets_at: STATE.now + d });
   P = makePage('index.html'); await P.load();
-  const base = { source: 'cache', error: null, plan: 'Max 5x', scoped: [], extra: null, hits: {} };
-  let h = bar(Object.assign({}, base, { usage_api: false, as_of: STATE.now - 3000, five_hour: W(12, 3600), seven_day: W(40, 86400 * 3) }));
-  check('plan bar, usage API off + cache: gray "기록 HH:MM · /usage로 갱신" always (not only when stale)', h.includes('class="faint"') && h.includes('기록 ' + hmStr(STATE.now - 3000) + ' · /usage로 갱신') && h.includes('5시간') && h.includes('12%'), h);
-  h = bar(Object.assign({}, base, { usage_api: false, error: '조회 실패(HTTP 429)', as_of: STATE.now - 3000, five_hour: W(12, 3600), seven_day: W(40, 86400 * 3) }));
-  check('plan bar, usage API off: no yellow error even if the server sent one', !h.includes('class="warn"') && !h.includes('조회 실패'), h);
-  h = bar(Object.assign({}, base, { usage_api: false, plan: '', as_of: null, five_hour: null, seven_day: null }));
-  check('plan bar, usage API off + no cache: one gray line, no dashes or error', h.includes('Claude Code에서 /usage를 열면 보입니다') && !h.includes('<b>—</b>') && !h.includes('class="warn"') && !h.includes('기록 '), h);
-  h = bar(Object.assign({}, base, { usage_api: false, as_of: null, five_hour: null, seven_day: null, hits: { seven_day: { status: 'rejected', resets_at: STATE.now + 5000 } } }));
-  check('plan bar, usage API off + no cache but a recorded limit hit: still shows the hit', h.includes('주간 한도 도달') && !h.includes('/usage를 열면 보입니다'), h);
-  const live = { source: 'api', error: null, plan: 'Max 5x', scoped: [], extra: null, hits: {}, usage_api: true, as_of: STATE.now - 30, five_hour: W(12, 3600), seven_day: W(40, 86400 * 3) };
-  h = bar(live);
-  check('plan bar, usage API on: unchanged ("조회 HH:MM")', h.includes('조회 ' + hmStr(STATE.now - 30)) && !h.includes('/usage로 갱신'), h);
-  h = bar(Object.assign({}, live, { source: 'cache', error: '조회 실패(HTTP 500)' }));
-  check('plan bar, usage API on: the error is still shown (unchanged)', h.includes('class="warn"') && h.includes('조회 실패(HTTP 500)'), h);
-  h = bar({ source: 'cache', error: null, plan: 'Pro', scoped: [], extra: null, hits: {}, as_of: STATE.now - 3000, five_hour: W(12, 3600), seven_day: W(40, 86400 * 3) });
-  check('plan bar, no usage_api field (older server): same as usage API on', h.includes('기록 ' + hmStr(STATE.now - 3000)) && !h.includes('/usage로 갱신'), h);
+  const base = { source: 'cache', plan: 'Max 5x', scoped: [], extra: null, hits: {} };
+  let h = bar(Object.assign({}, base, { as_of: STATE.now - 3000, five_hour: W(12, 3600), seven_day: W(40, 86400 * 3) }));
+  check('plan bar, cache: gray "기록 HH:MM · /usage로 갱신" always (not only when stale)', h.includes('class="faint"') && h.includes('기록 ' + hmStr(STATE.now - 3000) + ' · /usage로 갱신') && h.includes('5시간') && h.includes('12%') && !h.includes('class="warn"'), h);
+  h = bar(Object.assign({}, base, { error: '조회 실패(HTTP 429)', as_of: STATE.now - 3000, five_hour: W(12, 3600), seven_day: W(40, 86400 * 3) }));
+  check('plan bar: an `error` field from an older server is never drawn (no yellow line)', !h.includes('class="warn"') && !h.includes('조회 실패'), h);
+  h = bar(Object.assign({}, base, { plan: '', as_of: null, five_hour: null, seven_day: null }));
+  check('plan bar, no cache: one gray line, no dashes or error', h.includes('Claude Code에서 /usage를 열면 보입니다') && !h.includes('<b>—</b>') && !h.includes('class="warn"') && !h.includes('기록 '), h);
+  h = bar(Object.assign({}, base, { as_of: null, five_hour: null, seven_day: null, hits: { seven_day: { status: 'rejected', resets_at: STATE.now + 5000 } } }));
+  check('plan bar, no cache but a recorded limit hit: still shows the hit', h.includes('주간 한도 도달') && !h.includes('/usage를 열면 보입니다'), h);
+  const sl = { source: 'statusline', plan: 'Max 5x', scoped: [], extra: null, hits: {}, as_of: STATE.now - 20, five_hour: W(42.3, 3600), seven_day: W(18, 86400 * 3) };
+  h = bar(sl);
+  check('plan bar, status line source: gray "상태 줄 · HH:MM" with its tooltip, not "기록" / "조회" / the /usage hint / an error', h.includes('class="faint"') && h.includes('상태 줄 · ' + hmStr(STATE.now - 20)) && h.includes('statusline.py') && h.includes('42%') && h.includes('18%')
+    && !h.includes('기록 ') && !h.includes('조회 ') && !h.includes('/usage') && !h.includes('class="warn"'), h);
+  h = bar(Object.assign({}, sl, { five_hour: { percent: null, resets_at: STATE.now - 5 } }));
+  check('plan bar, status line source: a window that has reset shows a dash (no percent) and the status line tooltip', h.includes('5시간 <b>—</b>') && h.includes('상태 줄 마지막 값(' + hmStr(STATE.now - 20) + ')') && !h.includes('/usage로 갱신') && h.includes('18%'), h);
+  h = bar(Object.assign({}, sl, { five_hour: W(95, 3600) }));
+  check('plan bar, status line source at 95%: the same label, and the red 95%', h.includes('상태 줄 · ') && !h.includes('조회 ') && h.includes('class="bad"') && h.includes('95%'), h);
+  // the status line carries only the 5 hour and weekly windows; the model weeks and extra usage still come from the .claude.json cache, which can be days older: they never sit under the status line label
+  const mixed = Object.assign({}, sl, { scoped: [{ name: 'Sonnet', percent: 33, resets_at: STATE.now + 86400 }], extra: { enabled: true, used: 1234, limit: 5000 } });
+  h = bar(mixed);
+  check('plan bar, status line source, cache cells without a cache time (an older server): the Sonnet week and extra usage are hidden, not drawn under "상태 줄 · HH:MM"', !h.includes('Sonnet') && !h.includes('추가 사용') && h.includes('상태 줄 · ') && h.includes('42%'), h);
+  h = bar(Object.assign({}, mixed, { cache_as_of: STATE.now - 90000 }));
+  const iSl = h.indexOf('상태 줄 · '), iSon = h.indexOf('Sonnet'), iRec = h.indexOf('기록 '), rec = (h.slice(iRec).match(/기록 [^<]*/) || [''])[0];
+  check('plan bar, status line source, cache cells with their own time: the status line label closes the 5 hour and week values, the cache cells follow with "기록 <date> HH:MM" of their own (a day old: the date shows)',
+    iSl > 0 && iSon > iSl && iRec > iSon && h.includes('추가 사용') && h.indexOf('추가 사용') < iRec && h.indexOf('기록 ', iRec + 1) < 0 && rec.includes(hmStr(STATE.now - 90000)) && /\d+\/\d+/.test(rec) && !h.includes('/usage로 갱신') && !h.includes('class="warn"'), [h, rec]);
+  h = bar(Object.assign({}, sl, { cache_as_of: STATE.now - 90000 }));
+  check('plan bar, status line source with a cache time but no cache cells: no stray "기록" label', !h.includes('기록 ') && h.includes('상태 줄 · '), h);
+  h = bar(Object.assign({}, base, { as_of: STATE.now - 3000, five_hour: W(12, 3600), seven_day: W(40, 86400 * 3), scoped: [{ name: 'Sonnet', percent: 33, resets_at: STATE.now + 86400 }] }));
+  check('plan bar, cache source: the Sonnet week stays, under the one cache label (as before)', h.includes('Sonnet') && (h.match(/기록 /g) || []).length === 1 && h.includes('/usage로 갱신'), h);
 
   // ~/.claude.json missing -> the server sends claude: null. Only people who have Claude sessions get the one-line hint
   const withSrc = n => Object.assign({}, J('_sessions'), { sources: SRC({ claude: { exists: true, sessions: n }, codex: { exists: true } }) });

@@ -73,13 +73,13 @@ class Allowed(unittest.TestCase):
                'agents': [{'tokens': {'models': {'m 조언': 2}, 'model_costs': [{'model': 'm', 'advisor': True, 'cost': 2}]}}]}
         self.assert_accepted(old, new, rule='tokens model_costs')
 
-    def test_plans_error_info_only_at_claude_of_api_plans(self):
-        old, new = {'claude': {'error': None}, 'codex': None}, {'claude': {'error': None, 'error_info': None}, 'codex': None}
-        self.assert_accepted(old, new, 'api/plans', rule='plans claude.error_info')
-        out, used = strip({'claude': {'error': None}}, {'claude': {'error': None, 'error_info': None}}, 'api/state')       # the same shape in another answer
+    def test_a_field_the_plans_answer_lost_stays_a_difference(self):
+        old, new = {'claude': {'plan': 'Max', 'usage_api': False, 'error': None, 'error_info': None}, 'codex': None}, {'claude': {'plan': 'Max'}, 'codex': None}
+        out, used = strip(old, new, 'api/plans')
+        self.assertNotEqual(api_snap.norm(out), api_snap.norm(old))
+        self.assertFalse(used)
+        out, used = strip({'claude': {'plan': 'Max'}}, {'claude': {'plan': 'Max', 'error_info': None}}, 'api/plans')           # and no rule invents the old field again
         self.assertIn('error_info', out['claude'])
-        out, used = strip({'x': {'error': None}}, {'x': {'error': None, 'error_info': None}}, 'api/plans')                  # another place of api/plans
-        self.assertIn('error_info', out['x'])
 
     def test_error_code_only_at_the_top_of_an_error_body(self):
         self.assert_accepted({'error': 'no event'}, {'error': 'no event', 'error_code': 'no_event'}, 'api/event', rule='JSON error error_code')
@@ -126,6 +126,22 @@ class StatusFields(unittest.TestCase):
         self.assertTrue(strip({'alerts': [alert()]}, {'alerts': [alert(**extra)]})[1])
         out, _ = strip({'alerts': [alert()]}, {'alerts': [alert(**extra)]})
         self.assertEqual(api_snap.norm(out), api_snap.norm({'alerts': [alert()]}))
+
+    def test_the_room_and_guide_of_a_work_room_topic(self):
+        topic = {'dir': '/r/m', 'key': 'm', 'title': 'Sync', 'kind': 'rounds', 'final': {'exists': False}, 'rounds': [], 'rows': [], 'docs': [], 'brief': True}
+        old = {'debates': [{'root': '/r/m', 'topics': [topic, dict(topic, key='n')]}]}
+        new = {'debates': [{'root': '/r/m', 'topics': [dict(topic, room='cells', guide='agenda.md'), dict(topic, key='n')]}]}      # only a room carries the two fields
+        out, used = strip(old, new)
+        self.assertEqual(api_snap.norm(out), api_snap.norm(old))
+        self.assertEqual(set(used), {'room topic room / guide'})
+        self.assertEqual(used['room topic room / guide'], 2)
+        out, used = strip({'x': {'dir': 'd'}}, {'x': {'dir': 'd', 'room': 'cells'}})                                              # not a topic of debates[]: a difference
+        self.assertIn('room', out['x'])
+        out, used = strip({'topics': [{'key': 'k'}]}, {'topics': [{'key': 'k', 'guide': 'g'}]})                                    # a list called topics whose elements are no topics
+        self.assertIn('guide', out['topics'][0])
+        changed = dict(topic, room='members', guide='agenda.md', title='Another title')                                           # a changed old field is still a difference
+        out, _ = strip({'debates': [{'topics': [topic]}]}, {'debates': [{'topics': [changed]}]})
+        self.assertNotEqual(api_snap.norm(out), api_snap.norm({'debates': [{'topics': [topic]}]}))
 
     def test_the_same_names_in_other_places_are_differences(self):
         for old, new in (({'x': {'tokens': {}, 'status': 'a'}}, {'x': {'tokens': {}, 'status': 'a', 'reason': None}}),                      # not an element of agents[]
@@ -232,8 +248,9 @@ class Compare(unittest.TestCase):
 class Script(unittest.TestCase):
     def test_the_table_names_every_field_that_the_api_adds(self):
         keys = {k for _, _, ks in api_snap.API_SNAP_ALLOW for k in ks}
-        self.assertEqual(keys, {'title_i18n', 'title_is_default', 'questions', 'status', 'text_i18n', 'title_params', 'model_costs', 'error_info', 'error_code',      # the language work (+ the limit alert's params)
-                                'reason', 'resets_at', 'node', 'by', 'parent', 'runs', 'work_units', 'rule_class', 'incomplete', 'assumed', 'tree', 'auto', 'diag'})         # the status and link work
+        self.assertEqual(keys, {'title_i18n', 'title_is_default', 'questions', 'status', 'text_i18n', 'title_params', 'model_costs', 'error_code',      # the language work (+ the limit alert's params)
+                                'reason', 'resets_at', 'node', 'by', 'parent', 'runs', 'work_units', 'rule_class', 'incomplete', 'assumed', 'tree', 'auto', 'diag',         # the status and link work
+                                'room', 'guide', 'copies'})                                                                                                               # the work rooms, the folded copies of a debate
 
     def test_raw_mode_accepts_nothing_and_the_default_mode_accepts_the_table(self):
         answers = {'A': (200, {'feed': [event()]}), 'B': (200, {'feed': [event(**NEW_EVENT)]})}      # every path answers like this (api/sessions, api/plans)

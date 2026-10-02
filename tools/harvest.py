@@ -65,9 +65,9 @@ KEYWORDS = ('harvest', 'in', 'id', 'count', 'new_axis_value_needed', 'case', 'ca
             'bundle', 'shapes', 'no', 'found', 'not', 'dropped', 'resume', 'calls', 'total', 'counts', 'only', 'exit', 'code', 'members', 'pids', 'n')
 ORACLE_WORDS = ('orch', 'orch2', 'orch_new', 'mid', 'child', 'child2', 'sub', 'launcher', 'mention', 'paste', 'listing', 'alert', 'event',
                 'turn', 'fail', 'stall', 'hb', 'ask', 'say', 'notify_stray', 'orch_say_limit', 'B', 'B_gate', 'b', 'opus1', 'sol', 'sol-final3',
-                'docs', 'rev', 'rev2', 't1', 't2', 'edit1', 'records', 'unit', 'units', 'edit_rows', 'edit_rounds', 'placements', 'seat', 'round', 'ambiguous')
+                'docs', 'rev', 'rev2', 't1', 't2', 'edit1', 'records', 'unit', 'units', 'edit_rows', 'edit_rounds', 'placements', 'seat', 'round', 'ambiguous', 'titles', 'guide_opens', 'finals', '..')
 OTHER_WORDS = ('target', 'spawner', 'node', 'tree')
-COUNTS = ('nodes', 'main', 'sub', 'child', 'nopersist_launches', 'skipped_ended_main', 'skipped_deb_roles', 'linked_by_time', 'linked_by_content', 'linked_by_out', 'hidden_scripts')
+COUNTS = ('nodes', 'main', 'sub', 'child', 'nopersist_launches', 'skipped_deb_roles', 'linked_by_time', 'linked_by_content', 'linked_by_out', 'hidden_scripts')
 DETAILS = ('no_invocation', 'variable_prompt', 'no_prompt_file', 'output', 'report_path', 'seat_name', 'decoy_switch', 'decoy_sidmention', 'link_by_time',
            'multi_proc', 'deleted', 'at_restart', 'codex_targets')
 
@@ -79,6 +79,17 @@ def vocabulary():
     for name, values in A.AXES.items():
         words.add(name)
         words.update(values)
+    # the seats, files and participants of a room, and the synthetic guide titles of the generator's rooms (text the generator wrote, never a real one)
+    words.update(A.SEAT_LETTERS)
+    words.update(A.ROOM_GUIDES.values())
+    words.update(A.ROOM_BUNDLE.split('/'))              # the bundle's folder, the link to it and the documents beside the room's folder (`above`)
+    words.add(A.ROOM_ALIAS)
+    words.update(A.ABOVE_DOC.values())
+    words.update('notes_' + letter for letter in A.SEAT_LETTERS)
+    words.update('p%d' % (i + 1) for i in range(len(A.SEAT_LETTERS)))
+    for titles in A.ROOM_TITLE.values():
+        for title in titles.values():
+            words.update(m.group(0) for m in TOKEN_RE.finditer(title))
     for group in (F.STATUSES, F.REASONS, F.CELLS, F.ROLES, F.ORCH_STATES, F.RULE_CLASSES, F.RULES, F.TRUTH_FIELDS, F.DIAG_CODES):
         words.update(group)
     return frozenset(words)
@@ -294,6 +305,8 @@ class Node:
         self.cost_field_gone = False       # a `cost-state` line without one of the fields every line of the known range has
         self.torn = 0                      # lines that are not JSON but are followed by a line that is
         self.results = {}                  # tool_use id -> (ts, text, is_error)
+        self.tail = None                   # what the last conversation line was: mid (a tool call or its result), end (an assistant line that ends the turn), prompt (a user line nobody has answered), commands (a local slash command)
+        self.turn_lines = 0                # conversation lines that are not local slash commands
         self.nlines = 0
         self.children = []                 # child nodes launched from here (filled by the linker)
         self.parent = None                 # (node, call) once linked
@@ -407,9 +420,18 @@ def _feed(n, d, calls):
                 _notification(n, att['prompt'], parse_ts(att.get('timestamp')) or ts, calls)
 
 
+COMMAND_LINE_RE = re.compile(r'<(?:local-command-caveat|command-name|local-command-stdout)>')
+
+
 def _user(n, d, ts, calls):
     msg = d.get('message') or {}
     content = msg.get('content')
+    if isinstance(content, str) and COMMAND_LINE_RE.match(content):
+        n.tail = 'commands'                 # a local slash command and what it printed: no turn starts
+        return
+    if not (d.get('isMeta') or d.get('isCompactSummary') or d.get('isVisibleInTranscriptOnly')):       # a meta line or a summary starts no turn
+        n.tail = 'mid' if isinstance(content, list) and any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in content) else 'prompt'
+        n.turn_lines += 1
     if isinstance(content, list):
         for b in content:
             if isinstance(b, dict) and b.get('type') == 'tool_result':
@@ -465,6 +487,8 @@ def _assistant(n, d, ts, calls):
         q = d.get('quotaLimits') if isinstance(d.get('quotaLimits'), dict) else {}
         n.errors.append((ts, d.get('apiErrorStatus'), d.get('error'), q.get('resetsAt'), q.get('rateLimitType')))
         return
+    n.tail = 'end' if msg.get('stop_reason') in ('end_turn', 'stop_sequence') else 'mid'
+    n.turn_lines += 1
     if msg.get('stop_reason') in ('end_turn', 'stop_sequence'):
         n.ends.append((ts, msg['stop_reason']))
     for b in msg.get('content') or []:
@@ -576,7 +600,7 @@ def read_tree(claude_home, sid):
         up = find_launcher(tree, first)
         if up is not None:
             root = up
-    root.kind = 'child' if root.entry == 'sdk-cli' else 'main'
+    root.kind = 'child' if (root.entry == 'sdk-cli' and root is not first) else 'main'      # a `claude -p` session no record launched is the main session of its own page
     tree.root = root
     tree.nodes = [root] + read_subagents(root, claude_home)
     link_children(tree)
@@ -1763,8 +1787,8 @@ def life_of(ctx, n):
             auto = any(t and t >= last_err - 5 and 'automatically' in x for t, x in n.notices)
             life = 'limit_auto' if auto else ('limit_repeat' if len(errs) >= 3 else 'limit_exit')
             resumed = any(src == 'system' and ts and ts > last_err for ts, src, _ in n.prompts) or any(c.ts > last_err + 1 for c in n.calls)
-        elif fresh:
-            life = 'running'
+        else:
+            life = 'running'                 # not stopped by a limit; whether it works is the shape of its end (main_shape)
     elif errs and last_err >= last_end:
         status, ktype, reset, ltype = errs[-1][1], errs[-1][2], errs[-1][3], errs[-1][4]
         if status == 429 or ktype == 'rate_limit':
@@ -1893,17 +1917,31 @@ def sta_case(ctx, res, n):
         return
     life, at, notes = life_of(ctx, n)
     if life is None:
-        if n.kind == 'main' and n.mtime and ctx.now - n.mtime >= STALE_SECS and not n.errors:
-            res.counts['skipped_ended_main'] += 1
-            return
         res.need('life_shape')
         return
     kind = {'main': 'main', 'child': 'cli', 'sub': 'sub'}[n.kind]
     if kind == 'sub' and n.meta.get('parentAgentId'):
         kind = 'grandsub'
+    if kind == 'main' and life == 'running':
+        shape = main_shape(ctx, n)
+        res.add(A.Case('sta', dict(skind=kind, life=life, flaw='none', at=at, os='linux', **shape)))      # the end of a session says nothing of the flaws of its lines
+        res.unobserved.update(('os', 'process'))
+        return
     for flaw in flaws_of(n):
         res.add(A.Case('sta', {'skind': kind, 'life': life, 'flaw': flaw, 'at': at, 'os': 'linux'}))
     res.unobserved.add('os')
+
+
+def main_shape(ctx, n):
+    """The axes of the end of an orchestrator's record that was not stopped by a limit: whether it is a typed session or the record of a `claude -p` run, what its last
+    lines are, and whether its process can still be there. A record cannot show a process: a file that has grown within the last minute is taken as running."""
+    tail = n.tail or 'mid'
+    if tail == 'commands' and not n.turn_lines:
+        tail = 'commands_only'
+    entry = 'sdk' if n.entry == 'sdk-cli' else 'cli'
+    if entry == 'sdk' and tail in ('commands', 'commands_only'):
+        tail = 'end'
+    return {'entry': entry, 'tail': tail, 'process': 'there' if (n.mtime or 0) > ctx.now - STALE_SECS else 'gone'}
 
 
 # ---------------------------------------------------------------------------------------------------------------------

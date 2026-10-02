@@ -275,7 +275,7 @@ class AlertsFromEnglish(sv.SessionCase):
     def session(self, text):
         s = self.claude()
         s._feed_main(sv.say(text))
-        s.orch['turn_end_ts'] = s.orch['last_ts'] = T
+        s.orch['last_ts'] = T
         return s
 
     def kinds(self, s, statuses=None):
@@ -310,7 +310,7 @@ class AlertsFromEnglish(sv.SessionCase):
         a = server.Agent('a%016x' % 1, {'description': 'T1-A research'})
         a.tag, a.last_ts = 'T1-A', T
         s.agents[a.id] = a
-        s.orch['turn_end_ts'] = s.orch['last_ts'] = T
+        s.orch['last_ts'] = T
         s.feed.append({'ts': T, 'kind': 'handback', 'from': a.id, 'to': 'orch', 'title': '최종 보고', 'text': text, 'agent': a.id})
         return s, a
 

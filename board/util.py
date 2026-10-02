@@ -1,7 +1,6 @@
 """Path constants, text and time helpers, the follower for record files (Tail), and shared thresholds. The bottom module that every other board module relies on."""
 
 import fnmatch
-import glob
 import json
 import os
 import re
@@ -9,7 +8,7 @@ import stat
 import time
 from datetime import datetime
 
-from . import PATH_FLAGS, i18n, procs
+from . import PATH_FLAGS, i18n
 
 HOME = os.path.expanduser('~')
 
@@ -226,6 +225,13 @@ def stat_plain(path):
     return stat_regular(path, strict=True)
 
 
+def write_made(w):
+    """Whether a `writes` entry says the file was made. An entry from a tool call (it has an `id`) counts when the result said it worked: a call that failed or has no
+    result yet (in progress, or a record that stops before the result) says nothing, and the file being there proves nothing about who wrote it. An entry kept at
+    completion (a Codex file change, the -o report confirmed by its hash) has no call to wait for and counts as made."""
+    return w.get('ok') is True or (w.get('ok') is None and 'id' not in w)
+
+
 class Denied(OSError):
     """Refused, so it was not opened. why: 'denied' (auth files, settings, the Codex folder) | 'hidden' (dot path, secret name)."""
 
@@ -241,12 +247,19 @@ def via_link(path, real):
     return os.path.islink(ap) or os.path.basename(real) != os.path.basename(ap)
 
 
-def open_safe(path, binary=False, strict=True):
+def open_safe(path, binary=False, strict=True, approved=False):
     """Common entrance of the way that opens content. Right before opening it redoes realpath and the deny check without a cache (denied_file; dot paths and secret names, hidden_or_secret),
     and opens only a regular file, without following links on any component (open_nofollow). Denied if refused; OSError if it is not a regular file or cannot be opened.
     strict=False (a fixed-name brief such as brief.md) relaxes the dot-path and secret-name rules only for a regular file in place. If the file is reached through a link
-    (via_link), its target is refused for dot paths and secret names just as with strict: so a link cannot pull in the content of a hidden or secret file."""
-    real = os.path.realpath(path)
+    (via_link), its target is refused for dot paths and secret names just as with strict: so a link cannot pull in the content of a hidden or secret file.
+    approved=True: `path` is a realpath that the caller has just approved (views.allowed_file). It is not resolved again, so what is opened is what was approved: a link put in its place
+    after the approval (on any component) makes the open fail instead of leading to another file. A path that is not absolute and normalized is refused."""
+    if approved:
+        if not os.path.isabs(path) or os.path.normpath(path) != path or path.startswith(os.sep * 2):
+            raise OSError('not a resolved path')
+        real = path
+    else:
+        real = os.path.realpath(path)
     if denied_file(real):
         raise Denied('denied')
     if (strict or via_link(path, real)) and hidden_or_secret(real):
@@ -276,6 +289,19 @@ def open_nofollow(real, binary=False):
         return os.fdopen(ffd, 'rb') if binary else os.fdopen(ffd, 'r', encoding='utf-8', errors='replace')
     except BaseException:
         os.close(ffd)
+        raise
+
+
+def open_regular(path):
+    """Opens a file for reading, in binary, without waiting: only a regular file is opened (a link that leads to one counts). A FIFO, a device or a folder is refused
+    with OSError, not blocked on. For files that are found by their names (the Claude session records), where the name proves nothing about the kind."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NONBLOCK', 0))
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError('not a regular file')
+        return os.fdopen(fd, 'rb')
+    except BaseException:
+        os.close(fd)
         raise
 
 
@@ -385,24 +411,6 @@ def parse_record(raw):
 def load_json_line(raw):
     """The record of one line, or None. A torn line gives the complete record behind the torn half (parse_record says it was torn)."""
     return parse_record(raw)[0]
-
-
-def claude_session_files():
-    """The contents (dicts) of ~/.claude/sessions/<pid>.json. Ones that cannot be read or have another shape are skipped."""
-    for f in glob.glob(os.path.join(CLAUDE_HOME, 'sessions', '*.json')):
-        try:
-            with open(f) as fh:
-                d = json.load(fh)
-        except (OSError, ValueError):
-            continue
-        if isinstance(d, dict):
-            yield d
-
-
-def claude_alive_ids():
-    """Ids of the Claude sessions that cannot be called finished: the process is alive, or there is no way to know about the process (board/procs.py).
-    Only a nonexistent process or another command's pid is left out."""
-    return {d.get('sessionId') for d in claude_session_files() if procs.cmdline_has(d.get('pid'), b'claude') is not False}
 
 
 BOOT = time.time()     # when the server started: if it changes, the page recounts event numbers from scratch (so past events are not replayed after a restart)

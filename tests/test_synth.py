@@ -21,6 +21,8 @@ from unittest import mock
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from compat import isolated_env  # noqa: E402  (first of the board imports: it pins HOME and the cache to a throwaway folder)
 import synth_home  # noqa: E402
 
 SERVER = os.path.join(ROOT, 'server.py')
@@ -28,7 +30,7 @@ FAKE_TOKEN = 'FAKE-TOKEN-must-never-be-read'
 AGENT_KINDS = {'spawn', 'orch_msg', 'handback', 'peer', 'agent_msg', 'xread'}
 USER_KINDS = {'user_say', 'orch_say', 'orch_ask', 'user_answer'}
 
-# A watch that runs inside the server process: it writes to a file any open of the credential files or usage.json, any urlopen, and any connection or name lookup to a non-loopback host.
+# A watch that runs inside the server process: it writes to a file any open of the credential files or the old usage.json, any urlopen, and any connection or name lookup to a non-loopback host.
 # With the watch on, it does the same as `python3 server.py <args>` (runs __main__ with runpy).
 GUARD = r'''
 import builtins, os, runpy, socket, sys, urllib.request
@@ -73,12 +75,34 @@ runpy.run_path(sys.argv[0], run_name='__main__')
 '''
 
 
+def start_live(info):
+    """synth_home.start_live, with the Popen objects of the fake processes kept next to their pids: (pids, procs). Pass procs to reap() once stop_live has ended the
+    processes: a Popen object that is dropped while its child has not been waited for warns that the subprocess is still running."""
+    procs, real = [], subprocess.Popen
+
+    class Recorded(real):
+        def __init__(self, *args, **kw):
+            real.__init__(self, *args, **kw)
+            procs.append(self)
+    with mock.patch.object(synth_home.subprocess, 'Popen', Recorded):
+        return synth_home.start_live(info), procs
+
+
+def reap(procs):
+    """Waits for the fake processes (stop_live has signalled them); one that is still there is killed."""
+    for p in procs:
+        try:
+            p.wait(10)
+        except subprocess.TimeoutExpired:
+            p.kill()
+            p.wait()
+
+
 class Board:
     """server.py started on a synthetic HOME. With guard=(log path, files that must not be opened) it runs under GUARD. On close it stops only this process."""
 
     def __init__(self, home, orch, guard=None, args=()):
-        env = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CACHE_HOME', 'AGENT_BULLPEN_LOG')}
-        env.update(HOME=home, PYTHONDONTWRITEBYTECODE='1', AGENT_BULLPEN_LANG='ko')      # the ready line below and the start output the tests read are Korean, whatever LANG the runner has
+        env = isolated_env(home, AGENT_BULLPEN_LANG='ko')      # the ready line below and the start output the tests read are Korean, whatever LANG the runner has
         cmd = [sys.executable, SERVER] if not guard else [sys.executable, '-c', GUARD, ROOT, guard[0], os.pathsep.join(guard[1])]
         self.out = tempfile.TemporaryFile('w+')
         self.p = subprocess.Popen(cmd + ['--port', '0'] + list(args), stdout=self.out, stderr=subprocess.STDOUT, env=env, cwd=ROOT, stdin=subprocess.DEVNULL)
@@ -151,7 +175,7 @@ def tree_digest(root):
 
 
 class SynthBoard(unittest.TestCase):
-    """One server on a synthetic HOME in default mode (usage lookup off) is shared by all tests. Decoys shaped like credential files are planted."""
+    """One server on a synthetic HOME in default mode is shared by all tests. Decoys shaped like credential files are planted."""
 
     @classmethod
     def setUpClass(cls):
@@ -250,7 +274,7 @@ class SynthBoard(unittest.TestCase):
         self.assertEqual({t: a['provider'] for t, a in ag.items()}, {'C': 'codex', 'T1-A': 'claude', 'T1-B': 'claude', 'T2-A': 'claude', 'T2-B': 'claude'})
         self.assertEqual((ag['T1-A']['model'], ag['T1-B']['model']), ('claude-opus-5-5', 'claude-sonnet-5-5'))
         self.assertTrue(all(a['tokens']['cost'] > 0 for a in ag.values()))
-        self.assertEqual(self.state['orch']['state'], 'working')
+        self.assertEqual(self.state['orch']['state'], 'idle')                                               # its last turn is open, but no process holds the session: nothing is working
         self.assertEqual(self.state['alerts'], [])
 
     def test_codex_exec_is_linked_to_the_orchestrator(self):
@@ -319,7 +343,8 @@ class SynthBoard(unittest.TestCase):
         code, p = self.board.get('/api/plans', session=False)
         self.assertEqual(code, 200)
         c = p['claude']
-        self.assertEqual((c['plan'], c['source'], c['usage_api'], c['error'], c['hits']), ('Max 5x', 'cache', False, None, {}))
+        self.assertEqual((c['plan'], c['source'], c['hits']), ('Max 5x', 'cache', {}))
+        self.assertEqual(set(c) & {'usage_api', 'error', 'error_info'}, set())
         self.assertEqual((c['five_hour']['percent'], c['seven_day']['percent']), (34.0, 52.0))
         self.assertEqual([(x['name'], x['percent']) for x in c['scoped']], [('Sonnet', 18.0)])
         self.assertLess(abs(c['as_of'] - (self.info['now'] - 240)), 1)
@@ -335,7 +360,8 @@ class SynthBoard(unittest.TestCase):
             self.assertEqual(self.board.get(path)[0], 200, path)
         for p in self.decoys:                                                  # a file shaped like a credential file is not opened through /api/file either
             self.assertEqual(self.board.get('/api/file?path=' + urllib.parse.quote(p))[0], 403, p)
-        self.assertIn('사용량 조회 꺼짐', self.board.text())
+        self.assertNotIn('사용량 조회', self.board.text())
+        self.assertIn('프로세스 판정', self.board.text())
         log = read(self.log) if os.path.exists(self.log) else ''
         self.assertEqual(log, '', '감시에 걸린 것: ' + log)
         for p, text in self.decoys.items():                                    # the decoys are as they were (neither read nor written)
@@ -693,7 +719,7 @@ class BusyBoard(unittest.TestCase):
         self.assertEqual(sorted(re.sub(r'-\d+$', '', a['tag']) for a in workers), ['opus5.5'] + ['sol6.1'] + ['sonnet5.5'] * 7)
         self.assertEqual(sum(a['model'].startswith('claude-opus') for a in workers), 1)
         self.assertEqual(sum(a['provider'] == 'codex' for a in workers), 1)
-        self.assertEqual(self.state['orch']['state'], 'working')
+        self.assertEqual(self.state['orch']['state'], 'idle')                                               # its last turn is open, but no process holds the session: nothing is working
 
     def test_topics_and_finals(self):
         t = self.topics()
@@ -871,7 +897,7 @@ class LinkScene(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.info = synth_home.build(os.path.join(cls.tmp.name, 'home'), busy=True, links=True)
-        cls.pids = synth_home.start_live(cls.info)
+        cls.pids, cls.procs = start_live(cls.info)
         cls.board = Board(cls.info['home'], cls.info['orch'])
         cls.state = cls.board.get('/api/state')[1]
 
@@ -879,6 +905,7 @@ class LinkScene(unittest.TestCase):
     def tearDownClass(cls):
         cls.board.close()
         synth_home.stop_live(cls.info['home'], True)
+        reap(cls.procs)
         cls.tmp.cleanup()
 
     def test_children_are_linked_by_a_guess_and_everything_else_stays_certain(self):

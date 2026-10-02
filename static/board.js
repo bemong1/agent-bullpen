@@ -79,7 +79,10 @@ const agentById = id => S && S.agents.find(a => a.id === id);
 const toolText = x => x.text_i18n && I18N.has(x.text_i18n.key) ? t(x.text_i18n.key, i18nParams(x.text_i18n.params)) : x.text;
 const isLive = a => a.status === 'running' || a.status === 'stalled';              // Working (suspected stalls included). The test for running only and the "within 45 s" test are used separately
 const isHeld = a => a.status === 'interrupted' || a.status === 'unknown';          // Not working and not over: stopped by a limit or an error, or not known. They stay in the main list, not under "finished"
-const inDebate = (a, d) => a.units.some(u => u === d.root || u.startsWith(d.root + '/'));   // Agents that worked in this debate's folder
+const inDebate = (a, d) => a.units.some(u => u === d.root || u.startsWith(d.root + '/')) ||   // Agents that worked in this debate's folder
+  d.topics.some(tp => tp.room === 'members' && tp.rows.some(r => r.agents.includes(a.id)));         // and those of a room of participants only (they hold no seat)
+// A folder of people who work together (a room) is "work", not a debate: the words that name the unit follow it
+const isRoom = d => !!d && d.topics.length > 0 && d.topics.every(tp => tp.room);
 // Tab row: items = [[key, text], …], cur = the key that is on, onPick(key)
 function tabBar(el, items, cur, onPick) {
   el.innerHTML = items.map(([k, n]) => `<button class="tab ${cur === k ? 'on' : ''}" data-k="${k}">${n}</button>`).join('');
@@ -200,11 +203,28 @@ function currentDebate() {
 }
 function topicKey(tp) { const m = (tp.title || '').match(/^(T\d+)\s+(.*)$/); return m ? [m[1], m[2]] : ['', tp.title]; }
 const OPEN_CELLS = ['writing', 'draft', 'paused', 'unknown'];        // a cell of these states is a round that is not over: the agent is writing, has left a draft, was interrupted, or is not known
+// A topic with no round folders is a room (of cells, or of participants only) or a flat review (its cells carry no round): one result per seat, so it has one result column and no "next round" to wait for.
+// (game.js keeps its own copy of these two: the office does not load this file.)
+const noRounds = tp => !!tp.room || tp.kind === 'flat';
+const roundKeys = tp => tp.room === 'members' ? [] : tp.kind === 'flat' ? [null] : tp.room ? [1] : Array.from({ length: Math.max(2, ...tp.rounds) }, (_, i) => i + 1);      // a room has one round, a flat review one cell with no round, a debate at least two rounds
 function topicStage(tp) {
   const cells = tp.rows.flatMap(r => r.cells);
   const assigned = cells.filter(c => c.agent);
   if (tp.final.exists) return { cls: 's-final', text: t('board.stage.final'), step: 'final' };
+  if (tp.room === 'members') {                       // a room of participants only: no cell and no round, so only whether they still talk
+    const live = tp.rows.some(r => r.agents.some(id => isLive(agentById(id))));
+    return { cls: live ? 's-active' : 's-ready', text: t(live ? 'board.stage.room.members' : 'board.stage.room.membersEnded', { count: tp.rows.length }), step: 'brief' };
+  }
   if (!assigned.length && !cells.some(c => c.state === 'done')) return { cls: 's-wait', text: tp.deps ? t('board.stage.waitDeps', { deps: tp.deps }) : t('board.stage.wait'), step: 'brief' };
+  if (noRounds(tp)) {                                // one result per seat: submitted, or still being written, or stopped; complete once every seat is in and nobody works
+    const rc = tp.rows.map(row => row.cells[0]).filter(Boolean);
+    const done = rc.filter(c => c.state === 'done').length, step = roundKeys(tp)[0];
+    if (rc.some(c => OPEN_CELLS.includes(c.state))) return { cls: 's-active', text: t('board.stage.room.active', { done, total: rc.length }), step };
+    if (!done) return { cls: 's-wait', text: t('board.stage.wait'), step: 'brief' };
+    if (done < rc.length) return { cls: 's-ready', text: t('board.stage.room.partial', { done, total: rc.length }), step };
+    if (tp.rows.some(r => r.agents.some(id => isLive(agentById(id))))) return { cls: 's-ready', text: t('board.stage.room.ready', { total: rc.length }), step };
+    return { cls: 's-final', text: t('board.stage.complete'), step, doneThrough: step };
+  }
   const rounds = tp.rounds;
   let active = null;
   for (const r of rounds) {
@@ -225,8 +245,6 @@ function topicStage(tp) {
   }
   return { cls: 's-wait', text: t('board.stage.wait'), step: 'brief' };
 }
-function roundsFor(tp) { const mx = Math.max(2, ...tp.rounds); return Array.from({ length: mx }, (_, i) => i + 1); }
-
 // ---------- drawing ----------
 function renderTop() {
   const sel = $('#sessionSel');
@@ -381,7 +399,7 @@ function renderTokens() {
       <i style="width:${pct(T.cost_read)}%;background:var(--blue)"></i><i style="width:${pct(T.cost_write)}%;background:var(--amber)"></i><i style="width:${pct(T.cost_input)}%;background:var(--purple)"></i><i style="width:${pct(T.cost_output)}%;background:var(--green)"></i></div>
     <div class="tok-foot">
       ${provs.map(foot).join('')}
-      ${d && dAgents.length ? `${t('board.tok.debate', { name: esc(d.name), count: dAgents.length, input: `<b>${kfmt(tokIn(D))}</b>`, output: `<b>${kfmt(D.output)}</b>`, cost: `<b style="color:var(--green)">${usd(D.cost)}</b>` })}<br>` : ''}
+      ${d && dAgents.length ? `${t(isRoom(d) ? 'board.tok.room' : 'board.tok.debate', { name: esc(d.name), count: dAgents.length, input: `<b>${kfmt(tokIn(D))}</b>`, output: `<b>${kfmt(D.output)}</b>`, cost: `<b style="color:var(--green)">${usd(D.cost)}</b>` })}<br>` : ''}
       ${t(mixed ? 'board.tok.breakdownTotal' : 'board.tok.breakdown', { sr: '<span style="color:var(--blue)">■</span>', read: `<b>${usd(T.cost_read)}</b>`, sw: '<span style="color:var(--amber)">■</span>', write: `<b>${usd(T.cost_write)}</b>`,
         si: '<span style="color:var(--purple)">■</span>', input: `<b>${usd(T.cost_input)}</b>`, so: '<span style="color:var(--green)">■</span>', output: `<b>${usd(T.cost_output)}</b>` })}${T.adv_cost ? ' ' + t('board.tok.advIncl', { cost: usd(T.adv_cost) }) : ''}<br>
       <span class="faint">${t('board.tok.note')}${T.unpriced ? ' · ' + (G.calls ? `<span title="${t('board.tok.unpriced.title', { calls: G.calls, input: kfmt(G.input), output: kfmt(G.output) })}">${t('board.tok.unpriced', { count: T.unpriced })}</span>` : t('board.tok.unpriced', { count: T.unpriced })) : ''}</span>
@@ -414,10 +432,10 @@ function renderDebates() {
   // At most 8 tabs. A debate with a Codex participant shows even past that (a session with only Claude is unchanged)
   const cxDebate = x => x.topics.some(tp => tp.rows.some(r => r.agents.some(id => isCx(agentById(id)))));
   tabs.innerHTML = S.debates.filter((x, i) => i < 8 || cxDebate(x)).map(x =>
-    `<button class="tab ${d && x.root === d.root ? 'on' : ''}" data-root="${esc(x.root)}">${esc(x.name)}${x.current ? `<span class="cur">${t('board.debate.current')}</span>` : ''}</button>`).join('');
+    `<button class="tab ${d && x.root === d.root ? 'on' : ''}" data-root="${esc(x.root)}"${x.copies ? ` title="${esc(t('board.debate.copies', { count: x.copies }))}"` : ''}>${esc(x.name)}${x.current ? `<span class="cur">${t('board.debate.current')}</span>` : ''}</button>`).join('');
   tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => { ui.debate = b.dataset.root; store.set('debate', ui.debate); renderAll(); loadTimeline(); });
   if (!d) { $('#topics').innerHTML = `<div class="card empty">${soloNow() ? t('board.debate.solo') : t('board.debate.none')}</div>` + renderOther(null); $('#debateMeta').innerHTML = ''; bindTopics(); return; }
-  $('#debateMeta').innerHTML = `<span title="${esc(d.root)}">${esc(d.title)}</span><span class="faint mono">${esc(d.short)}</span>` +
+  $('#debateMeta').innerHTML = `<span title="${esc(d.root + (d.copies ? ' — ' + t('board.debate.copies', { count: d.copies }) : ''))}">${esc(d.title)}</span><span class="faint mono">${esc(d.short)}</span>` +
     (d.finals.length ? d.finals.map(f => `<span class="chip fchip" data-path="${esc(f.path)}">${t('board.debate.final', { name: esc(f.name), lines: `<span class="faint">${t('unit.line', { count: f.lines })}</span>` })}</span>`).join('') : '');
   $('#debateMeta').querySelectorAll('[data-path]').forEach(e => e.onclick = () => openFile(e.dataset.path));
   $('#topics').innerHTML = d.topics.map(renderTopic).join('') + renderOther(d);
@@ -447,11 +465,12 @@ function renderOther(d) {
   </div>`;
 }
 function renderTopic(tp) {
-  const [k, name] = topicKey(tp), st = topicStage(tp), rounds = roundsFor(tp);
+  const [k, name] = topicKey(tp), st = topicStage(tp), rounds = roundKeys(tp);
   // Step marks: brief → round 1 → round 2 … → final
   const roundDone = r => tp.rows.length && tp.rows.every(row => (row.cells.find(c => c.round === r) || {}).state === 'done');
+  const roundName = r => noRounds(tp) ? t('board.room.col') : t('board.round', { n: r });
   const steps = [{ n: t('board.step.brief'), s: tp.brief ? 'done' : '' }]
-    .concat(rounds.map(r => ({ n: t('board.round', { n: r }), s: roundDone(r) ? 'done' : st.step === r ? 'active' : '' })))
+    .concat(rounds.map(r => ({ n: roundName(r), s: roundDone(r) ? 'done' : st.step === r ? 'active' : '' })))
     .concat([{ n: tp.final.rel ? t('board.step.finalNamed', { name: tp.final.rel.replace(/^final\//, '') }) : t('board.step.final'), s: tp.final.exists ? 'done' : '' }]);
   const stepper = steps.map((s, i) => (i ? `<span class="bar ${s.s === 'done' || (s.s === 'active' && steps[i - 1].s === 'done') ? 'done' : ''}"></span>` : '') +
     `<span class="step ${s.s}"><span class="b">${s.s === 'done' ? '✓' : i === 0 ? '·' : i === steps.length - 1 ? '★' : i}</span>${esc(s.n)}</span>`).join('');
@@ -481,12 +500,12 @@ function renderTopic(tp) {
   const foot = [
     tp.final.rel ? t('board.foot.final', { rel: `<span class="mono">${esc(tp.final.rel)}</span>`, state: tp.final.exists ? `<span class="chip fchip" data-path="${esc(tp.final.path)}">${t('board.foot.open', { count: tp.final.lines })}</span>` : `<span class="faint">${t('board.foot.none')}</span>` }) : '',
     tp.deps ? t('board.foot.after', { deps: esc(tp.deps) }) : '',
-  ].filter(Boolean).join(' · ') + (tp.docs || []).map(f => ` <span class="chip fchip" data-path="${esc(f.path)}">${t(f.name === 'brief.md' ? 'board.foot.brief' : 'board.foot.doc', { name: esc(f.name) })}</span>`).join('');
+  ].filter(Boolean).join(' · ') + (tp.docs || []).map(f => ` <span class="chip fchip" data-path="${esc(f.path)}">${t(f.name === 'brief.md' || f.path === tp.guide ? 'board.foot.brief' : 'board.foot.doc', { name: esc(f.name) })}</span>`).join('');
   return `<div class="card topic ${st.cls === 's-wait' ? 'idle' : st.cls === 's-active' ? 'active' : ''}">
-    <div class="topic-head">${k ? `<span class="tkey">${esc(k)}</span>` : ''}<h3 title="${esc(tp.dir)}">${esc(name)}</h3><span class="stage ${st.cls}">${esc(st.text)}</span></div>
-    <div class="stepper">${stepper}</div>
+    <div class="topic-head">${k ? `<span class="tkey">${esc(k)}</span>` : tp.room ? `<span class="tkey">${t('board.room.key')}</span>` : ''}<h3 title="${esc(tp.dir)}">${esc(name)}</h3><span class="stage ${st.cls}">${esc(st.text)}</span></div>
+    ${tp.room === 'members' ? '' : `<div class="stepper">${stepper}</div>`}
     <table class="mx"><colgroup><col style="width:${w}">${rounds.map(() => '<col>').join('')}</colgroup>
-      <thead><tr><th>${t('board.topic.th.agent')}</th>${rounds.map(r => `<th>${t('board.round', { n: r })}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>
+      <thead><tr><th>${t('board.topic.th.agent')}</th>${rounds.map(r => `<th>${esc(roundName(r))}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>
     ${foot ? `<div class="topic-foot">${foot}</div>` : ''}
   </div>`;
 }
@@ -524,7 +543,7 @@ function trees(list) {
   return out;
 }
 function renderAgents() {
-  tabBar($('#agentFilter'), [['debate', t('board.agents.tab.debate')], ['all', t('board.agents.tab.all')]], ui.agentFilter, k => { ui.agentFilter = k; store.set('agentFilter', k); renderAll(); });
+  tabBar($('#agentFilter'), [['debate', t(isRoom(currentDebate()) ? 'board.agents.tab.room' : 'board.agents.tab.debate')], ['all', t('board.agents.tab.all')]], ui.agentFilter, k => { ui.agentFilter = k; store.set('agentFilter', k); renderAll(); });
   const list = scopeAgents();
   const sorted = [...list].sort((a, b) => (statusRank(a.status) - statusRank(b.status)) || ((b.last_ts || 0) - (a.last_ts || 0)));
   // A tree stays together: it is in the main list when any of it is working or held, so a finished run is never cut off from the launcher it hangs under; the trees are ordered by their best member
@@ -615,7 +634,7 @@ function tlSince() {
 let tlReq = null;                            // Timeline request in flight { key, g }
 async function loadTimeline() {
   if (!S) return;
-  tabBar($('#tlWin'), TL_WINS.map(([k]) => [k, t('board.tl.win.' + k)]), ui.tlWin, k => { ui.tlWin = k; store.set('tlWin', k); loadTimeline(); });
+  tabBar($('#tlWin'), TL_WINS.map(([k]) => [k, t('board.tl.win.' + (k === 'debate' && isRoom(currentDebate()) ? 'room' : k))]), ui.tlWin, k => { ui.tlWin = k; store.set('tlWin', k); loadTimeline(); });
   // The 15 s refresh waits if a request for the same window has not finished (so a response slower than the period is not pushed aside and discarded every time).
   // After a change of window or debate it is a different request, so a new one is sent and the late response of the earlier one is dropped
   const d = currentDebate(), key = ui.tlWin + '|' + (d ? d.root : '');
@@ -1168,6 +1187,8 @@ async function tick() {
     $('#updated').innerHTML = `<span class="dot alive"></span>${t('common.live')} · ${I18N.date(new Date(), 'timeSec')}`;
   } catch (e) {
     if (!S) await diag.fail(e);          // A failure before the first state: "session not found", "server refused" or "connection failed" goes to the diagnosis box
+    // 401 on a tab that was open before: the server restarted and the access token is new. Keep the board, say what to do (the full sentence is the tooltip), and carry on: it goes live again once this browser holds the new token
+    else if (e && e.status === 401) $('#updated').innerHTML = `<span class="dot dead"></span><span title="${esc(t('diag.http.token401'))}">${t('board.live.token401')}</span>`;
     else $('#updated').innerHTML = `<span class="dot dead"></span>${t('board.live.down', { sec: Math.round((Date.now() - lastOk) / 1000) })}`;
   } finally { ticking = false; }
 }
@@ -1192,38 +1213,39 @@ function startMain() {
 // Bottom row: the same order for both services (plan → 5 hours → week → extra usage and credits → recorded time)
 const PLAN_NAMES = { prolite: 'Pro Lite', pro: 'Pro', plus: 'Plus', team: 'Team', enterprise: 'Enterprise', free: 'Free', business: 'Business' };
 const pbPct = v => `<span class="${v >= 90 ? 'bad' : v >= 70 ? 'warn' : ''}"><b>${Math.round(v)}%</b></span>`;
-// The yellow error line: the server's error_info {code, params} is laid out here in the screen language (key plan.error.<code>); an older server has only the Korean text
-const planError = c => { const ei = c.error_info; return ei && I18N.has('plan.error.' + ei.code) ? t('plan.error.' + ei.code, ei.params) : c.error; };
 const pbNext = (r, days) => { let tt = r; const step = days * 86400; if (tt <= now()) tt += Math.ceil((now() - tt) / step) * step; return tt; };
 function renderPlanBar(P) {
   const bar = $('#planBar'); if (!bar || !P) return;
   const segs = [];
   // Without ~/.claude.json the server gives claude as null. The "no cache" notice is shown only to someone who has Claude sessions (someone using only Codex has no such box at all)
   const claudeUsed = !!SESS && (SESS.sources || []).some(x => x.provider === 'claude' && x.sessions > 0);
-  const c = P.claude || (claudeUsed ? { usage_api: false } : null);
+  const c = P.claude || (claudeUsed ? {} : null);
   if (c) {
-    const items = [], stale = [];
-    const off = c.usage_api === false;     // The default state where the direct account-usage query is off: only the ~/.claude.json cache values show and there is no yellow error (with true or absent, it is as it is now)
+    const items = [];
     const hit = k => { const h = (c.hits || {})[k]; return h && h.status === 'rejected' && h.resets_at > now() ? h : null; };
     const win = (label, w, k, days) => {
       const h = hit(k);
       if (h) return `<span class="bad">${t('board.planbar.hit', { label, time: hm(h.resets_at) })}</span>`;
       if (w && w.resets_at > now()) return `<span>${t('board.planbar.reset', { label, pct: pbPct(w.percent), time: hm(w.resets_at) })}</span>`;
-      if (w) stale.push(label);
-      return `<span title="${t('board.planbar.staleTitle', { time: hm(c.as_of) })}">${label} <b>—</b>${days && w ? ` · ${t('board.planbar.estimate', { time: hm(pbNext(w.resets_at, days)) })}` : ''}</span>`;
+      return `<span title="${t(c.source === 'statusline' ? 'board.planbar.statuslineStale' : 'board.planbar.staleTitle', { time: hm(c.as_of) })}">${label} <b>—</b>${days && w ? ` · ${t('board.planbar.estimate', { time: hm(pbNext(w.resets_at, days)) })}` : ''}</span>`;
     };
-    if (off && !c.as_of && !c.five_hour && !c.seven_day && !Object.keys(c.hits || {}).length) {
+    if (!c.as_of && !c.five_hour && !c.seven_day && !Object.keys(c.hits || {}).length) {
       items.push(`<span class="faint" title="${t('board.planbar.noCache.title')}">${t('board.planbar.noCache')}</span>`);   // There is no cache yet
     } else {
       items.push(win(t('board.planbar.five'), c.five_hour, 'five_hour', 0), win(t('board.planbar.week'), c.seven_day, 'seven_day', 7));
-      (c.scoped || []).filter(x => x.resets_at > now()).forEach(x => items.push(`<span>${t('board.planbar.scoped', { name: esc(x.name), pct: pbPct(x.percent) })}</span>`));
+      // The status line carries only the 5 hour and weekly windows: its label closes them. The model weeks and extra usage always come from the .claude.json cache, which can be days older,
+      // so they follow with a time of their own, and are left out when the server did not say when that cache was written (never drawn under the status line's time)
+      const sl = c.source === 'statusline', cacheAt = sl ? c.cache_as_of : c.as_of;
+      if (sl) items.push(`<span class="faint" title="${t('board.planbar.statuslineTitle')}">${t('board.planbar.statusline', { time: hm(c.as_of) })}</span>`);
+      const cached = [];
+      (c.scoped || []).filter(x => x.resets_at > now()).forEach(x => cached.push(`<span>${t('board.planbar.scoped', { name: esc(x.name), pct: pbPct(x.percent) })}</span>`));
       const ex = c.extra;
-      if (ex) items.push(ex.enabled ? `<span>${t('board.planbar.extraOn', { used: `<b>$${((ex.used || 0) / 100).toFixed(2)}</b>`, limit: `$${((ex.limit || 0) / 100).toFixed(0)}` })}</span>`
+      if (ex) cached.push(ex.enabled ? `<span>${t('board.planbar.extraOn', { used: `<b>$${((ex.used || 0) / 100).toFixed(2)}</b>`, limit: `$${((ex.limit || 0) / 100).toFixed(0)}` })}</span>`
         : `<span>${t(ex.reason === 'out_of_credits' ? 'board.planbar.extraOffNoCredits' : 'board.planbar.extraOff')}</span>`);
-      if (c.source === 'api') items.push(`<span class="faint" title="${t('board.planbar.apiTitle')}">${t('board.planbar.fetched', { time: hm(c.as_of) })}</span>`);
-      else if (c.as_of) items.push(`<span class="faint" title="${t(off ? 'board.planbar.cacheTitleOff' : 'board.planbar.cacheTitle')}">${t(stale.length || off ? 'board.planbar.recordedRefresh' : 'board.planbar.recorded', { time: hm(c.as_of) })}</span>`);
+      if (!sl || cacheAt) items.push(...cached);
+      if (!sl && c.as_of) items.push(`<span class="faint" title="${t('board.planbar.cacheTitle')}">${t('board.planbar.recordedRefresh', { time: hm(c.as_of) })}</span>`);
+      else if (sl && cacheAt && cached.length) items.push(`<span class="faint" title="${t('board.planbar.cacheTitle')}">${t('board.planbar.recorded', { time: hm(cacheAt) })}</span>`);
     }
-    if (c.error && !off) items.push(`<span class="warn" title="${t('board.planbar.errorTitle')}"><b>${esc(planError(c))}</b></span>`);
     segs.push(`<span class="pb-seg"><span class="pb-name">Claude Code</span>${c.plan ? `<span class="pb-plan">${esc(c.plan)}</span>` : ''}${items.join('')}</span>`);
   }
   const x = P.codex;
@@ -1248,7 +1270,7 @@ let PLANS = null;
 async function loadPlans() { try { PLANS = await fetch('api/plans').then(r => r.json()); renderPlanBar(PLANS); } catch {} }
 function startPlans() {
   loadPlans();
-  setInterval(() => { if (!document.hidden) loadPlans(); }, 30000);   // With --claude-usage-api the server queries Claude usage every minute
+  setInterval(() => { if (!document.hidden) loadPlans(); }, 30000);   // the status line file and the .claude.json cache change while Claude Code runs
   setInterval(() => renderPlanBar(PLANS), 30000);            // The display changes once a reset time has passed
   addEventListener('resize', () => renderPlanBar(PLANS));
 }

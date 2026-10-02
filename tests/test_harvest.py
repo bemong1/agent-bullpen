@@ -18,6 +18,7 @@ What is checked:
 import collections
 import contextlib
 import io
+import itertools
 import json
 import os
 import re
@@ -31,6 +32,8 @@ from unittest import mock
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import compat  # noqa: E402,F401  (pins HOME and the cache to a throwaway folder before board is imported)
 
 from tools import harvest as H  # noqa: E402
 from tools.scenarios import axes as A  # noqa: E402
@@ -265,6 +268,54 @@ class RoundTrip(unittest.TestCase):
             if diff != []:
                 wrong[name] = diff
         self.assertEqual(wrong, {}, 'axes that did not come back (None: no spec at all)')
+
+    def test_the_end_of_an_orchestrators_record_comes_back_and_a_claude_p_session_nobody_launched_is_a_main_session(self):
+        """`entry` and `tail` are read from the lines themselves; the process is not in a record, so a file that has grown within the last minute is taken as running
+        and an older one as gone."""
+        for entry, tail, process in itertools.product(A.AXES['entry'], A.AXES['tail'], A.AXES['process']):
+            case = A.normalize(A.Case('sta', dict(skind='main', life='running', entry=entry, tail=tail, process=process)))
+            if (entry, tail, process) != (case.v['entry'], case.v['tail'], case.v['process']):
+                continue
+            root = tempfile.mkdtemp(prefix='hv-main-')
+            try:
+                b = B.build_case(case, root)
+                now = b.phases[-1].now
+                tree = H.read_tree(b.claude, b.sid('orch'))
+                self.assertEqual(tree.subject.kind, 'main', case.id)                       # a `claude -p` run no record launched is the page's own session
+                for later, there in ((0, 'there'), (3600, 'gone')):
+                    res = H.classify(tree, now + later)
+                    got = [A.Case.from_id(cid).v for cid in res.cases if cid.startswith('sta:') and 'skind=main' in cid]       # an id leaves out an axis at its baseline
+                    self.assertEqual(len(got), 1, (case.id, later))
+                    read = {'next': 'mid', 'asked': 'end'}.get(tail, tail)                      # the records cannot show that a prompt came within a second of the end, nor what the last answer asked
+                    self.assertEqual((got[0]['life'], got[0]['entry'], got[0]['tail'], got[0]['process'], got[0]['flaw']), ('running', entry, read, there, 'none'), (case.id, later))
+                    self.assertIn('process', res.unobserved)
+                    self.assertEqual(res.unexpressible, {}, case.id)
+                    self.assertEqual(A.Case('sta', got[0]).key(), A.normalize(A.Case('sta', got[0])).key(), case.id)      # what comes out is a case the generator has
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+
+    def test_a_meta_line_or_a_summary_starts_no_turn_and_a_real_prompt_does(self):
+        n = H.Node('main', 'sid', os.path.join(tempfile.gettempdir(), 'x.jsonl'))
+        H._assistant(n, {'message': {'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': 'done'}]}}, 10.0, {})
+        self.assertEqual(n.tail, 'end')
+        for flag in ('isMeta', 'isCompactSummary', 'isVisibleInTranscriptOnly'):
+            H._user(n, {'message': {'role': 'user', 'content': 'a note'}, flag: True}, 11.0, {})
+            self.assertEqual((n.tail, n.turn_lines), ('end', 1), flag)
+        H._user(n, {'message': {'role': 'user', 'content': '<command-name>/usage</command-name>'}}, 11.5, {})
+        self.assertEqual(n.tail, 'commands')
+        H._user(n, {'message': {'role': 'user', 'content': 'a prompt'}}, 12.0, {})
+        self.assertEqual((n.tail, n.turn_lines), ('prompt', 2))
+
+    def test_a_session_that_stopped_on_a_limit_keeps_the_limit_lives_and_no_shape_of_its_end(self):
+        for life in ('limit_exit', 'limit_auto', 'limit_repeat'):
+            case = A.normalize(A.Case('sta', dict(skind='main', life=life, at='just_ended')))
+            root = tempfile.mkdtemp(prefix='hv-limit-')
+            try:
+                _, res = harvest_case(case, root)
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
+            got = [A.Case.from_id(cid).v for cid in res.cases if cid.startswith('sta:') and 'skind=main' in cid]
+            self.assertEqual([(s['life'], s['entry'], s['tail'], s['process']) for s in got], [(life, 'cli', 'mid', 'there')], life)
 
     def test_a_scene_that_needs_two_names_by_case_is_left_out_on_a_folding_file_system(self):
         b9 = dict(A.real_cases())['B9']                                           # B.md next to b.md

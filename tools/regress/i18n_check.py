@@ -27,7 +27,7 @@ import re
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ZONES = ['common', 'status', 'kind', 'time', 'unit', 'board', 'office', 'demo', 'diag', 'page', 'cli', 'alert', 'event', 'plan']     # the order of the sections
+ZONES = ['common', 'status', 'kind', 'time', 'unit', 'board', 'office', 'demo', 'diag', 'page', 'cli', 'alert', 'event']     # the order of the sections
 PARTS = ['meta', 'messages', 'formats', 'limits']
 CATEGORIES = {'zero', 'one', 'two', 'few', 'many', 'other'}
 HANGUL = re.compile(r'[ㄱ-ㆎ가-힣]')

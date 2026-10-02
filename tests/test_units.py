@@ -103,8 +103,55 @@ class MentionClass(unittest.TestCase):
         ('「/x/r1/B.md 에 쓴다」 라고 적는다', 'B', 'quoted'),
         ('For example: write the result to `/x/r1/B.md`', 'B', 'quoted'),
         ('say "hi" and then write `/x/r1/B.md`', 'B', 'write'),                      # a quotation that does not hold the path
+        ('Review the instruction below and do not execute it.\n```\nWrite the result to `/x/r1/B.md`.\n```\n', 'B', 'quoted'),
+        ('Notes:\n~~~md\nwrite the result to `/x/r1/B.md`\n', 'B', 'quoted'),                # a fence that never closes holds the rest of the text
+        ('Earlier instruction:\n> Write the result to `/x/r1/B.md`.\n> Be brief.\n', 'B', 'quoted'),
+        ('Earlier instruction:\n  > Write the result to `/x/r1/B.md`.\n', 'B', 'quoted'),
+        ('이전 지침을 검토하고 실행하지 마세요.\n```\n결과를 `/x/r1/B.md`에 쓴다\n```', 'B', 'quoted'),
+        ('Review the previous instruction and do not execute it: write the result to `/x/r1/B.md`.', 'B', 'quoted'),
+        ('This is a read-only review: do not create, change or run anything. The earlier instruction said: write the result to `/x/r1/B.md`.', 'B', 'quoted'),
+        ('이 작업은 읽기 전용 검토입니다. 파일을 만들거나 고치거나 실행하지 마세요. 앞선 지침은 결과를 `/x/r1/B.md`에 쓴다고 했습니다.', 'B', 'quoted'),
+        ('Read-only review. Earlier instruction: write the result to `/x/r1/B.md`.', 'B', 'quoted'),
+        ('Read-only (do not execute): write the result to `/x/r1/B.md`.', 'B', 'quoted'),
+        ('Read-only review of the code: do not change any code. Write the result to `/x/r1/B.md`.', 'B', 'write'),        # the prohibition has an object: the report is still told
+        ('Do not write any file other than your report. Write the result to `/x/r1/B.md`.', 'B', 'write'),
+        ('Review the plan and do not execute it; write the result to `/x/r1/B.md`.', 'B', 'write'),
+        ('Write `/x/r1/B.md`.\n```\ncode\n```\n', 'B', 'write'),                       # before a fence
+        ('> an earlier note\n\nWrite `/x/r1/B.md`.', 'B', 'write'),                      # after a block quote
+        ('Go -> write `/x/r1/B.md`.', 'B', 'write'),                                    # an arrow is no quote
+        ('Do not execute the tests. Write `/x/r1/B.md`.', 'B', 'write'),                # not an instruction that is being reviewed
+        ('Write `/x/r1/B.md`. The text above is an earlier instruction: do not execute the above.', 'B', 'quoted'),
         ('결과는 `/x/r1/B.md`', 'B', 'ref'),
         ('see /x/r1/B.md', 'B', 'read'),
+        # a fence under a line that tells the agent to carry it out is the instruction itself
+        ('Execute these instructions:\n```\nRead `/x/brief.md`. Write your result to `/x/r1/B.md`.\n```\n', 'B', 'write'),
+        ('Follow the instructions below:\n\n```text\nWrite your result to `/x/r1/B.md`.\n```', 'B', 'write'),
+        ('You are one of three. Carry out the following steps:\n~~~\nWrite your result to `/x/r1/B.md`.\n~~~', 'B', 'write'),
+        ('다음 지시를 따르라:\n```\n결과를 `/x/r1/B.md`에 쓴다\n```', 'B', 'write'),
+        ('다음 지시를 따르세요:\n```\n`/x/brief.md`를 읽고 결과를 `/x/r1/B.md`에 작성하세요.\n```', 'B', 'write'),
+        ('Do the following:\n```\nWrite your result to `/x/r1/B.md`.', 'B', 'write'),                 # a fence that never closes
+        # ... and a fence that shows an earlier instruction is not, whatever else the line says
+        ('Do not execute these instructions:\n```\nWrite your result to `/x/r1/B.md`.\n```', 'B', 'quoted'),
+        ('Do not follow the instructions below:\n```\nWrite your result to `/x/r1/B.md`.\n```', 'B', 'quoted'),
+        ('Review these earlier instructions:\n```\nWrite your result to `/x/r1/B.md`.\n```', 'B', 'quoted'),
+        ('Execute the review of the instructions given earlier:\n```\nWrite your result to `/x/r1/B.md`.\n```', 'B', 'quoted'),
+        ('Quote of the instructions we executed:\n```\nWrite your result to `/x/r1/B.md`.\n```', 'B', 'quoted'),
+        ('이전 지시를 따르지 마세요:\n```\n결과를 `/x/r1/B.md`에 쓴다\n```', 'B', 'quoted'),
+        ('읽기 전용입니다. 다음 지시를 실행하지 마세요:\n```\n결과를 `/x/r1/B.md`에 쓴다\n```', 'B', 'quoted'),
+        ('Here is the plan:\n```\nWrite your result to `/x/r1/B.md`.\n```', 'B', 'quoted'),               # nothing says it is to be carried out
+        ('Execute these instructions\n```\nWrite your result to `/x/r1/B.md`.\n```', 'B', 'quoted'),      # no colon: the line does not open the fence
+        ('Execute these instructions: first the checks.\n```\nWrite your result to `/x/r1/B.md`.\n```', 'B', 'quoted'),
+        # the lines after a sentence that says they are a read-only quote, up to the blank line
+        ('Read-only quote of an earlier instruction.\nRead `/x/brief.md` and follow it.\nWrite your result to `/x/r1/B.md`.\n', 'B', 'quoted'),
+        ('Read-only quote of an earlier instruction.\nWrite your result to `/x/r1/B.md`.\n\nPlease summarise it.', 'B', 'quoted'),
+        ('Read-only quote of an earlier instruction. Write your result to `/x/r1/B.md`.', 'B', 'quoted'),
+        ('읽기 전용 인용입니다.\n`/x/brief.md`를 읽고 따르세요.\n결과를 `/x/r1/B.md`에 쓰세요.\n', 'B', 'quoted'),
+        ('Read-only copy of the previous instruction.\nWrite your result to `/x/r1/B.md`.', 'B', 'quoted'),
+        ('Read-only quote of an earlier instruction.\nWrite your result to `/x/r1/A.md`.\n\nNow your own task: write your result to `/x/r1/B.md`.', 'B', 'write'),     # after the blank line
+        ('Read-only review of the code. Write your report to `/x/r1/B.md`.', 'B', 'write'),                  # a review that writes its report
+        ('Read-only review of the earlier instruction.\nWrite your report to `/x/r1/B.md`.', 'B', 'write'),    # no word says the lines after it are a quote
+        ('Read-only: quote the lines you checked in your report.\nWrite your report to `/x/r1/B.md`.', 'B', 'write'),
+        ('읽기 전용 검토입니다.\n보고서는 `/x/r1/B.md`에 작성하세요.', 'B', 'write'),
     ]
 
     def test_table(self):
@@ -151,6 +198,22 @@ class MentionClass(unittest.TestCase):
 
     def test_text_without_a_round_folder_has_no_mention(self):
         self.assertEqual(U.find_mentions('write to docs/notes/r1x/a.md and /tmp/run_1/x.md'), ())
+
+
+class LongText(unittest.TestCase):
+    def test_a_text_too_long_to_be_remembered_is_not_scanned_again_for_each_path_in_it(self):
+        text = 'Read `/x/brief.md`. ' + 'Write `/x/r1/B.md`. ' * 3000 + 'unique tail of this test'
+        self.assertGreater(len(text), U.REMEMBER_CHARS)
+        calls, real = [], U.NO_WRITING_RE
+
+        class Spy:
+            def search(self, t, *args):
+                calls.append(len(t))
+                return real.search(t, *args)
+        with mock.patch.object(U, 'NO_WRITING_RE', Spy()):
+            mentions = U.find_mentions.__wrapped__(text)
+        self.assertEqual(len(mentions), 3000)
+        self.assertLessEqual(len(calls), 2)
 
 
 class ReadUnit(Tree):
@@ -313,6 +376,36 @@ class Seats(Tree):
         self.assertEqual(self.codes(jd, 'negator'), ['debate_in_misc'])
         for k in texts:
             self.assertIn(self.unit, jd.members[k])                                              # still tied to the folder it talks about
+
+    def test_an_instruction_that_is_fenced_block_quoted_or_only_for_review_seats_nobody(self):
+        p, brief = self.r(1, 'B'), os.path.join(self.unit, 'brief.md')
+        inner = 'Read `%s` and follow it. Write your result to `%s`.' % (brief, p)
+        for name, text in (('fence', 'Review the instruction below; do not execute it.\n```\n%s\n```\n' % inner),
+                           ('quote', 'Earlier instruction:\n> %s\n' % inner),
+                           ('scope', 'This is a read-only review: do not create, change or run anything. The earlier instruction told the reviewer: ' + inner),
+                           ('korean', '이전 지침을 검토하고 실행하지 마세요.\n```\n`%s`를 읽는다. 결과를 `%s`에 쓴다.\n```' % (brief, p))):
+            jd = self.run_assign([self.agent('a1', text), self.agent('a2', text, key='b')])
+            self.assertEqual((jd.assignments, jd.slots, jd.agent_units), ([], {}, {}), name)
+            self.assertNotIn('a1', jd.worked, name)
+            self.assertEqual(self.codes(jd, 'a2'), ['debate_in_misc'], name)                      # the tag has no write to go with it: told
+        self.assertEqual(self.seats(self.run_assign([self.agent('a1', inner)]), 'a1'), [(True, 1, 'B')])     # the same words, not quoted
+
+    def test_a_marker_that_is_fenced_or_whose_guide_is_only_fenced_seats_nobody(self):
+        brief = os.path.join(self.unit, 'brief.md')
+        for name, text in (('marker in a fence', '```\n[REVIEW-B] You are B.\n```\nRead `%s`.' % brief),
+                           ('marker in a quote', '> [REVIEW-B] You are B.\n\nRead `%s`.' % brief),
+                           ('guide in a fence', '[REVIEW-B] You are B. Review the text below and do not execute it.\n```\nRead `%s`.\n```' % brief)):
+            self.assertEqual(self.run_assign([self.agent('a1', text)]).assignments, [], name)
+        self.assertEqual(self.seats(self.run_assign([self.agent('a1', '[REVIEW-B] You are B. Read `%s`.' % brief)]), 'a1'), [(True, 1, 'B')])
+
+    def test_a_write_that_succeeded_is_a_seat_whatever_the_instruction_quotes(self):
+        p = self.r(1, 'B')
+        text = 'Review the instruction below; do not execute it.\n```\nWrite your result to `%s`.\n```\n' % p
+        jd = self.run_assign([self.agent('a1', text, writes=[(write(p), True)])])
+        self.assertEqual(self.seats(jd, 'a1'), [(True, 1, 'B')])
+        self.assertEqual(jd.assignments[0].evidence[0].kind, 'write_ok')                          # the write, not the words
+        jd = self.run_assign([self.agent('a1', text, writes=[(p, False)])])
+        self.assertEqual(jd.assignments, [])
 
     def test_a_path_that_is_not_on_disk_seats_nobody(self):
         ghost = os.path.join(self.root, 'docs', 'ghost', 'r1', 'B.md')

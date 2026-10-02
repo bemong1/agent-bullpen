@@ -9,6 +9,8 @@ Bundles:
   deb  debate: which debate, round and seat a participant holds, and the state of its cell
   sta  state: the status of an agent (or the orchestrator) after limits, errors, kills, record flaws
   cpl  coupling: one `claude -p` debate participant crossing launcher x life x report path x file state x OS (the integrated scene)
+  room a room: several sub-agents of one orchestrator that share a guide file of any name and each hold a file of their own (a meeting, an agenda ...),
+       or only message each other; and the lookalikes that are no room (a common document read, one shared file, code scattered over repositories ...)
 
 The tables WAY, PROMPT and the helpers at the bottom say what each value does to the *evidence* (does the environment survive, does the process lineage survive,
 can a redirect be read ...). build.py realises them as files and processes; oracle.py reads the same tables to say what a correct reader can know.
@@ -52,6 +54,29 @@ AXES = OrderedDict([
     ('homonym', ('none', 'two')),
     ('fstate', ('none', 'written', 'empty')),
     ('edits', ('none', 'beside')),                            # an editing job beside the topics of a review: a guide that lists findings by bold numbers, with no round folder
+    ('qform', ('inline', 'fence', 'blockquote', 'readonly', 'sentence')),    # how a `quoter` shows the earlier instruction it only talks about: a short quote in one line, a code fence, a Markdown block quote, a read-only review of it, or lines that follow a sentence that says they are a read-only quote of it
+    # --- room ---
+    ('guide', ('agenda', 'brief', 'readme', 'plan', 'top_readme', 'top_claude', 'top_agents', 'docs_guide', 'own', 'missing', 'late')),    # what the first instruction points at: a guide of the room's folder (by its name), a common document of the repository, a guide of the participant's own, a guide that is not on disk, or nothing (the guide comes in a later message)
+    ('shape', ('beside', 'below', 'r1', 'mixed', 'deep', 'far', 'same', 'scatter', 'none')),    # where each participant's own file is: beside the guide, one folder below it, under a round folder, each one's own way (`A.md`, `notes_B.md`, `out/C.md` ...), two below, in another folder, one file for all, code in other repositories, or no file at all
+    ('talk', ('none', 'peer', 'orch')),                       # the messages (`SendMessage`): none, the participants to each other, or only from the orchestrator to each of them
+    ('trees', ('one', 'two')),                                # all participants belong to the orchestrator whose page is read, or every other one belongs to another orchestrator
+    ('people', ('1', '2', '3', '5')),
+    ('word', ('debate', 'meeting', 'mtg', 'agenda', 'none')),    # the noun the instruction uses for the work (in the language of `lang`): only wording, never evidence
+    ('seatmark', ('none', 'tag', 'bracket', 'dam', 'dam_paren', 'en_participant', 'en_as', 'en_seat', 'quoted', 'negated', 'other')),    # how the instruction names the participant's seat letter: a one-letter description tag, `[ROOM-B]`, `B 담당`, `B(...) 담당`, `You are participant B`, `Work as B (...)`, `You hold seat B`; or a lookalike that is no marker: another letter quoted as an example, negated, or a letter of another meaning (`as C (not C++)`)
+    ('fname', ('plain', 'prefix')),                           # the file of letter B is `B.md` or `notes_B.md`
+    ('proof', ('told', 'wrote', 'both')),                     # what shows the participant's own file: the instruction names it, the participant wrote it, or both
+    ('phase', ('working', 'done')),                           # the participants are still working, or have finished
+    ('site', ('docs', 'top', 'dot')),                         # the room's folder: docs/meeting, meeting, .records/meeting
+    ('ref', ('abs', 'rel', 'tilde')),                         # how the instruction writes a path: absolute, relative to the folder the participant works in (the repository top), or with `~`
+    ('rtime', ('overlap', 'sequential', 'quiet')),            # when the participants run: at the same time, each one starts after the one before has finished, or each one starts after the one before has gone quiet and none has finished (all still running)
+    ('code', ('none', 'one', 'majority', 'all', 'implied')),    # who is also told to change (or changes) a code file outside the guide's folder, beside the notes in it: nobody, the first participant only, most of them, all of them; or all of them told to implement their step with no path and no code written
+    ('cite', ('none', 'inline', 'fence', 'blockquote', 'readonly', 'sentence')),    # the guide and the notes file are only the words of an earlier instruction the participant is asked to review (quoted in one line, in a code fence, in a block quote, as a read-only review, or in the lines after a sentence that says they are a read-only quote)
+    ('delivery', ('ok', 'failed')),                           # what the messages between the participants come to: delivered, or answered with an error
+    ('wrap', ('plain', 'exec_fence')),                        # how the instruction that is meant for the participant is written: in plain sentences, or in a code fence after "Execute these instructions:"
+    ('scratch', ('none', 'tmp', 'log')),                      # what each participant also writes that is no change of the work: files in a scratch folder outside the repository (the Write tool), or the output of a command saved in a log by a redirect
+    ('bundle', ('none', 'root')),                             # the room's folder alone, or one topic of a bundle: the folder above it holds the bundle's own brief (docs/records/bundle/meeting)
+    ('above', ('none', 'closing', 'unnamed', 'early', 'plain', 'open')),    # a document in the bundle's folder beside the room's: none; a conclusion written after the files that names the room's folder; one that names nobody (the room is the bundle's only topic); a conclusion written before the files; a document that is no conclusion's name; a conclusion written after the files that names nobody and says some is not done
+    ('copy', ('none', 'link', 'worktree')),                   # the bundle's folder reached by a link the participants write their paths with, or copied into a linked worktree of the repository where another agent works
     # --- state (life is shared with deb and cpl) ---
     ('skind', ('main', 'sub', 'grandsub', 'cli', 'codex')),
     ('life', ('running', 'normal_end', 'limit_exit', 'limit_auto', 'limit_repeat', 'sub_limit_resume', 'sub_limit_dead', 'time_limit_kill',
@@ -59,25 +84,34 @@ AXES = OrderedDict([
     ('flaw', ('none', 'torn', 'multi_proc', 'unknown_type', 'old_format', 'child_bg', 'field_gone', 'future_version')),
     ('at', ('live', 'just_ended', 'after_resume', 'after_restart', 'resume_stopped')),
     ('os', ('linux', 'mac', 'mac_nops')),
+    ('entry', ('cli', 'sdk')),                                # the session the orchestrator page opens: a typed one, or the record of a `claude -p` run (`sdk-cli`: no turn-duration lines)
+    ('tail', ('mid', 'end', 'prompt', 'commands', 'commands_only', 'next', 'asked')),    # what the records of that session end with: a turn in progress, a turn that ended, a new prompt nobody answered, local slash commands after the end, nothing but local slash commands, a new prompt and a call without a result that came within a second of the end of a turn, a turn that ended with a question
+    ('process', ('there', 'gone')),                           # the process of that session: still running, or gone
 ])
 
 BUNDLES = OrderedDict([
     ('aff', ('target', 'spawner', 'way', 'via', 'src', 'form', 'cwd', 'out', 'timing', 'seen', 'os', 'decoy', 'bait', 'author', 'busy', 'starter')),
-    ('deb', ('structure', 'kind', 'rpath', 'nstyle', 'rdir', 'role', 'marker', 'decl', 'homonym', 'fstate', 'life', 'os', 'lang', 'aux', 'wmode', 'edits')),
-    ('sta', ('skind', 'life', 'flaw', 'at', 'os')),
+    ('deb', ('structure', 'kind', 'rpath', 'nstyle', 'rdir', 'role', 'marker', 'decl', 'homonym', 'fstate', 'life', 'os', 'lang', 'aux', 'wmode', 'edits', 'qform')),
+    ('sta', ('skind', 'life', 'flaw', 'at', 'os', 'entry', 'tail', 'process')),
     ('cpl', ('spawner', 'life', 'rpath', 'os', 'fstate')),
+    ('room', ('guide', 'shape', 'talk', 'trees', 'people', 'word', 'lang', 'seatmark', 'fname', 'proof', 'phase', 'site', 'ref', 'rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy')),
 ])
 
 # Axes that were added after the first case ids were fixed. A case id names them only when they differ from the baseline, so the ids of every earlier case
 # are the same as before (and the times, ids and files made from them). They stay out of the pairwise cover: each has its own product of cases (run.select).
-OPTIONAL = {'aff': ('author', 'busy', 'starter'), 'deb': ('os', 'lang', 'aux', 'wmode', 'edits')}
+OPTIONAL = {'aff': ('author', 'busy', 'starter'), 'deb': ('os', 'lang', 'aux', 'wmode', 'edits', 'qform'), 'sta': ('entry', 'tail', 'process'),
+            'room': ('rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy')}
 
 BASE = {
     'target': 'cli', 'spawner': 'main', 'way': 'direct', 'via': 'arg', 'src': 'call', 'form': 'new', 'cwd': 'same', 'out': 'none',
     'timing': 'normal', 'seen': 'live', 'decoy': 'none', 'bait': 'none', 'author': 'self', 'busy': 'py', 'starter': 'call', 'lang': 'en', 'aux': 'none', 'wmode': 'tool', 'edits': 'none',
+    'qform': 'inline',
     'structure': 'single', 'kind': 'sub', 'rpath': 'abs', 'nstyle': 'plain', 'rdir': 'r1', 'role': 'writer', 'marker': 'none', 'decl': 'yes',
     'homonym': 'none', 'fstate': 'none',
-    'skind': 'cli', 'life': 'running', 'flaw': 'none', 'at': 'live', 'os': 'linux',
+    'guide': 'agenda', 'shape': 'beside', 'talk': 'none', 'trees': 'one', 'people': '3', 'word': 'meeting', 'seatmark': 'none', 'fname': 'plain', 'proof': 'both',
+    'phase': 'working', 'site': 'docs', 'ref': 'abs', 'rtime': 'overlap', 'code': 'none', 'cite': 'none', 'delivery': 'ok', 'wrap': 'plain', 'scratch': 'none',
+    'bundle': 'none', 'above': 'none', 'copy': 'none',
+    'skind': 'cli', 'life': 'running', 'flaw': 'none', 'at': 'live', 'os': 'linux', 'entry': 'cli', 'tail': 'mid', 'process': 'there',
 }
 # a bundle may sit on a different baseline than the global one (the debate bundle's agent is not yet running unless asked)
 BUNDLE_BASE = {
@@ -153,6 +187,94 @@ DEB_LIFE = {'sub': ('running', 'normal_end', 'limit_exit', 'taskstop_kill', 'sta
 CPL_LIFE = ('running', 'normal_end', 'limit_exit', 'time_limit_kill', 'taskstop_kill', 'api_529', 'api_400', 'crash')
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# The room scene: where every file is (the one place the oracle and the builder agree on). Paths are relative to the repository top.
+# ---------------------------------------------------------------------------------------------------------------------
+ROOM_GUIDES = {'agenda': 'agenda.md', 'brief': 'brief.md', 'readme': 'README.md', 'plan': 'plan.md'}          # the guide of the room's own folder, by `guide`
+COMMON_DOCS = {'top_readme': 'README.md', 'top_claude': 'CLAUDE.md', 'top_agents': 'AGENTS.md', 'docs_guide': 'docs/guide.md'}    # documents everybody reads: no room has one
+ROOM_SITE = {'docs': 'docs/meeting', 'top': 'meeting', 'dot': '.records/meeting'}
+SEAT_LETTERS = 'ABCDE'
+MIXED_FILES = ('A', 'notes_B', 'out/C', 'out/notes_D', 'E')              # `shape=mixed`: the file of participant i below the room's folder, without `.md`
+ROOM_TITLE = {'en': {'agenda': 'Meeting agenda: release readiness', 'brief': 'Brief: release readiness meeting', 'readme': 'Release readiness meeting', 'plan': 'Plan: release readiness'},
+              'ko': {'agenda': '릴리스 준비 회의 아젠다', 'brief': '릴리스 준비 회의 지침', 'readme': '릴리스 준비 회의', 'plan': '릴리스 준비 계획'}}
+COMMON_TITLE = {'top_readme': 'Project overview', 'top_claude': 'Project rules', 'top_agents': 'Agent rules', 'docs_guide': 'Developer guide'}
+
+
+ROOM_BUNDLE = 'docs/records/bundle'                       # `bundle=root`: the folder above the room's, with the bundle's own brief and, beside the room's folder, the documents of `above`
+ROOM_ALIAS = 'view'                                       # `copy=link`: a link to the bundle's folder; the participants write their paths with it
+ABOVE_DOC = {'closing': 'CLOSING.md', 'unnamed': 'CLOSING.md', 'early': 'CLOSING.md', 'plain': 'notes.md', 'open': 'CLOSING.md'}
+ABOVE_TEXT = {'closing': 'Everything is in. The meeting/ folder is closed.\n', 'unnamed': 'Everything is in; nothing is left open.\n', 'early': 'The meeting/ folder is closed.\n',
+              'plain': 'The meeting/ folder is closed.\n', 'open': 'Part of it is in; the rest is not done yet.\n'}
+
+
+def room_folder(v):
+    """The room's folder as the participants write it (relative to the repository top): beside the others, or below the bundle's folder; with `copy=link` through the link."""
+    if v['bundle'] == 'root':
+        return '%s/meeting' % (ROOM_ALIAS if v['copy'] == 'link' else ROOM_BUNDLE)
+    return ROOM_SITE[v['site']]
+
+
+def room_disk(v, rel):
+    """Where a path the participants write is on disk: the same, or below the real folder when it is written with the link."""
+    return ROOM_BUNDLE + rel[len(ROOM_ALIAS):] if v['copy'] == 'link' and rel.startswith(ROOM_ALIAS + '/') else rel
+
+
+def room_stem(v, i):
+    """The file name (without `.md`) of participant i (0 for A)."""
+    if v['shape'] == 'mixed':
+        return MIXED_FILES[i].rsplit('/', 1)[-1]
+    return ('notes_' if v['fname'] == 'prefix' else '') + SEAT_LETTERS[i]
+
+
+def room_tree(v, i):
+    """The orchestrator participant i belongs to: 1 is the one whose page is read; `trees=two` gives every second participant to another one."""
+    return 2 if v['trees'] == 'two' and i % 2 == 1 else 1
+
+
+def room_guide(v, i):
+    """(path relative to the repository top, on disk) of the guide the first instruction of participant i points at; (None, False) when it points at none."""
+    g, folder = v['guide'], room_folder(v)
+    if g in ROOM_GUIDES:
+        return '%s/%s' % (folder, ROOM_GUIDES[g]), True
+    if g in COMMON_DOCS:
+        return COMMON_DOCS[g], True
+    if g == 'own':
+        return '%s/agenda_%s.md' % (folder, SEAT_LETTERS[i]), True
+    if g == 'missing':
+        return '%s/agenda.md' % folder, False
+    return None, False                                   # late: the guide comes in a later message
+
+
+def room_late_guide(v):
+    """The guide of `guide=late`: on disk in the room's folder, named only in a message that comes after the first instruction."""
+    return '%s/agenda.md' % room_folder(v)
+
+
+def room_out(v, i):
+    """The file participant i is told to write, or writes (relative to the repository top); None when it has none."""
+    shape, folder, stem = v['shape'], room_folder(v), room_stem(v, i)
+    return {'beside': '%s/%s.md' % (folder, stem), 'below': '%s/out/%s.md' % (folder, stem), 'r1': '%s/r1/%s.md' % (folder, stem), 'mixed': '%s/%s.md' % (folder, MIXED_FILES[i]),
+            'deep': '%s/out/x/%s.md' % (folder, stem), 'far': 'work/reports/%s.md' % stem, 'same': '%s/minutes.md' % folder,
+            'scatter': 'repos/svc_%s/src/part.py' % SEAT_LETTERS[i].lower(), 'none': None}[shape]
+
+
+def room_coders(v):
+    """The participants (by index) that are also told to change a code file, or change one, besides their notes: counted over the participants of the page, in order."""
+    page = [i for i in range(int(v['people'])) if room_tree(v, i) == 1]
+    return set(page[:{'none': 0, 'one': 1, 'majority': len(page) // 2 + 1, 'all': len(page), 'implied': 0}[v['code']]])
+
+
+def room_code(v, i):
+    """The code file participant i is also told to change, or changes (relative to the repository top); None when it has none. It sits in the repository's source
+    folder, outside the guide's folder."""
+    return 'src/task_%s/part.py' % SEAT_LETTERS[i].lower() if i in room_coders(v) else None
+
+
+def room_title(v):
+    """The first heading of the guide of the room's own folder."""
+    return ROOM_TITLE[v['lang']][v['guide']] if v['guide'] in ROOM_GUIDES else None
+
+
 class Case:
     """A bundle and the full axis values of that bundle. `real` names the real case (A1 ...) it stands for, if any; `twin` is the id of the positive it shadows."""
 
@@ -199,7 +321,7 @@ def normalize(case):
     """The case with impossible combinations folded (to a fixed point: a fold may enable another). The folded case has the same id as an existing one."""
     v = dict(case.v)
     b = case.bundle
-    fold = {'aff': _aff, 'deb': _deb, 'sta': _sta, 'cpl': _cpl}[b]
+    fold = {'aff': _aff, 'deb': _deb, 'sta': _sta, 'cpl': _cpl, 'room': _room}[b]
     for _ in range(6):
         before = dict(v)
         fold(v)
@@ -432,6 +554,10 @@ def _deb(v):
         v['os'] = 'mac'
     if role not in ('writer', 'reader', 'ref_reader', 'quoter', 'negator', 'ghost', 'tag_only', 'failed_write', 'rival'):
         v['lang'] = 'en'                         # no instruction text of its own
+    if role != 'quoter':
+        v['qform'] = 'inline'
+    elif v['qform'] != 'inline':
+        v.update(marker='none', wmode='tool')    # the earlier instruction is the only thing quoted
     _report_file(v, v['kind'])
     _aux(v)
     _wmode(v)
@@ -476,6 +602,63 @@ def _report_file(v, kind):
         v['fstate'] = 'none'
 
 
+def _room(v):
+    n = int(v['people'])
+    if v['guide'] in COMMON_DOCS and v['shape'] in ('beside', 'below', 'r1', 'deep'):
+        v['shape'] = 'far'                       # a common document has no folder of its own to write beside
+    if v['shape'] in ('r1', 'mixed'):
+        v['fname'] = 'plain'                     # the reports under a round folder are named by their letter; each participant of a mixed room has a name of its own
+        v['talk'] = 'none'                       # a folder with a round folder is a debate whatever else is said
+        if v['guide'] not in ROOM_GUIDES:
+            v['guide'] = 'agenda'
+    if n == 1:
+        v.update(talk='none', trees='one')       # nobody to message, nobody beside it
+        if v['shape'] == 'same':
+            v['shape'] = 'beside'
+    if v['shape'] == 'none':
+        v['proof'] = 'told'                      # no file: nothing is told and nothing is written
+    if v['seatmark'] in ('dam', 'dam_paren'):
+        v['lang'] = 'ko'
+    elif v['seatmark'] in ('en_participant', 'en_as', 'en_seat'):
+        v['lang'] = 'en'
+    files = v['shape'] in ('beside', 'below', 'mixed') and v['guide'] in ROOM_GUIDES and n > 1
+    if v['cite'] != 'none':
+        if n == 1 or v['guide'] not in ROOM_GUIDES or v['shape'] not in ('beside', 'below', 'mixed', 'r1'):
+            v['cite'] = 'none'
+        else:
+            v.update(proof='told', seatmark='none', talk='none', trees='one', code='none', rtime='overlap')      # the scene is the words of an earlier instruction and nothing done
+    if v['code'] != 'none':
+        if not files or v['cite'] != 'none':
+            v['code'] = 'none'                   # code is a second file beside the notes in the guide's folder: it needs a room that could be one
+        else:
+            v['trees'] = 'one'
+            if v['code'] == 'majority' and n == 2:
+                v['code'] = 'all'                # two of two
+    for name in ('wrap', 'scratch'):
+        if v[name] != BASE[name] and (not files or v['cite'] != 'none'):
+            v[name] = BASE[name]                 # the words of the instruction and the files beside the notes need a room that could be one, and an instruction that is meant for the participant
+        elif v[name] != BASE[name]:
+            v['trees'] = 'one'
+    if v['rtime'] in ('sequential', 'quiet'):
+        if not files or v['cite'] != 'none':
+            v['rtime'] = 'overlap'
+        else:
+            v['trees'] = 'one'
+            if v['rtime'] == 'quiet':
+                v['phase'] = 'working'           # nobody has finished
+            if v['talk'] == 'peer':
+                v['talk'] = 'none'               # runs that never coexist send each other nothing (the orchestrator may still message each one)
+    if v['talk'] != 'peer' or n == 1:
+        v['delivery'] = 'ok'
+    if v['bundle'] == 'root':
+        if n == 1 or v['guide'] not in ROOM_GUIDES or v['shape'] not in ('beside', 'below') or v['cite'] != 'none' or v['trees'] != 'one':
+            v['bundle'] = 'none'                 # a bundle's topic is a room that could be one (a guide of its own folder, files beside or below it, all of them of this page)
+        else:
+            v.update(site='docs', code='none', rtime='overlap', wrap='plain', scratch='none', talk='none', delivery='ok', seatmark='none', fname='plain')
+    if v['bundle'] != 'root':
+        v.update(above='none', copy='none')
+
+
 def _sta(v):
     sk, life, flaw, at = v['skind'], v['life'], v['flaw'], v['at']
     if life not in LIFE_BY_KIND[sk]:
@@ -506,6 +689,13 @@ def _sta(v):
         v['flaw'] = 'none'
     if v['os'] == 'mac_nops' and life not in ('running', 'stalled_silent', 'crash'):
         v['os'] = 'mac'
+    if sk != 'main' or life != 'running':
+        v.update(entry='cli', tail='mid', process='there')       # only an orchestrator that was not stopped by a limit has the shapes of a session's end
+    else:
+        if v['entry'] == 'sdk' and v['tail'] in ('commands', 'commands_only'):
+            v['tail'] = 'end'                    # a `claude -p` run has no local slash commands
+        if (v['entry'], v['tail'], v['process']) != ('cli', 'mid', 'there'):
+            v.update(at='live', flaw='none', os='linux')
 
 
 def _cpl(v):

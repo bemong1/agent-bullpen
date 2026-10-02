@@ -302,6 +302,91 @@ class GrandChild(Fixture):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
+class OrchestratorStateWiring(Fixture):
+    """What the page says about the orchestrator itself, read from the main record of a session and from its process."""
+
+    def orch(self, n, records, alive=True):
+        sid = '%08d-0000-4000-8000-000000000000' % n
+        self.write(sid, [dump(r) for r in records])
+        s = server.Session(os.path.join(self.proj, sid + '.jsonl'))
+        s.poll()
+        return self.state(s, alive)
+
+    def test_a_print_session_that_ended_its_turn_is_not_working(self):
+        records = (rst.sdk(1), rst.tool(2, 'c'), rst.result(3, 'c'), rst.say(5))              # entrypoint sdk-cli: the record has no turn_duration
+        for n, alive in enumerate((True, False, None)):
+            self.assertEqual(self.orch(n, records, alive)['orch']['state'], 'idle', alive)
+
+    def test_a_session_of_local_commands_is_not_working(self):
+        for n, (records, alive) in enumerate((((rst.typed(1), rst.say(5), rst.turn_end(5.5)) + tuple(rst.usage_command(100)), True),     # a /usage after a normal turn end
+                                              (tuple(rst.usage_command(10)), True),                                                    # nothing but commands
+                                              (tuple(rst.usage_command(10)) + (rst.cost(),), None))):                                  # and the process that wrote them has exited
+            st = self.orch(10 + n, records, alive)
+            self.assertEqual(st['orch']['state'], 'idle', n)
+        self.assertEqual(st['orch']['last_ts'], None)                                          # a command and its output are no activity of the orchestrator
+
+    def test_a_process_that_is_gone_is_not_working(self):
+        records = (rst.sdk(1), rst.tool(2, 'c'))                                                # the last turn stopped in the middle (it was killed)
+        self.assertEqual([self.orch(20 + n, records, alive)['orch']['state'] for n, alive in enumerate((True, False, None))], ['working', 'idle', 'working'])
+
+    def test_an_exit_marker_ends_the_turn_even_when_the_process_cannot_be_seen(self):
+        self.assertEqual(self.orch(30, (rst.sdk(1), rst.tool(2, 'c'), rst.result(3, 'c'), rst.cost()), None)['orch']['state'], 'idle')
+
+    def test_a_turn_that_ends_in_a_question_asks_for_the_answer_only_while_the_session_is_there(self):
+        for n, alive, want in ((40, True, ['decide']), (41, None, ['decide']), (42, False, [])):      # a session that is closed has nobody to answer: unknown is not closed
+            st = self.orch(n, (rst.sdk(1), rst.say(5, 'Which of the two designs do you want?')), alive)
+            self.assertEqual([a['level'] for a in st['alerts'] if a['id'].startswith('say:')], want, alive)
+        for n, alive, want in ((43, True, ['decide']), (44, False, [])):                              # the same for a typed session that was closed
+            st = self.orch(n, (rst.typed(1), rst.say(5, 'Which of the two designs do you want?'), rst.turn_end(5.5)), alive)
+            self.assertEqual([a['level'] for a in st['alerts'] if a['id'].startswith('say:')], want, alive)
+
+    def test_the_wait_for_the_next_instruction_is_only_for_a_session_that_is_there(self):
+        for n, alive, want in ((45, True, ['info']), (46, None, ['info']), (47, False, [])):
+            st = self.orch(n, (rst.sdk(1), rst.say(5, 'The work is done.')), alive)
+            self.assertEqual([a['level'] for a in st['alerts'] if a['id'].startswith('turn:')], want, alive)
+
+    def test_a_turn_that_started_right_after_the_end_is_not_waiting_for_anything(self):
+        records = (rst.sdk(1), rst.say(100, 'Which one do you want?'), rst.sdk(100.2, 'The first one.', idx=2), rst.tool(100.4, 'c'))
+        st = self.orch(48, records, True)
+        self.assertEqual((st['orch']['state'], [a['id'] for a in st['alerts'] if a['id'].split(':')[0] in ('say', 'turn')]), ('working', []))
+
+    def test_the_orchestrator_is_working_during_a_call_that_started_right_after_the_end_of_a_turn(self):
+        records = (rst.sdk(1), rst.say(100), rst.sdk(100.2, 'Next.', idx=2), rst.tool(100.4, 'c'))
+        self.assertEqual([self.orch(60 + n, records, alive)['orch']['state'] for n, alive in enumerate((True, None, False))], ['working', 'working', 'idle'])
+        typed = (rst.typed(1), rst.say(100), rst.turn_end(100.05), rst.typed(100.2, 'Next.'), rst.tool(100.4, 'c'))
+        self.assertEqual(self.orch(70, typed, True)['orch']['state'], 'working')
+
+    def test_what_comes_after_the_end_of_a_turn_is_work(self):
+        records = (rst.sdk(1), rst.say(5), rst.typed(100, 'And the second part.'))
+        self.assertEqual(self.orch(50, records, True)['orch']['state'], 'working')
+
+
+class CodexThreadState(unittest.TestCase):
+    """A Codex conversation is its own orchestrator: working while a turn is open, unless the process that has it open is known to be gone."""
+
+    def test_a_thread_whose_process_is_gone_is_not_working(self):
+        import test_preserve as pre
+        with tempfile.TemporaryDirectory() as tmp, patched(CODEX_NAMES=os.path.join(tmp, 'none.jsonl')):
+            c = server.CodexSession(dict(pre.codex_entry(), path=os.path.join(tmp, 'rollout.jsonl'), origin='tui', guardian=False, first_user='hi'))
+            c._feed_cx(pre.cx_rec('event_msg', 'task_started', {}, ts=pre.T + 1))
+            got = []
+            for alive in (True, False, None):
+                with mock.patch.object(server.CodexSession, 'alive', lambda self_, a=alive: (a, None, 'n')):
+                    got.append(views.state(c)['orch']['state'])
+            self.assertEqual(got, ['working', 'idle', 'working'])                              # unknown is not gone
+            c._feed_cx(pre.cx_rec('event_msg', 'task_complete', {}, ts=pre.T + 30))
+            with mock.patch.object(server.CodexSession, 'alive', lambda self_: (True, None, 'n')):
+                self.assertEqual(views.state(c)['orch']['state'], 'idle')
+            c._feed_cx(pre.cx_rec('event_msg', 'task_started', {}, ts=pre.T + 30.3))                   # the next turn starts within a second of the end of this one
+            with mock.patch.object(server.CodexSession, 'alive', lambda self_: (True, None, 'n')):
+                self.assertEqual(views.state(c)['orch']['state'], 'working')
+                self.assertTrue(c._codex_busy({}, pre.T + 3600))
+            c._feed_cx(pre.cx_rec('event_msg', 'task_complete', {}, ts=pre.T + 60))
+            with mock.patch.object(server.CodexSession, 'alive', lambda self_: (True, None, 'n')):
+                self.assertEqual(views.state(c)['orch']['state'], 'idle')
+
+
+# ---------------------------------------------------------------------------------------------------------------------
 class DebateFixture(unittest.TestCase):
     """A debate folder on disk and sub-agents that write, read or fail to write its reports."""
 
@@ -394,12 +479,79 @@ class UnitsAndSeats(DebateFixture):
         a.feed({'type': 'user', 'timestamp': st2.iso(T0 + 2), 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'w2', 'content': 'fine'}]}})
         self.assertIs(a.writes[1]['ok'], True)
 
+    def test_a_message_knows_whether_it_was_delivered_only_after_its_result(self):
+        a = server.Agent('a0123456789abcdef', {})
+        send = lambda cid, t: {'type': 'assistant', 'timestamp': st2.iso(t), 'message': {'content': [
+            {'type': 'tool_use', 'id': cid, 'name': 'SendMessage', 'input': {'to': 'b', 'summary': 'hello', 'message': 'hi'}}]}}
+        result = lambda cid, t, **kw: {'type': 'user', 'timestamp': st2.iso(t), 'message': {'content': [{'type': 'tool_result', 'tool_use_id': cid, 'content': 'x', **kw}]}}
+        a.feed(send('m1', T0))
+        self.assertEqual((a.sent[0]['id'], 'ok' in a.sent[0]), ('m1', False))
+        a.feed(result('m1', T0 + 1, is_error=True))
+        self.assertIs(a.sent[0]['ok'], False)
+        a.feed(send('m2', T0 + 2))
+        a.feed(result('m2', T0 + 3))
+        self.assertIs(a.sent[1]['ok'], True)
+        a.feed(send('m3', T0 + 4))
+        a.feed(result('other', T0 + 5, is_error=True))                                           # the result of some other call says nothing about it
+        self.assertNotIn('ok', a.sent[2])
+
+    def test_the_debate_judgment_is_made_again_when_the_result_of_a_message_arrives(self):
+        s = server.Session.__new__(server.Session)
+        a = server.Agent('a0123456789abcdef', {})
+        s.agents = {a.id: a}
+        a.feed({'type': 'assistant', 'timestamp': st2.iso(T0), 'message': {'content': [{'type': 'tool_use', 'id': 'm1', 'name': 'SendMessage', 'input': {'to': 'b', 'message': 'hi'}}]}})
+        before = s._debate_key({a.id: 'running'})
+        a.feed({'type': 'user', 'message': {'content': [{'type': 'tool_result', 'tool_use_id': 'm1', 'is_error': True, 'content': 'no'}]}})       # no time: nothing else about the agent moves
+        self.assertNotEqual(s._debate_key({a.id: 'running'}), before)                           # so the key itself must carry the result
+
     def test_the_notice_of_a_background_task_is_no_agent_finishing(self):
         a = server.Agent('a0123456789abcdef', {})
         note = '<task-notification>\n<task-id>%s</task-id>\n<status>completed</status>\n<summary>Background command done</summary>\n</task-notification>'
         for tid in ('b3k9x2m1q', 'a1234567890abcdef'):
             a._child_note(T0, note % tid, None)
         self.assertEqual([n['task'] for n in a.child_notes], ['a1234567890abcdef'])
+
+
+class FileViewNeedsAWriteThatWorked(DebateFixture):
+    """The page opens a file an agent wrote. A write counts when its result said it worked: a call that failed or has no result yet opens nothing. An entry kept at
+    completion (a Codex file change, a report confirmed by its hash) has no call to wait for and counts as made."""
+
+    def md(self, name):
+        path = os.path.join(self.repo, name)
+        with open(path, 'w') as f:
+            f.write('notes\n')
+        return path
+
+    def use(self, a, cid, path, t, name='Write'):
+        a.feed({'type': 'assistant', 'timestamp': st2.iso(t), 'message': {'content': [{'type': 'tool_use', 'id': cid, 'name': name, 'input': {'file_path': path}}]}})
+
+    def done(self, a, cid, t, **kw):
+        a.feed({'type': 'user', 'timestamp': st2.iso(t), 'message': {'content': [{'type': 'tool_result', 'tool_use_id': cid, 'content': 'x', **kw}]}})
+
+    def test_only_a_write_that_worked_opens_a_file(self):
+        s = self.session()
+        a = server.Agent('a0123456789abcdef', {})
+        s.agents[a.id] = a
+        failed, pending, worked, edited = (self.md(n) for n in ('failed.md', 'pending.md', 'worked.md', 'edited.md'))
+        self.use(a, 'w1', failed, T0)
+        self.done(a, 'w1', T0 + 1, is_error=True)
+        self.use(a, 'w2', pending, T0 + 2)
+        self.use(a, 'w3', worked, T0 + 3)
+        self.done(a, 'w3', T0 + 4)
+        self.use(a, 'w4', edited, T0 + 5, name='Edit')
+        self.done(a, 'w4', T0 + 6)
+        self.assertEqual([s.allowed_file(p) for p in (failed, pending)], [None, None])
+        self.assertEqual([s.allowed_file(p) for p in (worked, edited)], [os.path.realpath(worked), os.path.realpath(edited)])
+        self.done(a, 'w2', T0 + 7)                                                              # the result of the one in progress comes
+        self.assertEqual(s.allowed_file(pending), os.path.realpath(pending))
+
+    def test_a_record_made_at_completion_counts(self):
+        s = self.session()
+        a = server.Agent('a0123456789abcdef', {})
+        s.agents[a.id] = a
+        made = self.md('made.md')
+        a.writes.append({'ts': T0, 'path': made})                                               # a Codex FileChange, or the -o file found by its hash: no call, no result to wait for
+        self.assertEqual(s.allowed_file(made), os.path.realpath(made))
 
 
 class ResumedSubAgent(DebateFixture):

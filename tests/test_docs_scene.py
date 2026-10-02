@@ -12,9 +12,11 @@ import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import compat  # noqa: E402,F401  (pins HOME and the cache to a throwaway folder before board is imported)
 import docs_scene  # noqa: E402
 import synth_home  # noqa: E402
-from test_synth import Board, synth_home_codex_unknown, tree_digest  # noqa: E402
+from test_synth import Board, reap, start_live, synth_home_codex_unknown, tree_digest  # noqa: E402
 
 
 class DocsScene(unittest.TestCase):
@@ -23,7 +25,7 @@ class DocsScene(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory()
         cls.info = docs_scene.build(os.path.join(cls.tmp.name, 'home'))
         cls.home = cls.info['home']
-        cls.pids = synth_home.start_live(cls.info)
+        cls.pids, cls.procs = start_live(cls.info)
         cls.board = Board(cls.home, cls.info['orch'])
         end = time.time() + 30                                  # the first seconds after the start link the `claude -p` runs by a guess (rule time): wait for the sure link
         while True:
@@ -37,6 +39,7 @@ class DocsScene(unittest.TestCase):
     def tearDownClass(cls):
         cls.board.close()
         synth_home.stop_live(cls.home, quiet=True)
+        reap(cls.procs)
         cls.tmp.cleanup()
 
     def topics(self):

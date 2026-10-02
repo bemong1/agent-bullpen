@@ -150,7 +150,7 @@ class Sessions(unittest.TestCase):
         self.assertEqual([(e['kind'], e['text'], e['ts']) for e in c.feed], [('user_say', '<custom>hi', T + 10), ('user_say', '<custom>hi', T + 400)])
 
     # 2-2f
-    def test_stall_tail_differs(self):
+    def test_stall_base(self):
         s = self.claude()
         a = claude_agent()
         a.spawn_ts, a.last_ts = T, None
@@ -160,14 +160,16 @@ class Sessions(unittest.TestCase):
         b.spawn_ts, b.last_ts = T, None
         linker = server.CodexLinker(s)
         procs = {'ts': 10 ** 12, 'cmd': [b'codex ' + b.id.encode()], 'fds': set(), 'any': True}
+        status = lambda now: linker.verdict(b, now).status
         with patched(cx_procs=lambda: procs):
-            self.assertEqual(linker.status(b, True, T + 100), 'stalled')                     # Codex: without last_ts, 0 is the base
+            self.assertEqual(status(T + 100), 'running')                                     # Codex: the same base, and the board's one judgment (runstate)
+            self.assertEqual(status(T + server.STALL_SEC + 1), 'stalled')
             b.last_ts = T + 90
-            self.assertEqual(linker.status(b, True, T + 100), 'running')
+            self.assertEqual(status(T + 100), 'running')
             b.pending['x'] = {'ts': T, 'name': 'sh', 'text': ''}
             b.last_ts = T
-            self.assertEqual(linker.status(b, True, T + server.STALL_SEC + 100), 'running')
-            self.assertEqual(linker.status(b, True, T + server.TOOL_STALL_SEC + 1), 'stalled')
+            self.assertEqual(status(T + server.STALL_SEC + 100), 'running')
+            self.assertEqual(status(T + server.TOOL_STALL_SEC + 1), 'stalled')
 
     # 2-2g
     def test_model_numbers(self):
@@ -282,7 +284,7 @@ class DebateTables(unittest.TestCase):
         a = self.agent(1, 'A', T, '%s/r1/A.md 를 쓴다' % t1, writes=[t1 + '/r1/A.md'])
         a.last_ts = T + 10
         running = self.s.debates({a.id: 'running'})[0][0]['topics'][0]['rows'][0]['cells'][0]['state']
-        self.s.allowed_file(os.path.join(t1, 'r1', 'A.md'))                              # calls debates with a fake status ('done')
+        self.s.allowed_file(os.path.join(t1, 'r1', 'A.md'))                              # judges with the statuses of the last page, none here
         again = self.s.debates({a.id: 'running'})[0][0]['topics'][0]['rows'][0]['cells'][0]['state']
         self.assertEqual((running, again), ('draft', 'draft'))
 

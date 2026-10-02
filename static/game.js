@@ -192,6 +192,15 @@
     list.forEach(walk);                                  // a loop of parents (never expected) still seats everybody
     return out;
   }
+  // The desks of the "other work" room keep their people while they work. Somebody new takes the empty end desk, wherever the server lists them (so one more person never moves
+  // everybody a desk over), and when somebody leaves the rest close up in the same order. Only the first drawing, with nobody remembered, seats a launched run beside its launcher.
+  function deskOrder(G, list) {
+    const ids = new Set(list.map(a => a.id)), kept = (G.otherOrder || []).filter(id => ids.has(id)), have = new Set(kept);
+    const byId = new Map(list.map(a => [a.id, a]));
+    const out = kept.map(id => byId.get(id)).concat(beside(list.filter(a => !have.has(a.id))));
+    G.otherOrder = out.map(a => a.id);
+    return out;
+  }
   const orchProvider = S => (S.orch && S.orch.provider === 'codex' ? 'codex' : 'claude');   // Claude if the field is missing
   function buildBlocks(G) {
     const S = G.state, d = G.debate, blocks = [{ type: 'boss', w: 150 }, { type: 'orch', w: 84 }];
@@ -199,14 +208,14 @@
     const inDebate = new Set();
     let idle = 0;
     // A finished topic loses its room, and its people are not put in the lounge either (they count as earlier agents): a topic with nobody working
-    // and a final already out (20 minutes of slack after the last activity), or a topic with no participants at all.
-    // A topic that finished a round and waits for the next stage (before the final) is kept as it is
+    // and a final already out, or a room or flat review (no next round to wait for) whose every cell is in (20 minutes of slack after the last activity), or a topic with no participants at all.
+    // A topic that finished a round and waits for the next stage (before the final) is kept as it is, and so is a review that has not started or has a cell still open or not handed in
     const nowS = S.now || Date.now() / 1000;
     const topicDone = t => {
       const ids = t.rows.map(r => r.agents[r.agents.length - 1]).filter(Boolean);
       if (ids.some(id => { const a = byId.get(id); return a && RUN(a.status); })) return false;
       if (!t.rows.length) return true;
-      if (!(t.final && t.final.exists)) return false;
+      if (!(t.final && t.final.exists) && !(noRounds(t) && t.rows.every(r => r.cells.every(c => c.state === 'done')))) return false;
       const lastAct = Math.max(0, ...ids.map(id => (byId.get(id) || {}).last_ts || 0), ...t.rows.flatMap(r => r.cells.map(c => c.mtime || 0)));
       return nowS - lastAct >= 1200;
     };
@@ -216,7 +225,7 @@
       seats.forEach(s => { if (s.agentId) { inDebate.add(s.agentId); const a = byId.get(s.agentId); if (a && !RUN(a.status)) idle++; } });
       blocks.push({ type: 'zone', topic: t, seats, shirt: SHIRTS[i % SHIRTS.length], w: 12 + Math.max(3, seats.length) * SEAT });
     });
-    const others = beside(S.agents.filter(a => RUN(a.status) && !inDebate.has(a.id)));
+    const others = deskOrder(G, S.agents.filter(a => RUN(a.status) && !inDebate.has(a.id)));
     if (others.length) blocks.push({ type: 'zone', other: true, seats: others.map(a => ({ p: a.tag || '·', role: a.title, agentId: a.id })),
       shirt: '#8b8fa8', w: 12 + Math.max(2, others.length) * SEAT });
     // lounge: one sofa per 6 resting people (stacked in 2 tiers, widening sideways past 12 people)
@@ -527,8 +536,11 @@
     const fresh = !e;
     if (!e) { e = { key: a.id, id: a.id, x: G.entrance.x, y: G.entrance.y, path: [] }; G.ents.set(a.id, e); }
     Object.assign(e, { name: a.tag || a.title, look: look(G, a, seat), where: pose, seat, agent: a, home: goal, homePose: pose, act: goal.act || null });
+    // `instant` is a new layout of the rooms (the desks moved): someone who was already here is put at the new place at once, unless they are on the way somewhere, who walk on
+    // to the new goal from where they are. Someone who has just come in always starts at the entrance and walks in; only the first picture (or the first after a server restart) has everybody in place
+    const snap = fresh ? G.lastIdx === null : instant && !e.path.length;
     if (e.visit && Date.now() < e.visit.until) { e.where = 'walk'; setGoal(G, e, e.visit, false); }
-    else { e.visit = null; setGoal(G, e, goal, instant || (fresh && G.lastIdx === null)); }
+    else { e.visit = null; setGoal(G, e, goal, snap); }
     keep.add(a.id);
   }
 
@@ -684,8 +696,8 @@
         const tp = b.topic, bx = b.x + Math.round((b.w - 88) / 2);   // (t is the translation function: do not shadow it here)
         const m = tp ? (tp.title || '').match(/^(T\d+)\s+(.*)$/) : null;
         const title = tp ? (m ? `<b>${esc(m[1])}</b> ${esc(m[2])}` : esc(tp.title)) : `<b>${esc(t('office.board.other'))}</b>`;
-        const stage = tp ? stageText(tp) : t('office.board.working', { count: b.seats.length });
-        fitStage(add(`${title}<br><span class="st">${esc(stage)}</span>`, bx + 4, b.y + 7, 'ag-board', 88 - 10 - Math.max(2, ...(tp ? tp.rounds : [2])) * 6, null, tp ? tp.title : ''));
+        const stage = tp ? stageText(tp, S) : t('office.board.working', { count: b.seats.length });
+        fitStage(add(`${title}<br><span class="st">${esc(stage)}</span>`, bx + 4, b.y + 7, 'ag-board', 88 - 10 - (tp ? roundKeys(tp).length : 2) * 6, null, tp ? tp.title : ''));
         b.seats.forEach(st => {
           const a = st.agentId && S.agents.find(x => x.id === st.agentId);
           // The seat letter (A·B·C, astra1) goes on the nameplate on the front of the desk; the first line of the tag is status · model (opus5.5, sol6.1), the next line (at most two lines) is the role.
@@ -746,13 +758,27 @@
       if (Math.abs(l - t.l) > 0.01 || Math.abs(tp - t.t) > 0.01) { t.el.style.left = l + 'px'; t.el.style.top = tp + 'px'; t.l = l; t.t = tp; }
     }
   }
-  function stageText(tp) {   // (tp, not t: t is the translation function)
+  // A topic with no round folders (a room, a flat review whose cells carry no round) has one result per seat and no next round to wait for; board.js keeps its own copy of these two.
+  const noRounds = tp => !!tp.room || tp.kind === 'flat';
+  const roundKeys = tp => tp.room === 'members' ? [] : tp.kind === 'flat' ? [null] : tp.room ? [1] : Array.from({ length: Math.max(2, ...tp.rounds) }, (_, i) => i + 1);
+  function stageText(tp, S) {   // (tp, not t: t is the translation function)
     const cells = tp.rows.flatMap(r => r.cells);
+    const working = tp.rows.some(r => r.agents.some(id => { const a = S.agents.find(x => x.id === id); return a && RUN(a.status); }));
     if (tp.final && tp.final.exists) return t('office.board.final');
+    if (tp.room === 'members') return working ? t('office.board.members', { count: tp.rows.length }) : t('office.board.membersEnded');
     if (!cells.some(c => c.agent) && !cells.some(c => c.state === 'done')) return tp.deps ? t('office.board.after', { deps: tp.deps }) : t('office.board.pending');
+    if (noRounds(tp)) {                                 // submitted, still being written, or stopped; complete once every seat is in and nobody works
+      const rc = tp.rows.map(row => row.cells[0]).filter(Boolean);
+      const done = rc.filter(c => c.state === 'done').length;
+      if (rc.some(c => ['writing', 'draft', 'paused', 'unknown'].includes(c.state)) || (done && done < rc.length)) return t('office.board.room', { done, total: rc.length });
+      return !done ? t('office.board.pending') : working ? t('office.board.roomDone', { total: rc.length }) : t('office.board.complete');
+    }
     for (const r of tp.rounds) {
       const rc = tp.rows.map(row => row.cells.find(c => c.round === r)).filter(Boolean);
-      if (rc.some(c => ['writing', 'draft', 'paused', 'unknown'].includes(c.state))) return t('office.board.round', { round: r, done: rc.filter(c => c.state === 'done').length, total: rc.length });
+      if (rc.some(c => ['writing', 'draft', 'paused', 'unknown'].includes(c.state))) {
+        const done = rc.filter(c => c.state === 'done').length;
+        return t('office.board.round', { round: r, done, total: rc.length });
+      }
     }
     const last = Math.max(0, ...tp.rounds.filter(r => tp.rows.some(row => row.cells.find(c => c.round === r && c.state === 'done'))));
     return last ? t('office.board.done', { round: last }) : t('office.board.pending');
@@ -903,10 +929,10 @@
     G.blocks.forEach(b => {
       if (b.type !== 'zone' || !b.topic) return;
       const t = b.topic, bx = b.x + Math.round((b.w - 88) / 2) + 84 - 3;
-      const rounds = Math.max(2, ...t.rounds);
+      const keys = roundKeys(t), rounds = keys.length;      // a room has one round (or none: participants only), a flat review one square, a debate at least two squares
       t.rows.forEach((row, i) => {
         for (let r = 1; r <= rounds; r++) {
-          const c = row.cells.find(c => c.round === r), st = c ? c.state : 'waiting';
+          const c = row.cells.find(c => c.round === keys[r - 1]), st = c ? c.state : 'waiting';
           const ca = c && (st === 'draft' || st === 'writing') && c.agent && G.state.agents.find(x => x.id === c.agent);       // the agent behind the cell is stopped or not known: the cell does not blink
           const held = !!ca && (ca.status === 'interrupted' || ca.status === 'unknown');
           const col = st === 'done' ? C.ok : st === 'draft' || st === 'writing' ? (held ? C.amber : f % 10 < 6 ? C.work : '#9ccaff') : st === 'missing' ? C.bad : st === 'paused' || st === 'unknown' ? C.amber : '#c3c6d6';

@@ -89,7 +89,8 @@ function diagHtml(kind, d) {
     missing: () => `<h2>${t('diag.missing.title')}</h2><p>${t(d.id ? 'diag.missing.body.id' : 'diag.missing.body', { id: dgCode(d.id) })} ${d.sess && d.sess.default ? `<a href="${I18N.link('?')}">${t('diag.missing.openDefault')}</a>` : ''}</p>` + list,
     down: () => (d.timeout ? `<h2>${t('diag.timeout.title')}</h2><p>${t('diag.timeout.body', { sec: SESSIONS_TIMEOUT_MS / 1000 })}</p><p>` : `<h2>${t('diag.down.title')}</h2><p>`) +
       t(location.host ? 'diag.down.body.host' : 'diag.down.body', { host: dgCode(location.host), cmd: dgCode('python3 server.py') }) + '</p>',
-    http: () => `<h2>${t('diag.http.title', { status: esc(d.status) })}</h2>` + (d.detail ? `<p class="dg-detail">${esc(d.status === 403 ? bodyLine(d.detail) : d.detail)}</p>`    // the server's text says how to fix it (403: --allow-host)
+    http: () => `<h2>${t('diag.http.title', { status: esc(d.status) })}</h2>` + (d.status === 401 ? `<p>${t('diag.http.token401')}</p>`     // the server wants its access token: the page words the fix itself
+      : d.detail ? `<p class="dg-detail">${esc(d.status === 403 ? bodyLine(d.detail) : d.detail)}</p>`    // the server's text says how to fix it (403: --allow-host)
       : d.status === 403 ? `<p>${t('diag.http.host403', { flag: dgCode('--allow-host <' + t('diag.dir.host') + '>') })}</p>` : ''),
   }[kind];
   return head() + `<p class="dg-foot">${t('diag.foot.recheck', { time: '<span class="dg-time"></span>' })}</p>`;

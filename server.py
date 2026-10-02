@@ -9,8 +9,8 @@ It writes to no transcript file.
     python3 server.py                      # the most recent session that launched subagents (else the most recent plain conversation)
     python3 server.py --session <id>       # pick a session
     python3 server.py --port 8790 --host 127.0.0.1
+    python3 server.py --host 0.0.0.0       # reachable from other devices: a random access token is made and printed (--token to fix it, --no-auth to switch the check off)
     python3 server.py --claude-config-dir ~/.claude --codex-home ~/.codex     # transcript folders (default: the standard environment variables, else ~/.claude and ~/.codex)
-    python3 server.py --claude-usage-api   # query Claude usage through the account API (off by default: no credential file is read and no outside call is made)
     python3 server.py --lang ko            # language of the terminal output and --help (default auto: AGENT_BULLPEN_LANG → LC_ALL → LC_MESSAGES → LANG → en)
 """
 
@@ -31,6 +31,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import board
+from board import access
 
 
 def scan_path_flags(argv):
@@ -65,12 +66,12 @@ def scan_flag(argv, flag):
 if __name__ == '__main__':      # only when run directly: this must be decided before the other board modules copy the paths by name (tests and the harness import the module, so they are not affected)
     board.PATH_FLAGS.update(scan_path_flags(sys.argv[1:]))
 
-# Used directly here, among others: REG, scan_sessions, session_projects, default_session, sources, LINKS, CL_USAGE, plan_status, SID_RE, short_path, trunc,
+# Used directly here, among others: REG, scan_sessions, session_projects, default_session, sources, LINKS, plan_status, SID_RE, short_path, trunc,
 # views, i18n, procs, the file guards (FILE_MAX, open_safe, open_nofollow, Denied) and the path settings (CLAUDE_HOME, CODEX_HOME, PATH_FROM, LINK_CACHE).
 # The rest re-exports names that the harness (tools/regress) and the tests (tests) use as `server.<name>`. They are listed one by one (no `import *`).
 from board.util import (  # noqa: F401
     BOOT, CLAUDE_HOME, CLAUDE_JSON, CODEX_HOME, CODEX_NAMES, CODEX_SESSIONS, DENY_FILES, FILE_MAX, HOME, PATH_FROM, PROJECTS, SID_RE, STALL_SEC,
-    TOOL_STALL_SEC, Denied, Tail, as_text, claude_alive_ids, denied_file, hidden_or_secret, load_json_line, open_nofollow, open_safe, parse_ts,
+    TOOL_STALL_SEC, Denied, Tail, as_text, denied_file, hidden_or_secret, load_json_line, open_nofollow, open_safe, parse_ts,
     short_path, stat_plain, stat_regular, strip_reminders, trunc,
 )
 from board.tokens import TokenMeter, call_cost, claude_model_short, cx_model_short  # noqa: F401
@@ -78,17 +79,17 @@ from board.codex_parse import (  # noqa: F401
     CX_LINE_MAX, CX_WINDOW, codex_call, codex_say_text, codex_tool, codex_user_text, cx_decode, cx_procs,
 )
 from board.codex_index import CODEX, CodexIndex  # noqa: F401
-from board.lineage import LINK_CACHE  # noqa: F401
+from board.lineage import LINK_CACHE, claude_alive_ids  # noqa: F401
 from board.link import (  # noqa: F401
     CLAUDE_LAUNCH_RE, CLI_WINDOW, LAUNCH_RE, LINKS, LinkIndex, cx_launches, cx_link, cx_parse_call, cx_prompt_rx,
     shell_code,
 )
-from board.agents import Agent, CodexAgent, model_numbers, pending_or_stall, tool_brief, tool_category  # noqa: F401
+from board.agents import Agent, CodexAgent, model_numbers, tool_brief, tool_category  # noqa: F401
 from board.debates import REL_REPORT_RE, REPORT_RE, brief_table, read_head, write_intent, writer_table  # noqa: F401
 from board.sessions import STATUS_LABEL, CodexLinker, CodexSession, Session  # noqa: F401
 from board.catalog import CX_LIST_DAYS, REG, Registry, default_session, list_sessions, scan_sessions, session_projects, sources  # noqa: F401
 from board import procs  # noqa: F401
-from board.plans import CL_USAGE, USAGE_EVERY, USAGE_URL, _usage_request, plan_status  # noqa: F401
+from board.plans import plan_status  # noqa: F401
 from board import diag, i18n, views
 from board import sessions as board_sessions
 
@@ -145,17 +146,29 @@ def host_allowed(header):
     return bool(name) and (name in ALLOWED_HOSTS or any(name.endswith(sfx) for sfx in ALLOWED_SUFFIXES))
 
 
+def is_ip(name):
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
+
+
 def host_hint(header):
     """403 body: one line of how to fix it in English, then the same in Korean. Not the terminal language: the reader is a browser or curl, whose
-    language is unknown. The name is echoed only when it is made of safe characters."""
+    language is unknown. The name is echoed only when it is made of safe characters. A suffix is offered only for a name that has one, never for an IP address."""
     name = host_name(header)
     safe = bool(re.fullmatch(r'[a-z0-9.:-]+', name))
     labels = name.split('.')
     lines = []
     for lang in ('en', 'ko'):
         t = i18n.translator(lang)
-        sfx = '.' + '.'.join(labels[1:]) if safe and len(labels) > 2 else t('cli.host.suffix_unknown')
-        line = t('cli.host.denied', name=name if safe else t('cli.host.name_unknown'), suffix=sfx)
+        shown = name if safe else t('cli.host.name_unknown')
+        if is_ip(name):
+            line = t('cli.host.denied_ip', name=shown)
+        else:
+            sfx = '.' + '.'.join(labels[1:]) if safe and len(labels) > 2 else t('cli.host.suffix_unknown')
+            line = t('cli.host.denied', name=shown, suffix=sfx)
         if line not in lines:                          # no Korean dictionary: the English line alone
             lines.append(line)
     return '\n'.join(lines) + '\n'
@@ -163,7 +176,9 @@ def host_hint(header):
 
 class BoardServer(ThreadingHTTPServer):
     """http.server's HTTPServer.server_bind sets server_name with socket.getfqdn(host). When a non-loopback address (a VPN address) is opened, that
-    does a reverse DNS (PTR) lookup through the system resolver. This server does not use server_name, so it skips the lookup and keeps the address as it is."""
+    does a reverse DNS (PTR) lookup through the system resolver. This server does not use server_name, so it skips the lookup and keeps the address as it is.
+    `gate` is the access.Gate this listener checks every request against (None: no token check here; main sets it)."""
+    gate = None
 
     def server_bind(self):
         socketserver.TCPServer.server_bind(self)
@@ -171,8 +186,16 @@ class BoardServer(ThreadingHTTPServer):
 
 
 class HTTPServer6(BoardServer):
-    """For `--host ::1` (IPv6 loopback). The default server class opens IPv4 (AF_INET) only."""
+    """For `--host ::1` and `--host ::`. The default server class opens IPv4 (AF_INET) only."""
     address_family = socket.AF_INET6
+
+    def server_bind(self):
+        if self.server_address[0] == '::':             # the wildcard answers IPv4 clients too, whatever the system default is
+            try:
+                self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+            except (OSError, AttributeError):
+                pass
+        super().server_bind()
 
 
 def _nums(q, spec):
@@ -188,11 +211,13 @@ def _nums(q, spec):
 
 
 class Handler(BaseHTTPRequestHandler):
+    server = None            # BaseRequestHandler.__init__ sets the real one; a Handler made without it has no token check
+
     def log_message(self, fmt, *args):
         if os.environ.get('AGENT_BULLPEN_LOG'):
-            print('%s %s' % (self.address_string(), fmt % args), flush=True)
+            print(access.redact('%s %s' % (self.address_string(), fmt % args)), flush=True)      # a first visit carries the token in its request line
 
-    def _send(self, code, body, ctype='application/json; charset=utf-8', cache='no-store'):
+    def _send(self, code, body, ctype='application/json; charset=utf-8', cache='no-store', headers=()):
         data = body if isinstance(body, bytes) else json.dumps(body, ensure_ascii=False).encode()
         self.send_response(code)
         if len(data) > 2048 and not ctype.startswith('font/') and 'gzip' in (self.headers.get('Accept-Encoding') or ''):
@@ -201,6 +226,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header('Content-Type', ctype)
         self.send_header('Cache-Control', cache)
         self.send_header('Content-Length', str(len(data)))
+        for name, value in headers:
+            self.send_header(name, value)
         # The headers and the body leave in ONE write. Two writes (end_headers() flushes the headers alone) make a body over about 64 KB wait ~200 ms for the
         # client's delayed ACK of the small first segment; one write does not (219 -> 15 ms). So end_headers() is done by hand, without its flush.
         if self.request_version == 'HTTP/0.9':
@@ -234,10 +261,51 @@ class Handler(BaseHTTPRequestHandler):
             return self._fail(404, 'not found', 'not_found')
         return self._send(200, entry['data'])
 
+    def _unauthorized(self, path):
+        """401 with a short note: a page gets it in English and Korean, an API path the same JSON error as the other failures. It repeats nothing from the request."""
+        headers = [('WWW-Authenticate', 'Bearer realm="agent-bullpen"')]
+        if path.startswith('/api/'):
+            return self._send(401, {'error': 'unauthorized', 'error_code': 'unauthorized'}, headers=headers)
+        return self._send(401, access.denied_page(), 'text/html; charset=utf-8', headers=headers)
+
+    def _admit(self, u):
+        """True when the request may be answered. With a token check on this listener: a valid cookie or `Authorization: Bearer`, or the token in the address (the cookie
+        is set and the browser is sent to the same address without it). Without: only the Host header is checked (defence against DNS rebinding)."""
+        gate = getattr(self.server, 'gate', None)
+        if gate is None:
+            if host_allowed(self.headers.get('Host')):
+                return True
+            self._send(403, host_hint(self.headers.get('Host')).encode(), 'text/plain; charset=utf-8')
+            return False
+        port = self.server.server_address[1]
+        verdict, rest = gate.judge(self.headers.get('Cookie'), self.headers.get('Authorization'), u.query, port)
+        if verdict == access.LOGIN:
+            self._send(302, b'', 'text/plain; charset=utf-8', headers=[('Location', access.clean_location(u.path, rest)), ('Set-Cookie', gate.cookie_header(port))])
+        elif verdict == access.DENY:
+            self._unauthorized(u.path)
+        return verdict == access.OK
+
     def do_GET(self):
-        if not host_allowed(self.headers.get('Host')):
-            return self._send(403, host_hint(self.headers.get('Host')).encode(), 'text/plain; charset=utf-8')
-        u = urlparse(self.path)
+        """Answers one GET. Anything the answer code does not handle is a 500 JSON (the connection is not dropped); a client that has gone away is left to the server."""
+        try:
+            self._get()
+        except ConnectionError:
+            raise
+        except Exception as e:   # noqa: BLE001 — a request must be answered whatever fails inside it
+            print('request error', type(e).__name__, urlparse(self.path).path[:80], flush=True)
+            self._headers_buffer = []                  # a half-built answer is dropped
+            try:
+                self._fail(500, 'internal error', 'internal_error')
+            except OSError:
+                pass
+
+    def _get(self):
+        try:
+            u = urlparse(self.path)
+        except ValueError:
+            return self._send(400, b'bad request\n', 'text/plain; charset=utf-8')
+        if not self._admit(u):
+            return
         q = {k: v[0] for k, v in parse_qs(u.query).items()}
         page = STATIC_FILES.get(u.path)
         if page:
@@ -261,7 +329,12 @@ class Handler(BaseHTTPRequestHandler):
             dflt = FIXED_DEFAULT or default_session(projs, ss) or DEFAULT_SESSION
             return self._send(200, {'default': dflt, 'sessions': ss, 'projects': projs, 'sources': sources(counts)})
         sid = q.get('session') or DEFAULT_SESSION
-        s = REG.get(sid) if sid else None
+        try:
+            s = REG.get(sid) if sid and u.path.startswith('/api/') else None
+        except PermissionError:
+            return self._fail(403, 'unreadable', 'unreadable', session=sid)
+        except OSError:
+            return self._fail(404, 'unreadable', 'unreadable', session=sid)
         if u.path.startswith('/api/') and not s:
             return self._fail(404, 'session not found', 'session_not_found', session=sid)
         try:                                           # numeric arguments: a bad one is a 400 (it used to drop the connection with no response)
@@ -322,8 +395,8 @@ class Handler(BaseHTTPRequestHandler):
             real = s.allowed_file(path) if path else None
             if not real:
                 return self._fail(403, 'not allowed', 'not_allowed')
-            try:                                       # open the real path that was checked: the deny decision is made afresh right before opening, and nothing is opened if any component has turned into a link
-                with open_safe(real) as f:
+            try:                                       # open the path that was approved, as it is: the deny decision is made afresh right before opening, and nothing is opened if any component has turned into a link
+                with open_safe(real, approved=True) as f:
                     st = os.fstat(f.fileno())
                     if st.st_size > FILE_MAX:
                         return self._fail(413, 'too large', 'too_large', limit=FILE_MAX)
@@ -337,22 +410,29 @@ class Handler(BaseHTTPRequestHandler):
         return self._fail(404, 'not found', 'not_found')
 
 
-CGNAT_NET = ipaddress.ip_network('100.64.0.0/10')                  # the range VPNs use (Tailscale, NetBird, etc.)
-TAILSCALE6_NET = ipaddress.ip_network('fd7a:115c:a1e0::/48')        # Tailscale IPv6
-HOST_RANGES = '127.0.0.0/8, ::1, localhost, 100.64.0.0/10, fd7a:115c:a1e0::/48'
+HOST_NAME_RE = re.compile(r'[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?')
 
 
 def _host_arg(h):
-    """--host: only loopback (127.0.0.0/8, ::1, localhost), the VPN range (100.64.0.0/10) and Tailscale IPv6 (fd7a:115c:a1e0::/48). Anything else refuses to start."""
+    """--host: where to listen. Any IP address (127.0.0.1, 0.0.0.0, ::, a LAN or VPN address; [::1] too) or a host name; not empty, not with a port or a path.
+    Whether that address needs a token is main's business (access.is_loopback)."""
+    name = h.strip()
+    if name.startswith('[') and name.endswith(']'):
+        name = name[1:-1]
     try:
-        ip = ipaddress.ip_address(h)
+        ipaddress.ip_address(name)
+        return name
     except ValueError:
-        if h == 'localhost':
-            return h
-        raise argparse.ArgumentTypeError(cli_t('cli.arg.host', value=repr(h), ranges=HOST_RANGES))
-    if ip.is_loopback or (ip.version == 4 and ip in CGNAT_NET) or (ip.version == 6 and ip in TAILSCALE6_NET):
-        return h
-    raise argparse.ArgumentTypeError(cli_t('cli.arg.host', value=repr(h), ranges=HOST_RANGES))
+        pass
+    if HOST_NAME_RE.fullmatch(name) and '..' not in name:
+        return name
+    raise argparse.ArgumentTypeError(cli_t('cli.arg.host', value=repr(h)))
+
+
+def _token_arg(v):
+    if not access.token_ok(v):
+        raise argparse.ArgumentTypeError(cli_t('cli.arg.token', min=access.TOKEN_MIN))
+    return v
 
 
 def _allow_host_arg(v):
@@ -380,18 +460,6 @@ def _dir_arg(v):
     return v
 
 
-def _is_loopback(name):
-    """Is a Host or --allow-host name a loopback: localhost, 127.0.0.0/8, ::1."""
-    try:
-        return ipaddress.ip_address(name.strip('[]')).is_loopback
-    except ValueError:
-        return name == 'localhost'
-
-
-def _shown(host):
-    return 'localhost' if host == '127.0.0.1' else '[%s]' % host if ':' in host else host
-
-
 def check_path_flags(ap, args):
     """Checks that the path flags took effect in board's paths. Run directly, server.py applies them before the import, but a harness that calls main()
     after `import server` skips that step, so the flags would be accepted and do nothing: a mismatch ends with an error."""
@@ -403,7 +471,7 @@ def check_path_flags(ap, args):
 
 def bind_servers(hosts, port):
     """Creates (binds) a server for each address to open. If any cannot be opened, it closes the ones already opened, prints a one-line notice (address, port, a --port alternative) and ends with exit code 1.
-    The scan, the credential read and the usage thread start after this, so nothing has been done yet at this point."""
+    The scan and the background threads start after this, so nothing has been done yet at this point."""
     servers = []
     for h in hosts:
         try:
@@ -411,8 +479,10 @@ def bind_servers(hosts, port):
         except OSError as e:
             for srv in servers:
                 srv.server_close()
-            addr = '%s:%d' % (_shown(h) if ':' in h else h, port)
-            if e.errno == errno.EADDRINUSE:
+            addr = '%s:%d' % ('[%s]' % h if ':' in h else h, port)
+            if isinstance(e, socket.gaierror):
+                why = cli_t('cli.bind.no_name')
+            elif e.errno == errno.EADDRINUSE:
                 why = cli_t('cli.bind.in_use', port=port, next=port + 1)
             elif e.errno == errno.EACCES:
                 why = cli_t('cli.bind.denied')
@@ -428,9 +498,9 @@ def bind_servers(hosts, port):
 FROM_LABEL = {'flag': {'claude': '--claude-config-dir', 'codex': '--codex-home'}, 'env': {'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME'}}
 
 
-def startup_lines(srcs, usage_api):
-    """The start output (the lines after the address): per Claude and Codex the folder read, session counts and where the folder came from, whether the
-    usage query is on, and the process detection method. The words come from the dictionary (cli.start.*), the layout of the columns stays here."""
+def startup_lines(srcs):
+    """The start output (the lines after the address): per Claude and Codex the folder read, session counts and where the folder came from, and the process
+    detection method. The words come from the dictionary (cli.start.*), the layout of the columns stays here."""
     out = []
     for s in srcs:
         cl = s['provider'] == 'claude'
@@ -440,8 +510,7 @@ def startup_lines(srcs, usage_api):
              cli_t('cli.start.codex_counts', days=CX_LIST_DAYS, sessions=s['sessions']))
         label = cli_t('cli.start.default') if s['from'] == 'default' else FROM_LABEL[s['from']][s['provider']]
         out.append('  %-13s %-28s %s  (%s)' % ('Claude Code' if cl else '◆ Codex', where, n, label))
-    usage = cli_t('cli.start.usage.on', sec=USAGE_EVERY) if usage_api else cli_t('cli.start.usage.off')
-    out.append(cli_t('cli.start.status', usage=usage, how=cli_t('cli.start.method.' + procs.method())))
+    out.append(cli_t('cli.start.status', how=cli_t('cli.start.method.' + procs.method())))
     return out
 
 
@@ -462,35 +531,59 @@ def main():
     global DEFAULT_SESSION, FIXED_DEFAULT
     set_cli_lang(i18n.cli_lang(scan_flag(sys.argv[1:], '--lang')))     # the language first: the help can be built in it before argparse ends at `--help --lang ko`
     ap = argparse.ArgumentParser(description=cli_t('cli.help.description'), formatter_class=argparse.RawDescriptionHelpFormatter, allow_abbrev=False)
+    ap.add_argument('--version', action='version', version='Agent Bullpen ' + board.__version__, help=_help('cli.help.version'))
     ap.add_argument('--session', type=_session_arg, help=_help('cli.help.session'))
     ap.add_argument('--host', action='append', type=_host_arg, help=_help('cli.help.host'))
     ap.add_argument('--port', type=int, default=8790)
+    ap.add_argument('--token', type=_token_arg, metavar='VALUE', help=_help('cli.help.token', min=access.TOKEN_MIN))
+    ap.add_argument('--no-auth', action='store_true', help=_help('cli.help.no_auth'))
     ap.add_argument('--allow-host', action='append', default=[], metavar='NAME', type=_allow_host_arg, help=_help('cli.help.allow_host'))
     ap.add_argument('--claude-config-dir', type=_dir_arg, metavar='DIR', help=_help('cli.help.claude_config_dir'))
     ap.add_argument('--codex-home', type=_dir_arg, metavar='DIR', help=_help('cli.help.codex_home'))
     ap.add_argument('--lang', default='auto', metavar='CODE', help=_help('cli.help.lang', langs=', '.join(l['code'] for l in i18n.languages())))
-    ap.add_argument('--claude-usage-api', action='store_true', help=_help('cli.help.claude_usage_api', sec=USAGE_EVERY))
+    ap.add_argument('--claude-usage-api', action='store_true', help=argparse.SUPPRESS)        # gone: still read so that it can end with a pointer to the status line command
     ap.add_argument('--no-link-cache', action='store_true', help=_help('cli.help.no_link_cache'))
     args = ap.parse_args()
     set_cli_lang(i18n.cli_lang(args.lang))
+    if args.claude_usage_api:
+        ap.error(cli_t('cli.arg.usage_api_removed'))
+    if args.no_auth and args.token:
+        ap.error(cli_t('cli.arg.no_auth_token'))
+    token = args.token or os.environ.get('AGENT_BULLPEN_TOKEN') or None
+    if token and not access.token_ok(token):
+        ap.error('AGENT_BULLPEN_TOKEN: ' + cli_t('cli.arg.token', min=access.TOKEN_MIN))
     for name, why in i18n.problems().items():                      # a dictionary that could not be registered is skipped: say why it is missing
         print(cli_t('cli.warn.dictionary', name=name, why=why), file=sys.stderr, flush=True)
     check_path_flags(ap, args)
     hosts = args.host or ['127.0.0.1']
+    guarded = [not args.no_auth and (bool(token) or not access.is_loopback(h)) for h in hosts]     # a token check on every address that is not loopback, and wherever a token was given
+    token = (token or access.new_token()) if any(guarded) else None
+    gate = access.Gate(token) if token else None
     ALLOWED_HOSTS.update(host_name(h) or norm_host(h.strip().strip('[]').lower().rstrip('.')) for h in hosts)
+    if any(access.is_wildcard(h) for h in hosts):                  # the addresses printed for a wildcard are this machine's own: without a token they must be let in, or the printed address would be refused
+        ALLOWED_HOSTS.update(access.local_addresses())
     ALLOWED_HOSTS.update(a for a in args.allow_host if not a.startswith('.'))
     ALLOWED_SUFFIXES.update(a for a in args.allow_host if a.startswith('.'))
     servers = bind_servers(hosts, args.port)                       # the ports are opened first; on a failure the program ends here
-    for h, srv in zip(hosts, servers):
-        print(cli_t('cli.start.url', url='http://%s:%d/' % (_shown(h), srv.server_address[1])), flush=True)
-    exposed = [('cli.warn.no_auth.hosts', [_shown(h) for h in hosts if not _is_loopback(h)]),
-               ('cli.warn.no_auth.allowed', [a for a in args.allow_host if not _is_loopback(a)])]
+    for srv, on in zip(servers, guarded):
+        srv.gate = gate if on else None
+    for h, srv, on in zip(hosts, servers, guarded):
+        port = srv.server_address[1]
+        if on:
+            print(cli_t('cli.start.auth'), flush=True)
+            for name in access.shown_addresses(h):
+                print('  http://%s:%d/?token=%s' % (name, port, token), flush=True)
+            print(cli_t('cli.start.auth_note'), flush=True)
+        else:
+            for name in access.shown_addresses(h):
+                print(cli_t('cli.start.url', url='http://%s:%d/' % (name, port)), flush=True)
+    open_hosts = [h for h, on in zip(hosts, guarded) if not on]
+    exposed = [('cli.warn.no_auth.hosts', [access.shown(h) for h in open_hosts if not access.is_loopback(h)]),
+               ('cli.warn.no_auth.allowed', [a for a in args.allow_host if open_hosts and not access.is_loopback(a)])]
     if any(names for _, names in exposed):
-        print(cli_t('cli.warn.no_auth', where=' · '.join(cli_t(key, names=', '.join(names)) for key, names in exposed if names)), file=sys.stderr, flush=True)
-    if args.claude_usage_api:
-        print(cli_t('cli.notice.usage_api', path=short_path(os.path.join(CLAUDE_HOME, '.credentials.json')), sec=USAGE_EVERY), file=sys.stderr, flush=True)
-        CL_USAGE.enabled = True
-        threading.Thread(target=CL_USAGE.loop, daemon=True).start()  # Claude account usage (once a minute); with the option off there is no thread either
+        bar = '!' * 72
+        print('%s\n%s\n%s\n%s' % (bar, cli_t('cli.warn.no_auth.title'), cli_t('cli.warn.no_auth', where=' · '.join(cli_t(key, names=', '.join(names)) for key, names in exposed if names)), bar),
+              file=sys.stderr, flush=True)
     board_sessions.WALK_ENABLED = True                              # the background walk for debate folders that no record names (every 60 s, off the request thread)
     board_sessions.LATER.arm()                                      # the second link pass and the walk wait for the first picture, or this many seconds
     if not args.no_link_cache:
@@ -500,13 +593,16 @@ def main():
         DEFAULT_SESSION = FIXED_DEFAULT = args.session
     LINKS.ready.wait(30)
     ss, counts = scan_sessions()
-    for line in startup_lines(sources(counts), args.claude_usage_api):
+    for line in startup_lines(sources(counts)):
         print(line, flush=True)
     if not args.session:
         DEFAULT_SESSION = default_session(session_projects(ss), ss)
     if DEFAULT_SESSION:
         t0 = time.time()
-        s = REG.get(DEFAULT_SESSION)
+        try:
+            s = REG.get(DEFAULT_SESSION)
+        except OSError:                                            # a record that cannot be opened: the page says so when it asks for it
+            s = None
         if s is None and args.session:
             for srv in servers:
                 srv.server_close()

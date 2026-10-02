@@ -1,0 +1,18 @@
+name: Idea
+description: Something the board could show or do better.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do not paste transcript text, paths, prompts or an access token: describe the situation in your own words.
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would help
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: How you work today (the situation it comes from)

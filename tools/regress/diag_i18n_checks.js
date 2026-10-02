@@ -41,7 +41,7 @@ for (const sources of SOURCES) {
   CASES.push(['missing', { sess: { sources, default: true } }]);
 }
 CASES.push(['empty', {}], ['missing', { id: 'abc' }]);
-CASES.push(['down', {}], ['down', { timeout: true }], ['http', { status: 403 }], ['http', { status: 403, detail: 'ERR-403 plain\nsecond' }], ['http', { status: 500 }], ['http', { status: 500, detail: '<i>boom</i>' }]);
+CASES.push(['down', {}], ['down', { timeout: true }], ['http', { status: 403 }], ['http', { status: 403, detail: 'ERR-403 plain\nsecond' }], ['http', { status: 401, detail: 'unauthorized' }], ['http', { status: 500 }], ['http', { status: 500, detail: '<i>boom</i>' }]);
 
 const HOSTS = ['127.0.0.1:8790', undefined, ''];
 let compared = 0;
@@ -53,7 +53,8 @@ for (const host of HOSTS) {
     compared++;
     // a 403 body with a line per language (English first, then Korean): the reference showed both lines, the screen now shows the line of its own language (ko: the last, en: the first)
     const lines = kind === 'http' && d.status === 403 && /\n/.test(d.detail || '') ? d.detail.split('\n') : null;
-    if (haveRef) { const want = call(base, [kind, lines ? Object.assign({}, d, { detail: lines[lines.length - 1] }) : d]); check('ko identical to the reference: ' + name, got === want, '\n   ref ' + want + '\n   new ' + got); }
+    // a 401 (the access token) came after the reference statics: it has no Korean text there to match
+    if (haveRef && !(kind === 'http' && d.status === 401)) { const want = call(base, [kind, lines ? Object.assign({}, d, { detail: lines[lines.length - 1] }) : d]); check('ko identical to the reference: ' + name, got === want, '\n   ref ' + want + '\n   new ' + got); }
     if (lines) { check('403 with a line per language: ko shows only the last line: ' + name, got.includes(lines[1]) && !got.includes(lines[0]), got); check('403 with a line per language: en shows only the first line: ' + name, eng.includes(lines[0]) && !eng.includes(lines[1]), eng); }
     check('ko has no [key]: ' + name, !/\[[a-z]+\.[A-Za-z.]+\]/.test(got), got);
     check('en has no Hangul: ' + name, !HANGUL.test(eng), eng);

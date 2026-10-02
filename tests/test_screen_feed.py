@@ -113,7 +113,7 @@ class LimitAlert(unittest.TestCase):
         s = server.Session('/nonexistent/aaaaaaaa-0000-4000-8000-000000000000.jsonl')
         s._verdicts = {}
         s._orch_verdict = RS.OrchVerdict('limit_wait', resets, auto)
-        s.orch['turn_end_ts'] = s.orch['last_ts'] = T0
+        s.orch['last_ts'] = T0
         (x,) = [a for a in views.alerts(s, {}, T0 + 60) if a['id'].startswith('limit:')]
         return x
 

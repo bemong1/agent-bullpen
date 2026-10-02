@@ -210,17 +210,21 @@ class Item4NumericArgs(unittest.TestCase):
 
 
 class Item5HostArg(unittest.TestCase):
-    """--host accepts only loopback, the VPN range (100.64.0.0/10) and Tailscale IPv6 (fd7a:115c:a1e0::/48). It is tested through the function, without opening a socket."""
+    """--host takes any IP address (loopback, wildcard, LAN, VPN, IPv6) or a host name, and nothing else. It is tested through the function, without opening a socket."""
 
     def test_allowed(self):
-        for h in ('127.0.0.1', '127.5.5.5', '::1', 'localhost', '100.100.0.7', '100.64.0.0', '100.127.255.255',
-                  'fd7a:115c:a1e0::1', 'fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff'):
+        for h in ('127.0.0.1', '127.5.5.5', '::1', 'localhost', '100.100.0.7', '100.64.0.0', '100.127.255.255', 'fd7a:115c:a1e0::1',
+                  '0.0.0.0', '::', '192.168.0.5', '10.0.0.1', '192.0.2.28', '2001:db8::1', 'fe80::1', 'my.box', 'box.example.net', 'host-1', '::ffff:10.0.0.1'):
             self.assertEqual(server._host_arg(h), h)
 
+    def test_brackets_and_spaces_are_taken_off(self):
+        self.assertEqual(server._host_arg('[::]'), '::')
+        self.assertEqual(server._host_arg(' [fd7a:115c:a1e0::1] '), 'fd7a:115c:a1e0::1')
+        self.assertEqual(server._host_arg(' 0.0.0.0 '), '0.0.0.0')
+
     def test_refused(self):
-        for h in ('0.0.0.0', '10.0.0.1', '192.168.0.5', '100.63.255.255', '100.128.0.0', '::', 'example.com', '', '*', '::ffff:10.0.0.1',
-                  'fd7a:115c:a1e1::1', 'fd7a:115c:a1df::1', 'fd00::1', 'fe80::1', '2001:db8::1'):
-            with self.assertRaises(argparse.ArgumentTypeError, msg=h):
+        for h in ('', ' ', '*', '0.0.0.0:8790', 'host:80', 'http://host', 'host/path', 'a b', '-bad', 'bad-', 'a..b', '[::1', '::1]', 'ho$t'):
+            with self.assertRaises(argparse.ArgumentTypeError, msg=repr(h)):
                 server._host_arg(h)
 
     def test_help_has_no_fixed_vpn_name(self):
@@ -260,27 +264,6 @@ class Item6HostHeader(unittest.TestCase):
         self.assertEqual(call('/', host='evil.test')[0], 403)
         self.assertEqual(call('/api/state' + self.S, host='localhost:5555')[0], 200)
         self.assertEqual(call('/api/state' + self.S, host=None)[0], 403)
-
-
-class Item7UsageToken(unittest.TestCase):
-    """Authorization goes in a header that is not carried across a redirect. Only a fake token is used (no credential file is read and no API is called)."""
-
-    def test_unredirected(self):
-        r = server._usage_request('FAKE-TOKEN')
-        self.assertNotIn('Authorization', r.headers)
-        self.assertEqual(r.get_header('Authorization'), 'Bearer FAKE-TOKEN')
-        self.assertEqual(r.get_header('Anthropic-beta'), 'oauth-2025-04-20')
-        self.assertEqual(r.get_header('User-agent'), 'agent-bullpen')
-        self.assertEqual(r.full_url, server.USAGE_URL)
-
-    def test_redirect_drops_token(self):
-        import urllib.request
-        r = server._usage_request('FAKE-TOKEN')
-        new = urllib.request.HTTPRedirectHandler().redirect_request(
-            r, None, 302, 'Found', {}, 'https://other.example/x')
-        self.assertIsNotNone(new)
-        self.assertIsNone(new.get_header('Authorization'))
-        self.assertNotIn('Authorization', {k.title() for k in new.headers})
 
 
 class Item3ReportRe(unittest.TestCase):
@@ -449,8 +432,12 @@ class Item8Registry(unittest.TestCase):
                 return Item8Registry.SID in reg.sessions
         ready = threading.Event()
         ready.set()
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        record = os.path.join(tmp.name, '%s.jsonl' % self.SID)           # a record that is there: only a regular file is opened as a session
+        open(record, 'w').close()
         with patched(Session=Boom), mock.patch.object(server.LINKS, 'ready', ready), \
-                mock.patch('glob.glob', lambda pat: ['/x/%s.jsonl' % self.SID]):
+                mock.patch('glob.glob', lambda pat: [record]):
             with self.assertRaises(OSError):
                 reg.get(self.SID)
         self.assertEqual(order, [('poll', False)])                   # not yet registered while it is being read
@@ -787,7 +774,7 @@ class Item13UserSay(unittest.TestCase):
     def sess(self):
         s = server.Session.__new__(server.Session)
         s.feed, s.user_seen, s.pending_q, s.first_ts, s.cwd, s.slug, s.title, s.codex = [], {}, {}, None, '', '', '', None
-        s.orch = {'state': 'idle', 'last_action': '', 'last_action_ts': None, 'last_say': '', 'last_say_ts': None, 'turn_end_ts': None,
+        s.orch = {'state': 'idle', 'last_action': '', 'last_action_ts': None, 'last_say': '', 'last_say_ts': None,
                   'last_ts': None, 'pending_bg': 0, 'model': '', 'effort': ''}
         s.orch_tokens = server.TokenMeter()
         return s

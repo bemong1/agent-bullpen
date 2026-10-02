@@ -25,6 +25,8 @@ import unittest
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, 'tools'))
 sys.path.insert(0, REPO)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import compat  # noqa: E402,F401  (pins HOME and the cache to a throwaway folder before board is imported)
 
 import bench  # noqa: E402
 

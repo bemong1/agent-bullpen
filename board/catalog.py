@@ -5,10 +5,12 @@ import glob
 import json
 import os
 import re
+import stat
 import threading
 import time
 
-from .util import CLAUDE_HOME, CODEX_HOME, CODEX_SESSIONS, PATH_FROM, PROJECTS, SID_RE, claude_alive_ids, short_path
+from .lineage import claude_alive_ids
+from .util import CLAUDE_HOME, CODEX_HOME, CODEX_SESSIONS, PATH_FROM, PROJECTS, SID_RE, parse_records, parse_ts, short_path
 from .codex_index import CODEX
 from .link import LINKS
 from .sessions import LATER, MAX_NEST, CodexSession, Session
@@ -21,6 +23,9 @@ SOLO_LIST_MAX = 30         # Claude sessions without agents (solo) get their own
 
 
 _CL_META = {}      # Claude session record path -> (size, {cwd, title})
+_CL_LAST = {}      # Claude record path -> (size, time of its last user or assistant line, or None)
+TALK_TAIL = (512 << 10, 4 << 20)       # how much of the end of a record is looked through for the last talk: the small window first, the large one only if it found none
+_TALK_RE = re.compile(rb'"type"\s*:\s*"(?:user|assistant)"')
 
 
 def claude_meta(path):
@@ -48,6 +53,43 @@ def claude_meta(path):
     return m
 
 
+def _talk_time(lines):
+    """The time of the last user or assistant record among the lines of a record (read from the end), or None."""
+    for raw in reversed(lines):
+        if not _TALK_RE.search(raw):
+            continue
+        for rec in reversed(parse_records(raw)[0]):
+            stamp = rec.get('timestamp') if isinstance(rec, dict) and rec.get('type') in ('user', 'assistant') else None
+            if isinstance(stamp, str) and parse_ts(stamp):
+                return parse_ts(stamp)
+    return None
+
+
+def last_talk(path):
+    """The time of the last user or assistant line of a record (what the conversation did last), or None when the end of the file has none. A live Claude Code also appends
+    lines with no talk in them (bookkeeping, a ledger), which move the file time but are not activity of the session. Re-read only when the size changes."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return None
+    c = _CL_LAST.get(path)
+    if c and c[0] == size:
+        return c[1]
+    found = None
+    try:
+        with open(path, 'rb') as f:
+            for span in TALK_TAIL:
+                f.seek(max(0, size - span))
+                lines = f.read().split(b'\n')
+                found = _talk_time(lines[1:] if size > span else lines)       # the first line of a window that starts inside the file is cut
+                if found or size <= span:
+                    break
+    except (OSError, ValueError):
+        return None
+    _CL_LAST[path] = (size, found)
+    return found
+
+
 def cli_totals():
     """{session id: how many `claude -p` children its page shows}: the children it launched (itself or through a sub-agent) and the ones those launched in turn, down to
     MAX_NEST further levels (the page of the top orchestrator shows a grandchild under the child that launched it, and counts it)."""
@@ -66,10 +108,79 @@ def cli_totals():
     return out
 
 
+def _regular(path):
+    """os.stat of a regular file that can be read, else None (a link that leads nowhere or loops, a folder, a file that went away or cannot be read)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st if stat.S_ISREG(st.st_mode) and os.access(path, os.R_OK) else None
+
+
+def _is_file(path):
+    """A regular file (a link that leads to one counts); a folder with a record's name, a FIFO or a link that leads nowhere does not."""
+    try:
+        return stat.S_ISREG(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
+def _session_item(p, sid, cli, now):
+    """The list item of one Claude record, or None when the record is not a session to list. `mtime` and `agents_mtime` are the file times here (the upper bound of the
+    time of the last talk); refine() puts the time of the talk in their place."""
+    st = _regular(p)
+    if st is None:
+        return None
+    sub = os.path.join(p[:-6], 'subagents')
+    n = len(glob.glob(os.path.join(sub, 'agent-*.meta.json')))
+    subs = [(f, t.st_mtime) for f in glob.glob(os.path.join(sub, 'agent-*.jsonl')) for t in [_regular(f)] if t]
+    agents = n + LINKS.count(sid) + cli.get(sid, 0)
+    if not agents and not st.st_size:
+        return None                  # an empty record file (a session with no conversation) is not counted as solo
+    newest = max(subs, key=lambda x: x[1], default=None)
+    item = {'id': sid, 'project': os.path.basename(os.path.dirname(p)), 'mtime': st.st_mtime,
+            'agents': agents, 'provider': 'claude', 'agents_mtime': newest[1] if newest else 0,
+            'active': sum(1 for _, t in subs if now - t < 120), '_path': p, '_newest': newest[0] if newest else None}
+    if not agents:
+        item['solo'] = True
+    return item
+
+
+def _refine(item, now):
+    """Replaces the file times of an item by the time of the last talk: the main record's, and the newest subagent record's (a time never later than its file time).
+    A record whose end has no talk keeps its file time. The activity of a solo session is that time too; a session with agents counts the subagent records that grew."""
+    talk = last_talk(item['_path'])
+    if talk:
+        item['mtime'] = min(item['mtime'], talk)
+    if item['_newest']:
+        sub = last_talk(item['_newest'])
+        if sub:
+            item['agents_mtime'] = min(item['agents_mtime'], sub)
+    if item.get('solo'):
+        item['active'] = 1 if now - item['mtime'] < 120 else 0
+    return item
+
+
+def _newest(items, n, now):
+    """The n items whose last talk is the latest, most recent first. The file time is never earlier than the talk, so the items are taken in the order of their file times
+    and the rest of the list is not looked at once the next file time cannot beat the n-th talk found."""
+    key = lambda s: max(s['mtime'], s['agents_mtime'])
+    items.sort(key=lambda s: -key(s))
+    best = []
+    for s in items:
+        if len(best) >= n and key(s) <= key(best[n - 1]):
+            break
+        best.append(_refine(s, now))
+        best.sort(key=lambda x: -key(x))
+    return best[:n]
+
+
 def scan_sessions():
     """(session list, counts). 30 Claude sessions that have agents + Codex of the last 7 days (counted apart) + the most recent 30 Claude sessions without agents (solo).
     Linked execs and guardians are not in the list. Each item carries proj (working folder name), title, active (number of agents whose record grew within the last 2 minutes), and last.
     A solo item carries solo=True and comes at the very end of the list (the order before it is the same as when there was no solo).
+    What is recent is decided by the last talk in the record (the last user or assistant line; for agents, the newest subagent record), not by the file time. A record that cannot be
+    looked at (it went away, cannot be read, is a link that leads nowhere or a folder) is left out; it does not stop the list.
     counts: claude (all sessions), agent_sessions (those with agents), codex (those of the last 7 days that made the list)."""
     out, solo, now = [], [], time.time()
     cli = cli_totals()
@@ -77,25 +188,17 @@ def scan_sessions():
         sid = os.path.basename(p)[:-6]
         if LINKS.cli_owner(sid):
             continue                 # a child session started with claude -p is seen only as an agent of its parent session
-        sub = os.path.join(p[:-6], 'subagents')
-        n = len(glob.glob(os.path.join(sub, 'agent-*.meta.json')))
-        amt = [os.path.getmtime(f) for f in glob.glob(os.path.join(sub, 'agent-*.jsonl'))]
-        agents = n + LINKS.count(sid) + cli.get(sid, 0)
-        st = os.stat(p)
-        if not agents and not st.st_size:
-            continue                 # an empty record file (a session with no conversation) is not counted as solo
-        item = {'id': sid, 'project': os.path.basename(os.path.dirname(p)), 'mtime': st.st_mtime,
-                'agents': agents, 'provider': 'claude', 'agents_mtime': max(amt or [0]),
-                'active': sum(1 for t in amt if now - t < 120), '_path': p}
-        if not agents:
-            item.update(solo=True, active=1 if now - item['mtime'] < 120 else 0)     # same treatment as a standalone Codex conversation
-        (out if agents else solo).append(item)
+        try:
+            item = _session_item(p, sid, cli, now)
+        except OSError:
+            continue
+        if item:
+            (solo if item.get('solo') else out).append(item)
     counts = {'claude': len(out) + len(solo), 'agent_sessions': len(out)}
-    out.sort(key=lambda s: -max(s['mtime'], s['agents_mtime']))
-    solo.sort(key=lambda s: -s['mtime'])
-    out, solo = out[:CL_LIST_MAX], solo[:SOLO_LIST_MAX]       # cut before reading the meta (claude_meta reads the first 1 MB and the last 512 KB of each file)
+    out, solo = _newest(out, CL_LIST_MAX, now), _newest(solo, SOLO_LIST_MAX, now)       # cut before reading the meta (claude_meta reads the first 1 MB and the last 512 KB of each file)
     for s in out + solo:
         m = claude_meta(s.pop('_path'))
+        s.pop('_newest')
         s['proj'] = os.path.basename(m['cwd'].rstrip('/')) or s['project']
         s['title'] = m['title']
     CODEX.refresh()
@@ -194,7 +297,7 @@ class Registry:
             ev.set()
 
     def _open(self, sid):
-        paths = glob.glob(os.path.join(PROJECTS, '*', sid + '.jsonl'))
+        paths = [p for p in glob.glob(os.path.join(PROJECTS, '*', sid + '.jsonl')) if _is_file(p)]
         LINKS.ready.wait(30)                  # the first link scan must end so that Codex events fall within the first ordering
         if not paths:
             CODEX.refresh()

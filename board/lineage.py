@@ -68,15 +68,20 @@ def _read_json(path):
     return (d, st.st_uid) if isinstance(d, dict) else None
 
 
-def _mine(pid, d, owner, ns):
-    """Whether this session file was really written by the claude process of that pid now (not a reused pid, another user, or another pid namespace)."""
-    if procs.cmdline_has(pid, b'claude') is not True:
-        return False
+def holds(pid, d, owner, ns):
+    """Whether the claude process of that pid now is the one that wrote this session file: True, False (no such process, another command, a reused pid, another user,
+    another pid namespace) or None (the process is there but its start time or owner cannot be read; nothing says it is the same one). The one check both the links
+    (`_mine`) and the page's state (sessions.alive, session_procs) make."""
+    r = procs.cmdline_has(pid, b'claude')
+    if r is not True:
+        return r                                      # False: gone or another command; None: the table cannot be read
     if not procs.has_proc():
         u = procs.uid(pid)                            # ps names the owner but not the start time
         return u is None or u == owner                # an owner that cannot be told: trust only the judgment above (a live claude)
     st, uid = procs.starttime(pid), procs.uid(pid)
-    if st is None or uid is None or uid != owner:
+    if st is None or uid is None:
+        return None
+    if uid != owner:
         return False
     ps = d.get('procStart')
     if isinstance(ps, (str, int)) and not isinstance(ps, bool) and str(ps).isdigit() and int(ps) != st:
@@ -87,18 +92,42 @@ def _mine(pid, d, owner, ns):
     return True
 
 
+def _mine(pid, d, owner, ns):
+    """Whether this session file was really written by the claude process of that pid now (not a reused pid, another user, or another pid namespace). What cannot be
+    told is not a link."""
+    return holds(pid, d, owner, ns) is True
+
+
+def session_files():
+    """[(pid, d, owner)] of ~/.claude/sessions/<pid>.json: the regular files that name their own pid, with the owner of the file. Others are skipped."""
+    out = []
+    for f in glob.glob(os.path.join(CLAUDE_HOME, 'sessions', '*.json')):
+        m = SESSION_FILE_RE.fullmatch(os.path.basename(f))
+        got = _read_json(f) if m else None
+        if got and got[0].get('pid') == int(m.group(1)):
+            out.append((int(m.group(1)), got[0], got[1]))
+    return out
+
+
+def claims():
+    """[(pid, d, alive)] of the session files, alive being `holds` (True / False / None). The page's state reads the process of a session through this."""
+    ns = procs.pid_ns()
+    return [(pid, d, holds(pid, d, owner, ns)) for pid, d, owner in session_files()]
+
+
+def claude_alive_ids():
+    """Ids of the Claude sessions that cannot be called finished: a process that holds the session file, or one that cannot be told apart from it (`holds` is not False).
+    A nonexistent process, another command's, a reused pid, another user's or another pid namespace's is left out."""
+    return {d.get('sessionId') for _, d, alive in claims() if alive is not False}
+
+
 def read_sessions():
     """{pid: {pid, sid, cwd, ts, print}}: of sessions/<pid>.json, the ones that really belong to that process now (`_mine`).
     print: whether the process was started by `claude -p` (or the SDK). ts: process start time (seconds)."""
     out, ns = {}, procs.pid_ns()
-    for f in glob.glob(os.path.join(CLAUDE_HOME, 'sessions', '*.json')):
-        m = SESSION_FILE_RE.fullmatch(os.path.basename(f))
-        got = _read_json(f) if m else None
-        if not got:
-            continue
-        d, owner = got
-        pid, sid = int(m.group(1)), d.get('sessionId')
-        if d.get('pid') != pid or not isinstance(sid, str) or not SID_RE.fullmatch(sid) or not _mine(pid, d, owner, ns):
+    for pid, d, owner in session_files():
+        sid = d.get('sessionId')
+        if not isinstance(sid, str) or not SID_RE.fullmatch(sid) or not _mine(pid, d, owner, ns):
             continue
         at = d.get('startedAt')
         out[pid] = {'pid': pid, 'sid': sid, 'cwd': d.get('cwd') if isinstance(d.get('cwd'), str) else None,

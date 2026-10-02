@@ -240,8 +240,9 @@ def pairwise(bundle, names, seed_cases=(), tries=300):
 PAIR_AXES = {
     'aff': [a for a in BUNDLES['aff'] if a != 'bait' and a not in axes.OPTIONAL['aff']],
     'deb': [a for a in BUNDLES['deb'] if a not in axes.OPTIONAL['deb']],
-    'sta': list(BUNDLES['sta']),
+    'sta': [a for a in BUNDLES['sta'] if a not in axes.OPTIONAL['sta']],
     'cpl': list(BUNDLES['cpl']),
+    'room': ['guide', 'shape', 'talk', 'trees', 'people', 'proof', 'phase', 'site', 'ref'],
 }
 BAITS = ('cwd_mismatch', 'text_mismatch', 'too_old', 'echo_only', 'other_user', 'pid_reuse')
 CODEX_LOOKALIKES = ('cwd_mismatch', 'text_mismatch', 'too_old', 'echo_only')        # what replaces the launch of a Codex exec thread (the others need a Claude process)
@@ -365,6 +366,99 @@ def shapes():
     # debate: an editing job beside the topics of a review (a guide with bold finding numbers and no round folder), whatever the participant of the topic does
     for kind, role, rdir in itertools.product(AXES['kind'], ('writer', 'reader', 'quoter', 'absent'), ('r1', 'round1')):
         out.append(normalize(Case('deb', dict(structure='topics', edits='beside', kind=kind, role=role, rdir=rdir))))
+    # debate: an earlier instruction that is only shown (in a code fence, a block quote, or as a read-only review): its report path seats nobody
+    for qform, kind, lang, rpath in itertools.product(AXES['qform'][1:], AXES['kind'], AXES['lang'], ('abs', 'folder')):
+        out.append(normalize(Case('deb', dict(role='quoter', qform=qform, kind=kind, lang=lang, rpath=rpath))))
+    # the orchestrator page of a session: how the records end x whether the process is there x a typed session or the record of a `claude -p` run
+    for entry, tail, process in itertools.product(AXES['entry'], AXES['tail'], AXES['process']):
+        out.append(normalize(Case('sta', dict(skind='main', life='running', entry=entry, tail=tail, process=process))))
+    out += room_shapes()
+    return out
+
+
+def room_shapes():
+    """The rooms: each is a product of a few values with the ones they interact with. The positives are the guide names x where the files are x how many; the lookalikes
+    that are no room (a common document, a guide of one's own, one file for all ...) and the words of the instruction are products of their own."""
+    room = lambda **v: normalize(Case('room', v))                                  # noqa: E731
+    out = []
+    # a room: every name of the guide x a file beside it, one folder below it, each one's own way, or under a round folder (a debate already) x how many are in it
+    for guide, shape, people in itertools.product(('agenda', 'brief', 'readme', 'plan'), ('beside', 'below', 'mixed', 'r1'), ('2', '3', '5')):
+        out.append(room(guide=guide, shape=shape, people=people))
+    for guide, shape in itertools.product(('agenda', 'brief', 'readme', 'plan'), ('beside', 'below')):
+        out.append(room(guide=guide, shape=shape, lang='ko'))
+    # the noun the instruction uses for the work is no evidence: a room, a meeting by message only, and two agents that only share a word
+    for word, lang, (guide, shape, talk) in itertools.product(AXES['word'], AXES['lang'], (('agenda', 'beside', 'none'), ('agenda', 'none', 'peer'), ('agenda', 'none', 'none'),
+                                                                                           ('late', 'none', 'none'))):
+        out.append(room(word=word, lang=lang, guide=guide, shape=shape, talk=talk, people='2'))
+    # how the instruction names the seat: the letter of a marker (any way of writing it) or a lookalike, beside the stem of the file (`B.md` or `notes_B.md`)
+    for mark, fname, lang in itertools.product(AXES['seatmark'], AXES['fname'], AXES['lang']):
+        out.append(room(seatmark=mark, fname=fname, lang=lang, shape='below', people='3'))
+    # a meeting by message only: how many x who writes to whom x the name of the guide
+    for talk, people, guide in itertools.product(AXES['talk'], AXES['people'], ('agenda', 'brief')):
+        out.append(room(shape='none', talk=talk, people=people, guide=guide))
+    # what the first instruction points at when it is no shared guide of the room's folder, with files beside, with no file, and with no file but messages
+    for guide, (shape, talk), people in itertools.product(('top_readme', 'top_claude', 'top_agents', 'docs_guide', 'own', 'missing', 'late'),
+                                                          (('beside', 'none'), ('none', 'none'), ('none', 'peer')), ('2', '3')):
+        out.append(room(guide=guide, shape=shape, talk=talk, people=people))
+    # where the files are when they are not in the room: two folders below, in another folder, one file for all, code in other repositories; with and without messages
+    for shape, guide, people, talk in itertools.product(('deep', 'far', 'same', 'scatter'), ('agenda', 'brief'), ('2', '3'), ('none', 'peer')):
+        out.append(room(shape=shape, guide=guide, people=people, talk=talk))
+    # the participants belong to two orchestrators, and a single participant
+    for people, shape, talk in itertools.product(('2', '3', '5'), ('beside', 'below', 'r1', 'none'), ('none', 'peer')):
+        out.append(room(trees='two', people=people, shape=shape, talk=talk))
+    for shape, guide in itertools.product(('beside', 'below', 'r1', 'none'), ('agenda', 'brief')):
+        out.append(room(people='1', shape=shape, guide=guide))
+    # the folder of the room: at the top, or under a dot folder
+    for site, (shape, talk), guide in itertools.product(('top', 'dot'), (('beside', 'none'), ('below', 'none'), ('none', 'peer')), ('agenda', 'brief')):
+        out.append(room(site=site, shape=shape, talk=talk, guide=guide))
+    # how a path is written in the instruction (relative to the repository top, or with `~`), in a room, a meeting by message, a debate, and some lookalikes
+    for ref, (guide, shape, talk) in itertools.product(('rel', 'tilde'), (('agenda', 'beside', 'none'), ('agenda', 'below', 'none'), ('brief', 'beside', 'none'), ('plan', 'none', 'peer'),
+                                                                           ('top_readme', 'far', 'none'), ('late', 'beside', 'none'), ('agenda', 'r1', 'none'), ('agenda', 'far', 'none'))):
+        out.append(room(ref=ref, guide=guide, shape=shape, talk=talk))
+    # what shows the file of a participant (told, written, both) x whether they are still working
+    for proof, phase, shape in itertools.product(AXES['proof'], AXES['phase'], ('beside', 'below', 'r1')):
+        out.append(room(proof=proof, phase=phase, shape=shape, people='2'))
+    # runs that never overlap and parallel work on code that reports beside a plan: when they run x who also changes code x where the notes are x how many x still working or done
+    for rtime, code, shape, people, phase in itertools.product(AXES['rtime'], AXES['code'], ('beside', 'below'), ('2', '3', '5'), AXES['phase']):
+        out.append(room(rtime=rtime, code=code, shape=shape, people=people, phase=phase))
+    for rtime, code in itertools.product(AXES['rtime'], ('none', 'majority')):
+        out.append(room(rtime=rtime, code=code, shape='mixed', people='5', phase='done'))
+    for rtime, phase in itertools.product(AXES['rtime'], AXES['phase']):                  # the orchestrator may message each of them, one after the other too
+        out.append(room(rtime=rtime, talk='orch', phase=phase))
+    # ... what shows the code (told, written), the guide's name and the folder (a plan in a notes folder, the notes beside it or one folder below), the other language and path forms
+    for rtime, code, proof, guide, site, shape in itertools.product(AXES['rtime'], ('none', 'all'), ('told', 'wrote'), ('plan', 'agenda'), AXES['site'], ('beside', 'below')):
+        out.append(room(rtime=rtime, code=code, proof=proof, guide=guide, site=site, shape=shape, phase='done'))
+    for rtime, code, lang, ref in itertools.product(AXES['rtime'], ('one', 'all'), AXES['lang'], ('rel', 'tilde')):
+        out.append(room(rtime=rtime, code=code, lang=lang, ref=ref, shape='below', phase='done'))
+    # an earlier instruction that is only shown for review (one line, a code fence, a block quote, a read-only review): the guide and the notes file are no instruction of the participant
+    for cite, shape, lang in itertools.product(AXES['cite'][1:], ('beside', 'below', 'mixed', 'r1'), AXES['lang']):
+        out.append(room(cite=cite, shape=shape, lang=lang))
+    for cite, guide in itertools.product(AXES['cite'][1:], ('brief', 'readme', 'plan')):
+        out.append(room(cite=cite, guide=guide, phase='done', people='2'))
+    # what an agent only saves is no change of the work: files in a scratch folder outside the repository and the log of a command, by every participant: the room stays one
+    for scratch, people, lang, phase, shape in itertools.product(AXES['scratch'][1:], ('2', '3', '5'), AXES['lang'], AXES['phase'], ('beside', 'below')):
+        out.append(room(scratch=scratch, people=people, lang=lang, phase=phase, shape=shape))
+    # the instruction that is meant for the participant, in a code fence after a line that tells it to carry it out: the room stays one
+    for wrap, guide, lang, people, shape, proof in itertools.product(AXES['wrap'][1:], ('agenda', 'brief'), AXES['lang'], ('2', '3'), ('beside', 'below', 'mixed'), AXES['proof']):
+        out.append(room(wrap=wrap, guide=guide, lang=lang, people=people, shape=shape, proof=proof))
+    # every participant is still running, each one began after the one before had gone quiet: they are together until now, so the room is there and its guide opens
+    for rtime, shape, people, guide in itertools.product(('quiet',), ('beside', 'below', 'mixed'), ('2', '3', '5'), ('agenda', 'plan')):
+        out.append(room(rtime=rtime, shape=shape, people=people, guide=guide))
+    # messages that were answered with an error: by themselves they are no meeting, and beside files a room stays one
+    for people, shape, guide in itertools.product(('2', '3', '5'), ('none', 'beside', 'below'), ('agenda', 'brief')):
+        out.append(room(delivery='failed', talk='peer', shape=shape, people=people, guide=guide))
+    # the room's folder is one topic of a bundle (the folder above it has a brief of its own): a conclusion of the bundle beside it closes the room when it was written after the
+    # files and names the room's folder or nothing came after it; one from before the files, or one whose name is no conclusion's, closes nothing; nobody still working x files in or not
+    for above, phase, guide, lang, shape in itertools.product(AXES['above'], AXES['phase'], ('agenda', 'brief'), AXES['lang'], ('beside', 'below')):
+        if (guide, lang, shape) in (('agenda', 'en', 'beside'), ('brief', 'ko', 'below')):
+            out.append(room(bundle='root', above=above, phase=phase, proof='wrote', guide=guide, lang=lang, shape=shape))
+    for above, people in itertools.product(('closing', 'unnamed'), ('2', '5')):
+        out.append(room(bundle='root', above=above, phase='done', proof='wrote', people=people))
+    for above in ('closing', 'unnamed'):                                                   # the files are only told: nothing is on disk to close
+        out.append(room(bundle='root', above=above, phase='done', proof='told'))
+    # ... and the bundle's folder reached through a link the participants write their paths with, or copied into a linked worktree where another agent works: still one debate
+    for copy, above, phase, (guide, shape, people) in itertools.product(AXES['copy'][1:], ('none', 'closing'), AXES['phase'], (('agenda', 'beside', '3'), ('brief', 'below', '2'))):
+        out.append(room(bundle='root', copy=copy, above=above, phase=phase, guide=guide, shape=shape, people=people, proof='wrote'))
     return out
 
 
@@ -483,6 +577,9 @@ REASONS = {
     'S-ALERT-TURN': ('views', 'With an automatic-continue notice the board still says the orchestrator waits for the next instruction (views.py alerts `turn`).'),
     'S-ORCH-SAY': ('sessions', 'The limit text of the orchestrator is reported as something it said to the user (`orch_say`) instead of a limit event (sessions.py _feed_main).'),
     'S-ORCH-STATE': ('views', 'The orchestrator waiting for a limit reset shows `idle`: there is no `limit_wait` state (views.py state).'),
+    'S-ORCH-DEAD': ('views/sessions', 'The orchestrator page shows `working` after the process of the session is gone: the state is read from the last record alone (the last line after the last turn-duration line) and never checked against the process.'),
+    'S-ORCH-COMMANDS': ('views/sessions', 'Local slash commands (`/usage` and the like) typed after a turn count as a new turn: every user line moves the time of the last record past the end of the turn, so a session that is waiting shows `working` until its next turn ends.'),
+    'S-ORCH-SDK-END': ('views/sessions', 'The page of a `claude -p` session shows `working` for ever: the end of a turn is known only from a turn-duration line, which the record of a `claude -p` run does not have, and an assistant line that ends the turn is not read as one.'),
     'S-STRAY': ('sessions/agents', 'A child\'s own background-task notification becomes a fake "work finished" card: `_child_note` does not filter on an agent id (agents.py, sessions.py _route_child_notes).'),
     # debate
     'B-EDIT-CELLS': ('units/debates', 'A folder with a guide that only lists findings by bold numbers (`**C-12**`) and has no round folder is given rows and a round: the numbers are read as participants (units.py ROLE_RE) and round 1 is made up (debates.py _debate).'),
@@ -490,6 +587,7 @@ REASONS = {
     'B-FLAT': ('units/debates', 'A flat review (no r<N> folders, nothing declared) is given an invented round-1 seat from the description tag (debates.py _seat_by_folder).'),
     'B-READER': ('units/debates', 'An agent that only reads (and carries a seat letter in its tag) gets the seat: a reader is not a participant (debates.py _seat_by_folder).'),
     'B-QUOTE': ('units/debates', 'A path that is only quoted, negated or whose write failed seats the agent: write intent is read from the words next to the path, a failed write counts as a write (debates.py write_intent, agents.py writes).'),
+    'B-CITE': ('units/debates', 'A report path inside a code fence, a Markdown block quote or a read-only review of an earlier instruction seats the agent: only a short one-line quote is recognised as words that are not the agent\'s own.'),
     'B-ALIAS-FILE': ('units/debates', 'A file the launch writes under the other spelling of the round folder (`-o r01/B.md` while the instruction says `r1/B.md`) takes the place of the seat\'s own file: the folder and the cell follow it, so a report that was never written shows as submitted.'),
     'B-BASH-WRITE': ('units/debates', 'A write made by a Bash command (redirect, `tee`, heredoc) is not read as a write of the report, or a command that only names the report and writes elsewhere (or one that failed) is.'),
     'B-GHOST': ('units/debates', 'An absolute path outside any debate folder on disk makes a debate (debates.py debates() takes absolute report paths without checking the folder).'),
@@ -500,6 +598,16 @@ REASONS = {
     'B-SEAT': ('units/debates', 'The seat differs from the one the evidence ranks first (spelling kept, path intent first).'),
     'B-UNIT': ('units/debates', 'The debate folder is not found from the path as the agent wrote it.'),
     'B-DEBATE': ('units/debates', 'The debate fact differs from the one the evidence supports.'),
+    # room
+    'R-ROOM-LISTING': ('units/debates', 'A folder with a shared guide and a file for each participant is not listed when the guide is not a `brief.md`: only `brief.md` (and a README.md or index.md next to a round folder) makes a debate folder (units.read_unit, GUIDE_NAMES), so `agenda.md`, `plan.md` or any other name finds no room, and the title is read from those names only (debates._debate).'),
+    'R-ROOM-SEAT': ('units/debates', 'Participants that point at the same guide and each hold a file of their own in its folder (or one below), with no round folder, are given no seat and no cell: seats come from `r<N>/` report paths and the roles a guide declares (units.assign, debates._debate). The seat letter of an English marker (`You are participant B`, `Work as B (...)`, `You hold seat B`) is not read either: MARKER_RE knows `[TAG-B]`, `B 담당` and `B(...) 담당` only.'),
+    'R-ROOM-MEMBERS': ('units/debates', 'Agents that share a guide and only message each other (no file of their own) are tied to no folder: the folder is not listed and the agents work in no debate (units.assign ties an agent to a folder through report paths, round folders and `brief.md` only; agents.py keeps the `SendMessage` calls an agent sent but nothing reads them for a room).'),
+    'R-ROOM-FALSE': ('units/debates', 'A room, a seat or a participant is shown where the evidence is not a room: a common document, a guide of one\'s own, one shared file, files outside the guide\'s folder, another orchestrator\'s agents or only words.'),
+    'R-ROOM-DEBATE': ('units/debates', 'A folder with a round folder (already a debate) changed: its seats, cells or listing are not what the rules of the debate give.'),
+    'R-ROOM-TIMING': ('units/debates', 'Participants that were started one after the other, each only after the one before had finished, are made one room: the runs are never compared in time, so a plan every implementer reads and a report each writes beside it is a room however far apart they ran.'),
+    'R-ROOM-CODE': ('units/debates', 'Participants that mostly change code outside the guide\'s folder and only report beside a plan are made one room: where the rest of their work goes is not counted, so a parallel implementation with a report each is taken for a meeting.'),
+    'R-ROOM-CITE': ('units/debates', 'A guide and a notes path that an instruction only quotes (one line, a code fence, a Markdown block quote) or tells as a read-only review are read as the participant\'s own: a room, a seat and a cell appear for words nobody was asked to act on. The check for a quote covers a short one-line quote only.'),
+    'R-ROOM-MSG-FAIL': ('units/debates', 'A message that was answered with an error is kept as a message sent (the call is noted when it is made and its result is not read), so participants whose messages never arrived are made a meeting by message.'),
     # coupling
     'C-UNLINKED': ('link', 'The participant was launched by a sub-agent or a child and is not linked, so it shows no status and no cell.'),
 }
@@ -532,6 +640,17 @@ def reason_of(c):
     head = f.split(':')[0].split('=')[0]
     if f.startswith('diag:') and f[5:].split('.')[0] == 'proc_unknown':
         return 'D-PROC'
+    if b == 'room':
+        kind, _, _, why = oracle.room_trace(a)
+        if why:
+            return {'cite': 'R-ROOM-CITE', 'timing': 'R-ROOM-TIMING', 'code': 'R-ROOM-CODE', 'delivery': 'R-ROOM-MSG-FAIL'}[why]
+        if kind == 'members':
+            return 'R-ROOM-MEMBERS'
+        if kind == 'debate':
+            return 'R-ROOM-DEBATE'
+        if kind is None:
+            return 'R-ROOM-FALSE'
+        return 'R-ROOM-LISTING' if head in ('units', 'titles', 'guide_opens') else 'R-ROOM-SEAT'
     if b == 'aff':
         why = aff_shape_reason(a)
         if why:
@@ -592,7 +711,11 @@ def reason_of(c):
         if head == 'resets_at':
             return 'S-RESETS'
         if head == 'orch_state':
-            return 'S-ORCH-STATE'
+            if a['process'] == 'gone':
+                return 'S-ORCH-DEAD'
+            if a['tail'] in ('commands', 'commands_only'):
+                return 'S-ORCH-COMMANDS'
+            return 'S-ORCH-SDK-END' if a['entry'] == 'sdk' else 'S-ORCH-STATE'
         if f.startswith('forbid:alert=fail'):
             return 'S-ALERT-FAIL'
         if f.startswith('forbid:alert=turn'):
@@ -607,6 +730,8 @@ def reason_of(c):
         if a.get('wmode', 'tool') != 'tool':
             return 'B-BASH-WRITE'
         role = a.get('role')
+        if role == 'quoter' and a.get('qform', 'inline') != 'inline':
+            return 'B-CITE'
         if role in ('quoter', 'negator', 'tag_only', 'failed_write'):
             return 'B-QUOTE'
         if role == 'reader':

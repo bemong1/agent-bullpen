@@ -1,0 +1,44 @@
+name: Something looks wrong on the board
+description: An agent in the wrong place, a missing or wrong link, a wrong status, a debate or meeting not recognized, or a crash.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks! Agent Bullpen is beta: it reads the private transcript formats of Claude Code and Codex, which can change with any release of those tools, so reports like this are how it keeps up.
+        The board reads your transcripts, so please **do not paste transcript text, paths, prompts, session ids or an access token**.
+        The shape of the case is enough: `tools/harvest.py` prints it without any of those (see below).
+  - type: textarea
+    id: what
+    attributes:
+      label: What you saw and what you expected
+      placeholder: e.g. "Three agents of my review meeting are under Other work instead of a room", "A finished run shows Working".
+    validations:
+      required: true
+  - type: textarea
+    id: shape
+    attributes:
+      label: The case shape (recommended)
+      description: |
+        Run `python3 tools/harvest.py <session id or prefix>` in your clone and paste the output.
+        It prints axis values only (how agents were launched, how reports were written, how runs ended) — no text, paths, times or ids.
+        If it ends with "new axis value needed: …", paste that too: it tells us what the scenarios do not cover yet.
+      render: text
+  - type: textarea
+    id: how
+    attributes:
+      label: How you run your agents
+      placeholder: e.g. "the orchestrator starts sub-agents and `claude -p` children from a script; reports go to meeting/<name>.md; no round folders".
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "python3 server.py --version (or the commit) · claude --version · codex --version · OS · python3 --version"
+    validations:
+      required: true
+  - type: textarea
+    id: terminal
+    attributes:
+      label: Terminal output of server.py (if it failed or warned)
+      description: If the start output has an address with `?token=…` in it, cut the token out before you paste.
+      render: text

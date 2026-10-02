@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 
 from . import diag, runstate as RS
-from .util import BOOT, HOME, claude_alive_ids, denied_file, hidden_or_secret, short_path, trunc
+from .util import BOOT, HOME, denied_file, hidden_or_secret, short_path, trunc, write_made
 from .codex_index import CODEX
 from .link import LINKS, certain, link_brief
 
@@ -146,14 +146,14 @@ def state(s):
         s._attach_main_side()
         alive, pid, name = s.alive()
         has_cli = any(a.origin == 'cli' for a in s.agents.values())
-        s._cli_alive = claude_alive_ids() if has_cli else set()
         s._cli_procs = s.cli_procs() if has_cli else {}
+        s._cli_alive = {sid for sid, p in s._cli_procs.items() if p.alive is not False}        # the ones that cannot be called finished: the same process check as the rest of the state
         verdicts = {aid: s.agent_verdict(a, alive, now) for aid, a in s.agents.items()}      # one `now` for the whole picture: a judgment never reads the clock itself
         statuses = {aid: v.status for aid, v in verdicts.items()}
         s._verdicts = verdicts
         jd = s.judged(statuses)
         debates, seated = jd.debates, s.seated_units(jd)
-        orch_proc = RS.Proc(alive, (pid,) if pid else ())
+        orch_proc = s._orch_proc = RS.Proc(alive, (pid,) if pid else ())
         ov = RS.orch_state(s.runs, orch_proc, now) if s.provider == 'claude' else RS.OrchVerdict('idle')
         s._orch_verdict = ov
         entries = _with_orch_diag(diag.collect(s, now, verdicts, RS.group_limits(verdicts, ov if ov.state == 'limit_wait' else None)), ov)
@@ -190,9 +190,9 @@ def state(s):
         o = dict(s.orch)
         o['tokens'] = s.orch_tokens.as_dict()
         o['ctx'] = s.orch_tokens.ctx
-        o['state'] = 'working' if (o['last_ts'] or 0) > (o['turn_end_ts'] or 0) + 1 else 'idle'
+        o['state'] = ov.state if s.provider == 'claude' else ('working' if RS.turn_open(s.cx_turn, orch_proc) else 'idle')
         if ov.state == 'limit_wait':             # its last turn ended on a usage limit and nothing has come since: it waits for the reset
-            o['state'], o['resets_at'], o['auto'] = 'limit_wait', ov.resets_at, ov.auto
+            o['resets_at'], o['auto'] = ov.resets_at, ov.auto
         o['provider'] = s.provider
         feed = []
         names = {a.id: (a.name_tag or a.title) for a in s.agents.values()}
@@ -262,7 +262,7 @@ def _alert(aid, level, title, text, ts, agent, key, params=None, text_i18n=None)
 
 def alerts(s, statuses, now):
     """What the user needs to look at: a decision needed (decide) · something to check (check) · the user's turn (info) · news that needs nothing (note)."""
-    out, o = [], s.orch
+    out = []
     name = lambda aid: (s.agents[aid].name_tag or s.agents[aid].title) if aid in s.agents else aid
     for tid, q in s.pending_q.items():
         lines = []
@@ -270,7 +270,8 @@ def alerts(s, statuses, now):
             opts = ' / '.join(op.get('label', '') for op in x.get('options') or [])
             lines.append(x.get('question', '') + (' — ' + opts if opts else ''))
         out.append(_alert('ask:' + str(tid), 'decide', '오케스트레이터가 선택지를 묻고 있습니다', '\n'.join(lines), q['ts'], None, 'alert.ask.title'))
-    idle = (o['turn_end_ts'] or 0) >= (o['last_ts'] or 0) - 1
+    marks = s.runs.turn if s.provider == 'claude' else s.cx_turn
+    waiting = not marks.open and s._orch_proc.alive is not False         # its turn is over and there is a session to answer in or to give the next instruction to
     last_user = max((e['ts'] or 0 for e in s.feed if e['kind'] == 'user_say'), default=0)
     last_say = next((e for e in reversed(s.feed) if e['kind'] == 'orch_say'), None)
     running = [aid for aid, st in statuses.items() if st in ('running', 'stalled')]
@@ -286,7 +287,7 @@ def alerts(s, statuses, now):
                           ', '.join(names), s.orch.get('last_ts') if g.orch else max((s.agents[aid].last_ts or 0 for aid in g.agents), default=None), None,
                           key, {'at': g.resets_at} if has_time else {}))
         out[-1]['title_params'] = {'at': g.resets_at, 'auto': g.auto, 'agents': len(g.agents), 'orch': g.orch}        # what the group is made of, for whoever wants more than the sentence
-    if idle and last_say and (last_say['ts'] or 0) > last_user and not s.pending_q:
+    if waiting and last_say and (last_say['ts'] or 0) > last_user and not s.pending_q:
         tail = [ln for ln in last_say['text'].strip().splitlines() if ln.strip()][-2:]
         if any(QUESTION_RE.search(ln) for ln in tail):
             out.append(_alert('say:%d' % int(last_say['ts']), 'decide', '오케스트레이터가 답을 기다립니다', last_say['text'], last_say['ts'], None,
@@ -383,16 +384,16 @@ def allowed_file(s, path):
     if not re.search(r'\.(md|txt|ya?ml|json)$', real) or denied_file(real) or hidden_or_secret(real):
         return None                                   # the same holds for files an agent wrote: configs such as ~/.docker, .config/gh, .mcp.json are not opened
     with s.lock:                                   # safe even while poll is adding agents
-        if any(os.path.realpath(w['path']) == real for a in s.agents.values() for w in a.writes):
-            return real                               # a file an agent wrote
-        debates, _ = s.debates({aid: 'done' for aid in s.agents})
+        if any(os.path.realpath(w['path']) == real for a in s.agents.values() for w in a.writes if write_made(w)):
+            return real                               # a file an agent wrote (and the write worked)
+        debates, _ = s.debates({aid: v.status for aid, v in getattr(s, '_verdicts', {}).items() if aid in s.agents})        # the judgment the page shows: its statuses, not an invented one
     home = os.path.realpath(HOME)
     for d in debates:
         root = os.path.realpath(d['root'])
         if root == home or home.startswith(root + os.sep):
             continue                                  # HOME or an ancestor of it does not count as a root
-        if not (os.path.exists(os.path.join(root, 'brief.md')) or glob.glob(os.path.join(root, 'r[0-9]*'))):
-            continue                                  # only real debate folders (excludes fake roots that appear only in text)
+        if not (os.path.exists(os.path.join(root, 'brief.md')) or glob.glob(os.path.join(root, 'r[0-9]*')) or any(t.get('room') for t in d.get('topics') or ())):
+            continue                                  # only real debate folders (excludes fake roots that appear only in text); a room is a folder with a guide the records name
         if real.startswith(root + os.sep):
             return real
     return None
