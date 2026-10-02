@@ -2,7 +2,7 @@
 
 [English](guide.md) · **한국어**
 
-화면 하나하나가 무엇을 뜻하는지 적은 문서입니다. 설치와 실행은 [README](../README.md), 옵션은 [configuration](configuration.md)(영어)을 보세요.
+화면 하나하나가 무엇을 뜻하는지 적은 문서입니다. 설치와 실행은 [README](../README.ko.md), 옵션은 [configuration](configuration.md)(영어)을 보세요.
 
 현황판은 Claude Code와 Codex가 디스크에 남기는 기록을 **읽기만** 해서 그립니다. 훅이 필요 없고, 이미 돌고 있는 세션도 바로 보입니다.
 
@@ -223,7 +223,7 @@ Claude만 있는 세션은 아무것도 달라지지 않습니다. 표시는 Cod
 
 색: 70% 이상 노랑, 90% 이상·한도 도달 빨강. 재설정 시각이 지난 값은 "한도 도달"이나 사용률 대신 `—`(추정 재설정 시각)으로 보입니다. 대화 기록의 한도 도달(`quotaLimits`)은 도달 뒤에 읽은 사용률이 100% 미만이면 지난 것으로 봅니다.
 
-**`--claude-usage-api`를 켠 경우**(비공식 API, 사용자 책임 — [README의 보안 절](../README.md#보안과-개인정보)): 60초마다 Claude 설정 폴더(기본 `~/.claude`, `CLAUDE_CONFIG_DIR`로 바꿈)의 `.credentials.json`에 있는 현재 access token으로 계정 사용량 API를 조회하고 "조회 HH:MM"으로 보입니다. 토큰을 새로 발급하지 않고 화면·응답·로그에 내보내지 않습니다. 토큰이 만료됐거나 조회가 실패하면 사유를 노랑으로 보이고 캐시 값으로 돌아갑니다. 이 API는 1분 간격이면 한 번 걸러 429를 주므로 값은 사실상 2분마다 바뀌고, 429는 마지막 값이 3분 안이면 숨깁니다. API가 실제로 답한 뒤에는 마지막 값과 조회 시각을 `$XDG_CACHE_HOME/agent-bullpen/usage.json`(없으면 `~/.cache/agent-bullpen/usage.json`, 권한 0600)에 남겨 재시작 직후에도 값을 보입니다(로그인 정보가 없어 부르지 못했으면 파일도 만들지 않습니다).
+**`--claude-usage-api`를 켠 경우**(비공식 API, 사용자 책임 — [README의 보안 절](../README.ko.md#보안과-개인정보)): 60초마다 Claude 설정 폴더(기본 `~/.claude`, `CLAUDE_CONFIG_DIR`로 바꿈)의 `.credentials.json`에 있는 현재 access token으로 계정 사용량 API를 조회하고 "조회 HH:MM"으로 보입니다. 토큰을 새로 발급하지 않고 화면·응답·로그에 내보내지 않습니다. 토큰이 만료됐거나 조회가 실패하면 사유를 노랑으로 보이고 캐시 값으로 돌아갑니다. 이 API는 1분 간격이면 한 번 걸러 429를 주므로 값은 사실상 2분마다 바뀌고, 429는 마지막 값이 3분 안이면 숨깁니다. API가 실제로 답한 뒤에는 마지막 값과 조회 시각을 `$XDG_CACHE_HOME/agent-bullpen/usage.json`(없으면 `~/.cache/agent-bullpen/usage.json`, 권한 0600)에 남겨 재시작 직후에도 값을 보입니다(로그인 정보가 없어 부르지 못했으면 파일도 만들지 않습니다).
 
 **macOS 등 로그인 정보가 파일에 없는 경우**: Claude Code가 로그인 정보를 `.credentials.json`이 아닌 곳에 두면(macOS는 보통 키체인) 읽을 토큰이 없습니다. 이 도구는 키체인을 읽지 않으므로 하단 줄은 캐시 값("기록 HH:MM")을 그대로 보이고 노랑 "로그인 정보 없음"만 덧붙습니다. 그때는 `--claude-usage-api`를 빼도 됩니다.
 
