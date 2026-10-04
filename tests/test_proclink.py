@@ -675,7 +675,7 @@ class Scripts(unittest.TestCase):
 
     def test_depth_one_only(self):
         inner = self.put('inner.sh', 'claude -p "x"\n')
-        outer = self.put('outer.sh', 'echo claude\nbash %s\nsource %s\n' % (inner, inner))
+        outer = self.put('outer.sh', 'tmux new-session -d \'claude -p "y"\'\nbash %s\nsource %s\n' % (inner, inner))      # a launch the reader does not place, so the file is read but holds none
         r = self.got('bash %s' % outer)
         self.assertEqual([x['path'] for x in r], [outer])                      # only the outer script is read
         links = server.LinkIndex()

@@ -815,8 +815,8 @@ def bash_scripts(cmd, base_cwd, assigns=None):
             path = os.path.join(scwd, path) if scwd and os.path.isabs(scwd) else None
         path = os.path.normpath(path) if path else None
         got = read_script(path) if path else None
-        if not got or not _mentions(got[0]) or (kind == 'path' and not _shell_shebang(got[0])):
-            continue
+        if not got or not _mentions(got[0]) or (kind == 'path' and not _shell_shebang(got[0])) or not any(script_tools(got[0])):
+            continue                                                    # (a script that only says the words, to print or to type them somewhere, runs no tool)
         out.append({'path': path, 'text': got[0], 'code': got[1], 'cwd': os.path.normpath(scwd) if scwd else None,
                     'env': _script_env(got[0], got[1], pick[1])})
     return out
@@ -833,6 +833,27 @@ BOTH_TOOLS = frozenset(('claude', 'codex'))
 def _tools_named(text):
     """The tools (`claude`, `codex`) a text names as words."""
     return frozenset(t for t, rx in (('claude', CLAUDE_WORD_RE), ('codex', CODEX_WORD_RE)) if rx.search(text))
+
+
+_SCRIPT_TOOLS = {}
+_SCRIPT_TOOLS_BYTES = [0]
+
+
+def script_tools(text):
+    """(the tools a shell script's text runs, the tools its inline code may run): its text is read as a command is (exec_regions): a program word `claude` / `codex` at a command position, or
+    in the command line a wrapper runs, counts; the words in what is printed or typed into a terminal (`tmux send-keys`, `echo`) do not."""
+    hit = _SCRIPT_TOOLS.get(text)
+    if hit is not None:
+        return hit
+    run, maybe = exec_regions(text)
+    named = frozenset(t for t in (os.path.basename(r.split(None, 1)[0]) for r in run if r.strip()) if t in BOTH_TOOLS)
+    got = (named, _tools_named('\n'.join(maybe)) - named)
+    if _SCRIPT_TOOLS_BYTES[0] + len(text) > SCRIPTS_CACHE_MAX:
+        _SCRIPT_TOOLS.clear()
+        _SCRIPT_TOOLS_BYTES[0] = 0
+    _SCRIPT_TOOLS[text] = got
+    _SCRIPT_TOOLS_BYTES[0] += len(text)
+    return got
 
 
 def _tools_in(text):
@@ -866,8 +887,10 @@ def launch_kinds(cmd, base_cwd):
     code = _masked(cmd)
     run, maybe = exec_regions(cmd)                                      # the words that run, and the words in code that may run them (`python -c`)
     named, assumed = set(_tools_named('\n'.join(run))), set(_tools_named('\n'.join(maybe)))
-    for x in bash_scripts(cmd, base_cwd):                              # a shell script whose text names a tool
-        named |= _tools_in(x['text'])
+    for x in bash_scripts(cmd, base_cwd):                              # a shell script that runs a tool (its text is read like a command: only a program word counts)
+        got, may = script_tools(x['text'])
+        named |= got
+        assumed |= may
     assigns = _cmd_assigns(cmd)
     for m in list(SCRIPT_RUN_RE.finditer(code))[:SCRIPT_RUNS_MAX]:
         kind = _script_kind(m)
@@ -1135,6 +1158,7 @@ def cx_link(all_calls, threads, fixed=None, rules=None):
 # report path (`> r1/A.md`, `-o`). It sees the redirections of a simple command in order (fd table: `> f 2>&1` sends both to f, `2>&1 > f` only fd 1),
 # replaces a variable only by a value the command's own scope fixes (an assignment, a `for` list, a script argument), and never searches for a path.
 WORD_PAT = r'(?<![\w./~-])(?:claude|codex)(?![\w-])'                     # the word itself: not `.claude/`, `~/.claude`, `claude-code`, `my_claude`
+SCRIPT_FILE_RE = re.compile(r'\.(?:sh|py)(?![\w.])')                      # a script or a python file named
 LAUNCHY_RE = re.compile(WORD_PAT + r'|\.(?:sh|py)(?![\w.])')            # loose: a call that might launch something (a candidate, never a proof)
 WORD_RE = re.compile(WORD_PAT)
 WEAK_PRINT_RE = re.compile(r'\s(?:-p|--print)(?![\w-])')
@@ -1402,19 +1426,34 @@ def can_launch(code):
 # command line a program that runs its arguments is given. A word that only travels as text (typed into a terminal by `tmux send-keys`, `screen -X stuff`,
 # printed by `echo`) is no launch of the call that carries it: that call is nobody's launcher, not even as a guess. Inline code of an interpreter
 # (`python -c '…'`) may start the tool and may not: it is only assumed.
-RUN_PROGRAMS = frozenset(('ssh', 'su', 'xargs', 'watch', 'parallel', 'at'))             # run the command line they are given
-RUN_SUBCOMMANDS = {                                                                     # programs that run it only for some subcommands
-    'tmux': frozenset(('new-session', 'new', 'new-window', 'neww', 'split-window', 'splitw', 'respawn-pane', 'respawnp', 'respawn-window', 'respawnw',
-                       'run-shell', 'run', 'display-popup', 'popup')),
-    'docker': frozenset(('exec', 'run')), 'podman': frozenset(('exec', 'run')), 'kubectl': frozenset(('exec',))}
+# What the program given a command line starts: for each program that runs its arguments, the options that take a value (a short option letter ends a cluster and takes the word after it or
+# what is left of the cluster; a long option takes the word after it unless it is written `--name=value`), so that the words which are the command line are told from the options and the
+# operands (a host, a container) before it. A program with a subcommand is a run program only for some subcommands.
+XARGS_SHORT, XARGS_LONG = 'InPLEsad', frozenset(('--max-args', '--max-procs', '--max-lines', '--eof', '--max-chars', '--arg-file', '--delimiter', '--process-slot-var'))
+SSH_SHORT, SSH_LONG = 'bcDEeFIiJLlmOopQRSWw', frozenset()
+WATCH_SHORT, WATCH_LONG = 'n', frozenset(('--interval',))
+PARALLEL_SHORT, PARALLEL_LONG = 'jnNSaIlLmM', frozenset(('--jobs', '--max-args', '--sshlogin', '--arg-file', '--replace'))
+SCREEN_SHORT, SCREEN_LONG = 'cehpQsStTX', frozenset()
+DOCKER_SHORT = 'euwvlphmcaN'
+DOCKER_LONG = frozenset(('--env', '--user', '--workdir', '--volume', '--name', '--network', '--publish', '--entrypoint', '--restart', '--cpus', '--memory', '--env-file', '--mount',
+                         '--label', '--hostname', '--add-host', '--device', '--platform', '--pull', '--shm-size', '--cap-add', '--cap-drop', '--security-opt', '--ulimit', '--gpus',
+                         '--group-add', '--cidfile', '--log-driver', '--log-opt', '--dns', '--pid', '--ipc', '--uts', '--userns', '--runtime', '--stop-signal', '--stop-timeout',
+                         '--tmpfs', '--label-file', '--detach-keys', '--attach', '--link', '--ip', '--mac-address', '--cgroupns', '--cpuset-cpus', '--cpu-shares'))
+KUBECTL_SHORT = 'cnfsl'
+KUBECTL_LONG = frozenset(('--container', '--namespace', '--context', '--kubeconfig', '--filename', '--pod-running-timeout', '--request-timeout', '--cluster', '--user', '--server', '--selector'))
+TMUX_GLOBAL = 'LSfcT'                                              # tmux options before the subcommand that take a value
+TMUX_RUN = {                                                       # subcommand -> the letters of its options that take a value (the rest of its words is the shell command)
+    'new-session': 'cEefFnstxyz', 'new': 'cEefFnstxyz', 'new-window': 'cefFnt', 'neww': 'cefFnt', 'split-window': 'cefFlt', 'splitw': 'cefFlt',
+    'respawn-pane': 'cet', 'respawnp': 'cet', 'respawn-window': 'cet', 'respawnw': 'cet', 'run-shell': 'cdt', 'run': 'cdt',
+    'display-popup': 'bcdehsStTwxy', 'popup': 'bcdehsStTwxy'}
+RUN_PROGRAMS = frozenset(('ssh', 'su', 'xargs', 'watch', 'parallel'))                   # run the command line they are given
 SUBCOMMAND_PROGRAMS = frozenset(('tmux', 'screen', 'script', 'docker', 'podman', 'kubectl'))     # nothing in their command runs unless the subcommand says so
-TMUX_VALUE_OPTS = frozenset(('-L', '-S', '-f', '-c', '-T'))                             # tmux options that take a value: the subcommand comes after
 INLINE_CODE = {'python': '-c', 'node': '-e', 'nodejs': '-e', 'ruby': '-e', 'perl': '-e', 'bun': '-e'}     # interpreters that run code given on the command line
 INLINE_NAME_RE = re.compile(r'(python|node|nodejs|ruby|perl|bun)[0-9.]*')
 SCRIPT_C_RE = re.compile(r'-[A-Za-z]*c|--command')
 DELIVERY_RE = re.compile(r'send-keys|send_keys|sendkeys|paste-buffer|set-buffer|load-buffer|\bstuff\b')    # inline code that types text into a terminal
 EXEC_DEPTH = 3                    # how deep the command line given to a program that runs it is read again
-EXEC_ARG_MAX = LAUNCHY_SCAN       # a word of that command line longer than this is not read again
+EXEC_LINE_MAX = LAUNCHY_SCAN      # a command line longer than this (text) is not read again
 EXEC_SEG_MAX = 16384              # a simple command longer than this is not split into words (its masked text is all that is read)
 
 
@@ -1463,26 +1502,97 @@ def _program_index(words):
     return None
 
 
-def _runs_arguments(prog, args):
-    """Whether a program given these words (after its name) runs one of them as a command line: `ssh host '…'`, `xargs claude …`, `tmux new-session '…'`
-    (not `tmux send-keys '…'`: that types the text into a window, where a shell may or may not run it)."""
-    if prog in RUN_PROGRAMS:
-        return True
+def _operands(args, short, long=frozenset()):
+    """The words of `args` after the options of the program (`short`: the letters of its short options that take a value; `long`: its long options that take one): (index of the first
+    operand, the words from there). A word `--` ends the options; a lone `-` is an operand."""
+    i = 0
+    while i < len(args):
+        w = args[i]
+        if w == '--':
+            return i + 1, args[i + 1:]
+        if not w.startswith('-') or w == '-':
+            break
+        if w.startswith('--'):
+            i += 2 if (w in long and i + 1 < len(args)) else 1
+            continue
+        letters, took = w[1:], False
+        for n, ch in enumerate(letters):
+            if ch in short:
+                took = n == len(letters) - 1                          # the value is the next word, or what is left of the cluster (then the word is done)
+                break
+        i += 2 if took and i + 1 < len(args) else 1
+    return i, args[i:]
+
+
+def _no_redirects(words):
+    """The words of a simple command without its redirections (`> f`, `2>&1`, `< list`): they are not arguments of the program."""
+    out, k = [], 0
+    while k < len(words):
+        w = words[k]
+        k += 1
+        if CX_REDIR_RE.match(w):
+            if CX_REDIR_RE.fullmatch(w):
+                k += 1                                                 # the operator alone: the target is the next word
+            continue
+        out.append(w)
+    return out
+
+
+def _argv_line(words):
+    """One command line out of the words a program is given as an argument vector (it runs them as they are)."""
+    return shlex.join(words) if words else ''
+
+
+def _command_lines(prog, args):
+    """The command lines a program given these words (after its name) runs, each one text to read again: `ssh host '…'` and `watch cmd` run the words joined by blanks (a shell reads them
+    once more), `xargs`, `docker exec`, `kubectl exec --` and a `tmux` command with several words run the words as an argument vector. [] for a program that runs nothing here
+    (`tmux send-keys '…'` types the text into a window, where a shell may or may not run it; `docker logs`, `screen -X stuff`). The options and operands before the command (a host, a
+    container, a session name) are not part of it."""
+    if prog == 'xargs':
+        return [_argv_line(_operands(args, XARGS_SHORT, XARGS_LONG)[1])]
+    if prog == 'ssh':
+        rest = _operands(args, SSH_SHORT, SSH_LONG)[1]                # host, then the command
+        return [' '.join(rest[1:])] if len(rest) > 1 else []
+    if prog == 'watch':
+        return [' '.join(_operands(args, WATCH_SHORT, WATCH_LONG)[1])]
+    if prog == 'parallel':
+        rest = _operands(args, PARALLEL_SHORT, PARALLEL_LONG)[1]
+        cut = next((i for i, w in enumerate(rest) if w in (':::', '::::')), len(rest))
+        return [' '.join(rest[:cut])]
+    if prog in ('su', 'script'):
+        return [args[i + 1] for i, a in enumerate(args[:-1]) if SCRIPT_C_RE.fullmatch(a)][:1]
     if prog == 'screen':
-        return not any(a == '-X' and 'stuff' in args[i + 1:i + 3] for i, a in enumerate(args))
-    if prog == 'script':
-        return any(SCRIPT_C_RE.fullmatch(a) for a in args)
-    subs = RUN_SUBCOMMANDS.get(prog)
-    if subs is None:
-        return False
+        if any(a == '-X' and 'stuff' in args[i + 1:i + 3] for i, a in enumerate(args)):
+            return []
+        return [_argv_line(_operands(args, SCREEN_SHORT, SCREEN_LONG)[1])]
+    if prog in ('docker', 'podman'):
+        sub, rest = _operands(args, DOCKER_SHORT, DOCKER_LONG)
+        if not rest or rest[0] not in ('exec', 'run'):
+            return []
+        return [_argv_line(_operands(rest[1:], DOCKER_SHORT, DOCKER_LONG)[1][1:])]      # the container or the image, then the command
+    if prog == 'kubectl':
+        sub, rest = _operands(args, KUBECTL_SHORT, KUBECTL_LONG)
+        if not rest or rest[0] != 'exec':
+            return []
+        rest = rest[1:]
+        if '--' in rest:
+            return [_argv_line(rest[rest.index('--') + 1:])]
+        return [_argv_line(_operands(rest, KUBECTL_SHORT, KUBECTL_LONG)[1][1:])]
     if prog == 'tmux':
-        j = 0
-        while j < len(args) and args[j].startswith('-'):
-            j += 2 if args[j] in TMUX_VALUE_OPTS else 1
-        return j < len(args) and args[j] in subs
-    return any(a in subs for a in args[:8])
+        out, words = [], _operands(args, TMUX_GLOBAL)[1]
+        while words:                                                   # `cmd \; cmd`: the commands of one invocation
+            cut = words.index(';') if ';' in words else len(words)
+            cmd, words = words[:cut], words[cut + 1:]
+            letters = TMUX_RUN.get(cmd[0]) if cmd else None
+            if letters is not None:
+                shell = _operands(cmd[1:], letters)[1]
+                if shell:
+                    out.append(shell[0] if len(shell) == 1 else _argv_line(shell))
+        return out
+    return []
 
 
+TOOL_TOKEN_RE = re.compile(r'(?:claude|codex)')
 EXEC_KEEP_TEXT = 16 << 10         # the regions of a command are remembered for a while (one command is read as a launch, a probe and a span) when it is this short ...
 EXEC_KEEP = 4 << 20               # ... and all the remembered commands together are about this many bytes
 _EXEC = collections.OrderedDict()
@@ -1491,12 +1601,19 @@ _EXEC_LOCK = threading.Lock()
 
 
 def exec_regions(text, depth=0):
-    """(run, maybe): the pieces of a command's text in which the words `claude` and `codex` run, and those in which they only may (tuples of text). `run`: the masked text of each
-    simple command that does not only print (its program and its unquoted arguments), and, for a program that runs a command line it is given (tmux new-session, ssh, xargs,
-    docker exec …), each word of its arguments read again as a command line. `maybe`: the code a `python -c` / `node -e` is given (unless it types text into a terminal).
-    A simple command of `echo`, `printf`, `tmux send-keys` … gives nothing."""
+    """(run, maybe): the pieces of a command's text in which the words `claude` and `codex` run, and those in which they only may (tuples of text). `run`: a tool at a command position
+    (after `VAR=x` and prefixes such as nohup, env, timeout) with its plain arguments, and, for a program that runs a command line it is given (tmux new-session, ssh, xargs,
+    docker exec …), that command line read once more as a command (its options and operands left out). The plain arguments of any other program (`curl --data claude -p`)
+    are what it is given: no place where a tool runs. `maybe`: the code a `python -c` / `node -e` is given (unless it types text into a terminal). A simple command of `echo`,
+    `printf`, `tmux send-keys` … gives nothing."""
+    return exec_parts(text, depth)[:2]
+
+
+def exec_parts(text, depth=0):
+    """exec_regions and a third part: the masked text of the simple commands that run nothing the reader knows (their program and plain arguments), where a script or a python file
+    may still be named."""
     if not isinstance(text, str):
-        return (), ()
+        return (), (), ()
     keep = depth == 0 and len(text) <= EXEC_KEEP_TEXT
     if keep:
         with _EXEC_LOCK:
@@ -1510,13 +1627,14 @@ def exec_regions(text, depth=0):
             _EXEC[text] = got
             _EXEC_BYTES[0] += 2 * len(text) + sum(2 * len(t) for part in got for t in part)
             while _EXEC_BYTES[0] > EXEC_KEEP and _EXEC:
-                old, (r, m) = _EXEC.popitem(last=False)
-                _EXEC_BYTES[0] -= 2 * len(old) + sum(2 * len(t) for t in r + m)
+                old, parts = _EXEC.popitem(last=False)
+                _EXEC_BYTES[0] -= 2 * len(old) + sum(2 * len(t) for part in parts for t in part)
     return got
 
 
 def _exec_regions(text, depth):
-    run, maybe = [], []
+    """(run, maybe, other): see exec_regions; `other` is the third part of exec_parts."""
+    run, maybe, other = [], [], []
     code = _masked(text)
     for a in _command_starts(code):
         end = _simple_tokens(code, a)[1]
@@ -1532,32 +1650,35 @@ def _exec_regions(text, depth):
                 words = shlex.split(text[a:min(end, a + EXEC_SEG_MAX)])
             except ValueError:
                 words = None
-            k = _program_index(words) if words else None
-            if k is None:
-                run.append(seg)
+            wk = _program_index(words) if words else None
+            if wk is None:
+                other.append(seg)
                 continue
-            args = words[k + 1:]
-            runs = _runs_arguments(prog, args)
-            if prog in SUBCOMMAND_PROGRAMS and not runs:
-                continue                                                 # `tmux send-keys`, `screen -X stuff`, `docker logs` …: what follows is not a command line
-            run.append(seg)
-            if runs:
+            args = _no_redirects(words[wk + 1:])
+            lines = _command_lines(prog, args) if (prog in RUN_PROGRAMS or prog in SUBCOMMAND_PROGRAMS) else None
+            if lines is not None:
+                if not lines and prog in SUBCOMMAND_PROGRAMS:
+                    continue                                             # `tmux send-keys`, `screen -X stuff`, `docker logs` …: what follows is not a command line
                 if depth < EXEC_DEPTH:
-                    for w in args:
-                        if len(w) <= EXEC_ARG_MAX and _maybe_launchy(w):
-                            r, m = exec_regions(w, depth + 1)
+                    for line in lines:                                   # the command line the program is given, read once more as a command
+                        if line and len(line) <= EXEC_LINE_MAX and _maybe_launchy(line):
+                            r, m, o = exec_parts(line, depth + 1)
                             run += r
                             maybe += m
-            else:
-                im = INLINE_NAME_RE.fullmatch(prog)
-                flag = INLINE_CODE.get(im.group(1)) if im else None
-                if flag and flag in args[:-1]:
-                    snippet = args[args.index(flag) + 1]
-                    if not DELIVERY_RE.search(snippet):
-                        maybe.append(snippet)
+                            other += o
+                continue
+            other.append(seg)
+            flag = INLINE_CODE.get(INLINE_NAME_RE.fullmatch(prog).group(1))
+            if flag and flag in args[:-1]:
+                snippet = args[args.index(flag) + 1]
+                if not DELIVERY_RE.search(snippet):
+                    maybe.append(snippet)
             continue
-        run.append(seg)
-    return tuple(run), tuple(maybe)
+        if prog is not None and TOOL_TOKEN_RE.fullmatch(prog):
+            run.append(' '.join(masked[k:]))                             # a tool at a command position (after its prefixes): with its own plain arguments
+        else:
+            other.append(seg)                                            # any other program: only its place counts, its arguments are what it is given
+    return tuple(run), tuple(maybe), tuple(other)
 
 
 def _arg_literals(pos, env, stdin):
@@ -1752,8 +1873,8 @@ def _launchy_call(cmd):
         return True
     if not can_launch(_masked(cmd)):
         return False
-    run, maybe = exec_regions(cmd)
-    return any(LAUNCHY_RE.search(t) for t in run + maybe)
+    run, maybe, other = exec_parts(cmd)
+    return any(LAUNCHY_RE.search(t) for t in run + maybe) or any(SCRIPT_FILE_RE.search(t) for t in other)
 
 
 def _maybe_launchy(cmd):
