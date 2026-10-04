@@ -12,6 +12,7 @@ import secrets
 import socket
 import struct
 import sys
+import threading
 from urllib.parse import parse_qsl, unquote_plus, urlencode
 
 from . import i18n
@@ -123,6 +124,9 @@ def denied_page():
     return ('%s<body style="%s">%s</body></html>\n' % (head, style, ''.join(dict.fromkeys(parts)))).encode()
 
 
+NAME_LOOKUP_WAIT = 1.0          # seconds the host-name fallback of local_addresses() may take
+
+
 def local_addresses():
     """IPv4 addresses of this machine that another device could use (not loopback, not link-local, not a container or virtual machine bridge), asked of the system's
     interfaces. No connection is made and nothing is sent. Every step may fail on some systems and then adds nothing."""
@@ -150,11 +154,20 @@ def local_addresses():
     except (ImportError, OSError, AttributeError, ValueError):
         pass
     if not found:
-        try:
-            for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                add(info[4][0])
-        except OSError:
-            pass
+        # Resolving this machine's own name can wait on DNS for many seconds (macOS with a .local name): ask in a side thread and give up
+        # after a second, so the start-up output is never held back by it.
+        box = []
+
+        def resolve():
+            try:
+                box.extend(info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET))
+            except (OSError, UnicodeError):
+                pass
+        t = threading.Thread(target=resolve, daemon=True)
+        t.start()
+        t.join(NAME_LOOKUP_WAIT)
+        for text in list(box) if not t.is_alive() else ():
+            add(text)
     return found
 
 

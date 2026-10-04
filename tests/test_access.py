@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -434,3 +435,21 @@ class Version(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SlowNameLookup(unittest.TestCase):
+    """The host-name fallback of local_addresses() must not hold the start-up output back (macOS can wait on DNS for a .local name)."""
+
+    def test_a_slow_lookup_is_given_up_after_a_second(self):
+        def slow(*a, **k):
+            time.sleep(5)
+            return [(socket.AF_INET, 0, 0, '', ('192.0.2.9', 0))]
+        with mock.patch.object(socket, 'if_nameindex', lambda: []), mock.patch.object(socket, 'getaddrinfo', slow):
+            t0 = time.time()
+            self.assertEqual(access.local_addresses(), [])
+            self.assertLess(time.time() - t0, 2.5)
+
+    def test_a_quick_lookup_is_used(self):
+        with mock.patch.object(socket, 'if_nameindex', lambda: []), \
+                mock.patch.object(socket, 'getaddrinfo', lambda *a, **k: [(socket.AF_INET, 0, 0, '', ('192.0.2.9', 0))]):
+            self.assertEqual(access.local_addresses(), ['192.0.2.9'])
