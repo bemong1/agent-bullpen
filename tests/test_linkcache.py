@@ -107,6 +107,33 @@ class CacheFile(Fixture):
         self.assertEqual((t['sid'], t['rule']), (P, 'file'))
         self.assertTrue(link.certain(o['rule']) and link.certain(t['rule']))
 
+    def test_an_older_files_content_links_do_not_come_back_and_the_file_is_written_again_as_the_current_version(self):
+        """A `content` link of a version 2 file may rest on words that only travelled as text (a relay that typed an instruction into a terminal); it is read again
+        from the records, which no longer count such words. The other rules stay, and the file is rewritten once, as version 3, without the dropped link."""
+        E = '55555555-5555-4555-8555-555555555555'
+        put_cache(self.cache, [row(C, P, rule='content', node='a' + '0' * 16), row(D, P, rule='out'), row(E, P, rule='env')], version=2)
+        links = server.LinkIndex()
+        links.lineage.enable_cache(self.cache)
+        self.assertEqual(sorted(links.lineage.saved), [D])                                  # the `out` link is kept, as a record of the judgment (never evidence)
+        self.assertEqual(sorted(links.lineage.cli), [E])
+        self.assertNotIn(C, links.lineage.saved)
+        self.assertNotIn(C, links.lineage.cli)
+        links.lineage.scan({P, C, D, E}, self.index.get)                                   # the first scan writes it again
+        with open(self.cache) as f:
+            d = json.load(f)
+        self.assertEqual(d['version'], 3)
+        self.assertEqual(sorted(r['child'] for r in d['links']), sorted([D, E]))
+        again = server.LinkIndex()
+        again.lineage.enable_cache(self.cache)
+        self.assertEqual(sorted(again.lineage.saved) + sorted(again.lineage.cli), sorted([D, E]))
+        self.assertEqual(again.lineage._saved, again.lineage._rows_text())                  # a current file is not written again at the next scan
+
+    def test_a_content_link_of_a_current_file_is_read(self):
+        put_cache(self.cache, [row(C, P, rule='content')], version=3)
+        links = server.LinkIndex()
+        links.lineage.enable_cache(self.cache)
+        self.assertEqual(links.lineage.saved[C]['orig'], 'content')
+
     def test_broken_and_untrusted_files_are_ignored_silently(self):
         for text in ('{not json', '[]', '"x"', '', '{"version": 2, "links": []}', '{"version": 1, "links": "x"}', '{"version": 1}'):
             os.makedirs(os.path.dirname(self.cache), exist_ok=True)
@@ -150,6 +177,7 @@ class CacheFile(Fixture):
     def test_limits_are_the_approved_ones(self):
         self.assertEqual((lineage.CACHE_MAX, lineage.CACHE_DAYS, link.UNLINKED_MAX), (MAX_PAIRS, MAX_DAYS, MAX_UNLINKED))
         self.assertEqual(lineage.CACHE_RULES, ('proc', 'env', 'out', 'content'))       # version 2 adds the links that rest on an output file or a long instruction
+        self.assertEqual((lineage.CACHE_VERSION, lineage.CONTENT_FROM), (3, 3))        # version 3: the `content` links of an older file are not read
 
     def test_size_and_age_limits_on_read(self):
         many = [row(child='%08d-0000-4000-8000-000000000000' % i, seen=NOW - 1000 - i) for i in range(MAX_PAIRS + 50)]
@@ -175,7 +203,7 @@ class CacheFile(Fixture):
         self.assertEqual(os.listdir(os.path.dirname(self.cache)), ['links.json'])  # no temporary file is left behind
         with open(self.cache) as f:
             d = json.load(f)
-        self.assertEqual(d['version'], 2)
+        self.assertEqual(d['version'], 3)
         by = {(r['kind'], r['child']): r for r in d['links']}
         self.assertEqual(set(by), {('cli', C), ('codex', TID)})
         self.assertEqual((by[('cli', C)]['parent'], by[('cli', C)]['rule'], by[('cli', C)]['started']), (P, 'env', T0 + 1))

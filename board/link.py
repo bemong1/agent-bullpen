@@ -858,13 +858,14 @@ def _file_tools(word, cwd, assigns, mentions):
 def launch_kinds(cmd, base_cwd):
     """The tools a Bash command that holds no `claude -p` the reader could place can still start, as (named, assumed): `named` is `claude` / `codex` when the
     command names it somewhere that runs (a tmux line, a bare `codex exec`), or when it runs a script file (a shell script, a python file) whose text names it;
-    `assumed` is both, less what is named, when such a file could not be read (nothing shows what it starts: only that nothing rules it out). Both empty for a
-    server, a test run, a script that was read and starts nothing. A call is a launcher of a child only for the tool the child is of."""
+    `assumed` is both, less what is named, when such a file could not be read (nothing shows what it starts: only that nothing rules it out), and the tool
+    that code given on the command line (`python -c`) names. Both empty for a server, a test run, a script that was read and starts nothing, and a command
+    whose words only travel as text (`tmux send-keys`, `echo`). A call is a launcher of a child only for the tool the child is of."""
     if not isinstance(cmd, str):
         return frozenset(), BOTH_TOOLS
-    rough = SCRIPT_HEREDOC_RE.sub('', cmd) if '<<' in cmd else cmd
     code = _masked(cmd)
-    named, assumed = set(_tools_named(rough) if can_launch(code) else ()), set()
+    run, maybe = exec_regions(cmd)                                      # the words that run, and the words in code that may run them (`python -c`)
+    named, assumed = set(_tools_named('\n'.join(run))), set(_tools_named('\n'.join(maybe)))
     for x in bash_scripts(cmd, base_cwd):                              # a shell script whose text names a tool
         named |= _tools_in(x['text'])
     assigns = _cmd_assigns(cmd)
@@ -1137,7 +1138,6 @@ WORD_PAT = r'(?<![\w./~-])(?:claude|codex)(?![\w-])'                     # the w
 LAUNCHY_RE = re.compile(WORD_PAT + r'|\.(?:sh|py)(?![\w.])')            # loose: a call that might launch something (a candidate, never a proof)
 WORD_RE = re.compile(WORD_PAT)
 WEAK_LAUNCH_RE = re.compile(r'(?<![\w./~-])claude(?![\w-])[^\n;|&]*?\s(?:-p|--print)(?![\w-])')       # `claude … -p`: a launch the command reader did not place
-WRAPPER_RE = re.compile(r'(?:^|[;&|(\s])(?:tmux|screen|ssh|su|docker|podman|kubectl|parallel|xargs|watch|at)\s')      # a program that runs the command line it is given
 SCRIPTY_RE = re.compile(r'claude|codex|\.sh\b')          # a sub-agent's command that might run a script file worth reading (the main record's commands are all looked at; a script without a .sh name run from a sub-agent is not followed)
 LAUNCHY_B_RE = re.compile(WORD_PAT.encode() + rb'|\.(?:sh|py)(?![\w.])')
 WORD_B_RE = re.compile(WORD_PAT.encode())
@@ -1396,6 +1396,135 @@ def can_launch(code):
     return not seen
 
 
+# ---------- where a word runs ----------
+# `claude` / `codex` in a command starts something only where the shell runs it: at a command position, in the unquoted arguments of a program, or in the
+# command line a program that runs its arguments is given. A word that only travels as text (typed into a terminal by `tmux send-keys`, `screen -X stuff`,
+# printed by `echo`) is no launch of the call that carries it: that call is nobody's launcher, not even as a guess. Inline code of an interpreter
+# (`python -c '…'`) may start the tool and may not: it is only assumed.
+RUN_PROGRAMS = frozenset(('ssh', 'su', 'xargs', 'watch', 'parallel', 'at'))             # run the command line they are given
+RUN_SUBCOMMANDS = {                                                                     # programs that run it only for some subcommands
+    'tmux': frozenset(('new-session', 'new', 'new-window', 'neww', 'split-window', 'splitw', 'respawn-pane', 'respawnp', 'respawn-window', 'respawnw',
+                       'run-shell', 'run', 'display-popup', 'popup')),
+    'docker': frozenset(('exec', 'run')), 'podman': frozenset(('exec', 'run')), 'kubectl': frozenset(('exec',))}
+SUBCOMMAND_PROGRAMS = frozenset(('tmux', 'screen', 'script', 'docker', 'podman', 'kubectl'))     # nothing in their command runs unless the subcommand says so
+TMUX_VALUE_OPTS = frozenset(('-L', '-S', '-f', '-c', '-T'))                             # tmux options that take a value: the subcommand comes after
+INLINE_CODE = {'python': '-c', 'node': '-e', 'nodejs': '-e', 'ruby': '-e', 'perl': '-e', 'bun': '-e'}     # interpreters that run code given on the command line
+INLINE_NAME_RE = re.compile(r'(python|node|nodejs|ruby|perl|bun)[0-9.]*')
+SCRIPT_C_RE = re.compile(r'-[A-Za-z]*c|--command')
+DELIVERY_RE = re.compile(r'send-keys|send_keys|sendkeys|paste-buffer|set-buffer|load-buffer|\bstuff\b')    # inline code that types text into a terminal
+EXEC_DEPTH = 3                    # how deep the command line given to a program that runs it is read again
+EXEC_ARG_MAX = LAUNCHY_SCAN       # a word of that command line longer than this is not read again
+EXEC_SEG_MAX = 16384              # a simple command longer than this is not split into words (its masked text is all that is read)
+
+
+def _command_starts(code):
+    """The positions in masked text (shell_code) where the first word of a simple command stands (`can_launch` reads the same positions)."""
+    cmdpos, skip_next, out = True, False, []
+    delims = {m.group(2) or m.group(3) or m.group(4) for m in CX_HEREDOC_RE.finditer(code)}
+    for m in CX_TOK_RE.finditer(code):
+        t = m.group()
+        if t[0] in ' \t\r':
+            continue
+        if t in CMD_SEPARATORS:
+            cmdpos, skip_next = True, False
+        elif skip_next:
+            skip_next = False
+        elif t[0] in '<>&':
+            skip_next = True
+        elif cmdpos:
+            if t in CMD_SKIP or t in delims or t.strip('x') == '':
+                continue
+            out.append(m.start())
+            cmdpos = False
+    return out
+
+
+def _program_index(words):
+    """The index of the program among the dequoted words of a simple command, after `VAR=x` assignments and prefixes (nohup, env, timeout …). None when a prefix
+    has an option this reader does not know (what runs is then not known)."""
+    k = 0
+    while k < len(words):
+        w = words[k]
+        if CX_ASSIGN_RE.match(w):
+            k += 1
+            continue
+        name = w.rsplit('/', 1)[-1]
+        if name in CX_PREFIX_CMDS:
+            k = _skip_prefix(name, words, k)
+            if k is None:
+                return None
+        elif name in CMD_PREFIXES:
+            k += 1
+            while k < len(words) and words[k].startswith('-'):
+                k += 1
+        else:
+            return k
+    return None
+
+
+def _runs_arguments(prog, args):
+    """Whether a program given these words (after its name) runs one of them as a command line: `ssh host '…'`, `xargs claude …`, `tmux new-session '…'`
+    (not `tmux send-keys '…'`: that types the text into a window, where a shell may or may not run it)."""
+    if prog in RUN_PROGRAMS:
+        return True
+    if prog == 'screen':
+        return not any(a == '-X' and 'stuff' in args[i + 1:i + 3] for i, a in enumerate(args))
+    if prog == 'script':
+        return any(SCRIPT_C_RE.fullmatch(a) for a in args)
+    subs = RUN_SUBCOMMANDS.get(prog)
+    if subs is None:
+        return False
+    if prog == 'tmux':
+        j = 0
+        while j < len(args) and args[j].startswith('-'):
+            j += 2 if args[j] in TMUX_VALUE_OPTS else 1
+        return j < len(args) and args[j] in subs
+    return any(a in subs for a in args[:8])
+
+
+def exec_regions(text, depth=0):
+    """(run, maybe): the pieces of a command's text in which the words `claude` and `codex` run, and those in which they only may. `run`: the masked text of each
+    simple command that does not only print (its program and its unquoted arguments), and, for a program that runs a command line it is given (tmux
+    new-session, ssh, xargs, docker exec …), each word of its arguments read again as a command line. `maybe`: the code a `python -c` / `node -e` is given
+    (unless it types text into a terminal). A simple command of `echo`, `printf`, `tmux send-keys` … gives nothing."""
+    run, maybe = [], []
+    if not isinstance(text, str):
+        return run, maybe
+    code = _masked(text)
+    for a in _command_starts(code):
+        toks, end = _simple_tokens(code, a)
+        try:
+            words = shlex.split(text[a:min(end, a + EXEC_SEG_MAX)])
+        except ValueError:
+            words = None
+        k = _program_index(words) if words else None
+        prog = os.path.basename(words[k]) if k is not None else None
+        if prog in PRINT_CMDS:
+            continue
+        args = words[k + 1:] if prog is not None else ()
+        runs = prog is not None and _runs_arguments(prog, args)
+        if prog in SUBCOMMAND_PROGRAMS and not runs:
+            continue                                                     # `tmux send-keys`, `screen -X stuff`, `docker logs` …: what follows is not a command line
+        run.append(code[a:end])
+        if prog is None:
+            continue
+        if runs:
+            if depth < EXEC_DEPTH:
+                for w in args:
+                    if len(w) <= EXEC_ARG_MAX and _maybe_launchy(w):
+                        r, m = exec_regions(w, depth + 1)
+                        run += r
+                        maybe += m
+        else:
+            im = INLINE_NAME_RE.fullmatch(prog)
+            flag = INLINE_CODE.get(im.group(1)) if im else None
+            if flag and flag in args[:-1]:
+                snippet = args[args.index(flag) + 1]
+                if not DELIVERY_RE.search(snippet):
+                    maybe.append(snippet)
+    return run, maybe
+
+
 def _arg_literals(pos, env, stdin):
     """(arg, loop_args) of a claude command's instruction: `arg` the normalised literal when it is one word without a substitution (a variable with one
     known value counts), `loop_args` the normalised list when it is a loop variable with several known values (it can only confirm, never veto)."""
@@ -1570,13 +1699,24 @@ def _raw_ts(raw):
 
 def _weak_launch(cmd):
     """Whether a command that the reader found no `claude -p` in still starts one: the words stand unquoted in an argument (`xargs … claude -p`), or a
-    quoted string is handed to a program that runs it (tmux, ssh, ...). Text in a heredoc, a comment or a string given to anything else (`python3 - <<EOF`)
-    is not a launch."""
-    head = cmd[:LAUNCHY_SCAN]
-    code = _masked(head)
-    if WEAK_LAUNCH_RE.search(code):
+    quoted string is handed to a program that runs it (`tmux new-session`, ssh, ...). Text in a heredoc, a comment, a string given to anything else
+    (`python3 - <<EOF`) or one that is only typed into a terminal (`tmux send-keys`, `echo`) is not a launch."""
+    run, _ = exec_regions(cmd[:LAUNCHY_SCAN])
+    return any(WEAK_LAUNCH_RE.search(t) for t in run)
+
+
+def _launchy_call(cmd):
+    """Whether a command that no launch was read from and that runs no script file is still worth a span (a candidate the probe may read again): it holds a
+    `.sh` / `.py` word or a tool word, and the tool word stands where something runs it. A call whose words only travel as text (typed into a terminal, printed)
+    has no span: it is nobody's launcher, so it cannot be a rival of the one that is."""
+    if not (_maybe_launchy(cmd) and LAUNCHY_RE.search(cmd)):
+        return False
+    if not WORD_RE.search(cmd):
         return True
-    return bool(WRAPPER_RE.search(code)) and bool(WEAK_LAUNCH_RE.search(head))
+    if not can_launch(_masked(cmd)):
+        return False
+    run, maybe = exec_regions(cmd)
+    return any(LAUNCHY_RE.search(t) for t in run + maybe)
 
 
 def _maybe_launchy(cmd):
@@ -2224,7 +2364,7 @@ class LinkIndex:
                     launches = self._cli_call(f, d, b, scripts)
                 except Exception as e:   # noqa: BLE001
                     line_error(f['sid'], None, e)
-            if ts and 'spans' in f and isinstance(cmd, str) and (launches or scripts or (_maybe_launchy(cmd) and LAUNCHY_RE.search(cmd) and (not WORD_RE.search(cmd) or can_launch(_masked(cmd))))):
+            if ts and 'spans' in f and isinstance(cmd, str) and (launches or scripts or _launchy_call(cmd)):
                 self._span(f, d, b, ts, cmd, launches, off, len(raw))
         return got
 

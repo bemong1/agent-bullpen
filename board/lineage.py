@@ -36,9 +36,12 @@ ENV_NAMES = (b'CLAUDE_CODE_SESSION_ID', b'CLAUDE_PID')           # only these tw
 
 # record of the links found by firm rules (so they are not forgotten across a restart). It holds only session ids, rule and time (no path, instruction, fingerprint or environment
 # variable value). Version 2 adds the links that rest on an output file (`out`) or a long instruction (`content`), with the sub-agent id when the node is one; version 1 files are still read.
+# Version 3 is the first whose `content` links come from a reader that does not take words that only travel as text (`tmux send-keys …`, `echo`) for a launch: the `content`
+# links of an older file are not read (the records give them again, rightly), the other rules of an older file are kept.
 LINK_CACHE = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.join(HOME, '.cache'), 'agent-bullpen', 'links.json')
-CACHE_VERSION = 2
-CACHE_READ_VERSIONS = (1, 2)
+CACHE_VERSION = 3
+CACHE_READ_VERSIONS = (1, 2, 3)
+CONTENT_FROM = 3                  # the first file version whose `content` links are read
 CACHE_MAX = 2000                  # cap on the number of pairs (the oldest are dropped first)
 CACHE_DAYS = 90                   # entries first seen longer ago than this are cleaned up
 CACHE_FILE_MAX = 2 << 20          # cap on the file read
@@ -189,9 +192,10 @@ def _cache_trusted(path):
     return True
 
 
-def read_cache(path, now=None):
+def read_cache(path, now=None, info=None):
     """The entries of the cache file [{child, parent, kind, rule, seen, started}]. [] (quietly) if it is absent, broken or untrusted. The shape of every entry is checked:
-    a UUID-shaped session id, kind (cli|codex), rule (CACHE_RULES), first-seen time within CACHE_DAYS, an optional sub-agent id, and the pair count up to CACHE_MAX."""
+    a UUID-shaped session id, kind (cli|codex), rule (CACHE_RULES), first-seen time within CACHE_DAYS, an optional sub-agent id, and the pair count up to CACHE_MAX.
+    A `content` entry of a file older than CONTENT_FROM is left out. `info` (a dict) is given the file's `version` when the file could be read."""
     now = time.time() if now is None else now
     try:
         if not _cache_trusted(path):
@@ -206,7 +210,10 @@ def read_cache(path, now=None):
         with os.fdopen(fd, 'rb') as fh:
             fd = -1
             d = json.loads(fh.read(CACHE_FILE_MAX + 1))
-        rows = d.get('links') if isinstance(d, dict) and d.get('version') in CACHE_READ_VERSIONS else None
+        version = d.get('version') if isinstance(d, dict) else None
+        rows = d.get('links') if version in CACHE_READ_VERSIONS else None
+        if info is not None and rows is not None:
+            info['version'] = version
     except (OSError, ValueError):
         return []
     finally:
@@ -221,6 +228,8 @@ def read_cache(path, now=None):
         if not (isinstance(c, str) and isinstance(p, str) and SID_RE.fullmatch(c) and SID_RE.fullmatch(p) and c != p):
             continue
         if kind not in ('cli', 'codex') or rule not in CACHE_RULES or not num(seen) or not (now - CACHE_DAYS * 86400 <= seen <= now + 86400):
+            continue
+        if rule == 'content' and version < CONTENT_FROM:
             continue
         if (kind, c) in seen_keys:
             continue
@@ -280,7 +289,8 @@ class Lineage:
         """Keeps the links in path, and reads what is in the file now and uses it with the same rule (rule 'file', firm). Once, at start."""
         self.cache = path
         had = bool(self.cli or self.cx or self.saved)      # if something was already found before turning this on, it differs from the file, so it must be written once at first
-        for r in read_cache(path):
+        info = {}
+        for r in read_cache(path, info=info):
             if r['kind'] == 'cli' and r['rule'] in SAVED_RULES:
                 self.saved.setdefault(r['child'], {'tree': r['parent'], 'node': r.get('node'), 'orig': r['rule'], 'seen': r['seen'], 'ts': r['started']})
             elif r['kind'] == 'cli':
@@ -290,7 +300,7 @@ class Lineage:
                     self.cx[r['child']] = r['parent']
                     self.cx_info[r['child']] = {'rule': 'file', 'orig': r['rule'], 'seen': r['seen'], 'ts': r['started']}
         self._loaded = bool(self.cli or self.cx or self.saved)
-        self._saved = None if had else self._rows_text()
+        self._saved = None if had or info.get('version') != CACHE_VERSION and 'version' in info else self._rows_text()      # a file of an older version is written again, once, as the current one
 
     def remember(self, child, tree, node, rule, started, now=None):
         """Keeps a link the affiliation judgment found firm: rule `out` (the launching call's output file holds the child's id) or `content` (a long instruction found in

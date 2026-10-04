@@ -917,9 +917,9 @@ class Sensitivity(unittest.TestCase):
             self.assertIsNotNone(self.linked(self.case(bait='text_mismatch')))
             self.assertIsNotNone(self.linked(self.case(bait='cwd_mismatch')))
 
-    def test_without_the_printing_filter_an_echo_is_a_launch(self):
-        with mock.patch.object(link, 'can_launch', lambda code: True):
-            self.assertIsNotNone(self.linked(self.case(bait='echo_only')))
+    def test_without_the_position_filter_an_echo_is_a_launch(self):
+        with mock.patch.object(link, 'can_launch', lambda code: True), mock.patch.object(link, 'exec_regions', lambda text, depth=0: ([text], [])):
+            self.assertIsNotNone(self.linked(self.case(bait='echo_only')))                  # every word counts where it stands: the quoted text of an echo too
 
     def test_without_the_running_requirement_an_old_call_links(self):
         with mock.patch.object(affil, 'span_running', lambda span, t: True):
@@ -1285,7 +1285,7 @@ class LinkCacheVersion2(unittest.TestCase):
             with open(cache) as fh:
                 text = fh.read()
             d = json.loads(text)
-            self.assertEqual(d['version'], 2)
+            self.assertEqual(d['version'], 3)
             rows = [r for r in d['links'] if r['kind'] == 'cli']
             self.assertTrue(rows)
             for r in rows:
@@ -1298,24 +1298,32 @@ class LinkCacheVersion2(unittest.TestCase):
         finally:
             shutil.rmtree(root, ignore_errors=True)
 
-    def test_rows_of_version_1_are_still_read_and_unknown_rules_are_not(self):
+    def test_rows_of_older_versions_are_still_read_but_not_their_content_links_and_unknown_rules_are_not(self):
+        """Version 3 is the first whose `content` links come from a reader that does not count words that only travel as text: an older file's `content` rows are not read."""
         with tempfile.TemporaryDirectory() as d:
             os.chmod(d, 0o700)
             p = os.path.join(d, 'links.json')
             now = 1790000000.0
-            rows = [{'child': B, 'parent': A, 'kind': 'cli', 'rule': 'env', 'seen': now, 'started': now}]
-            for version, extra in ((1, []), (2, [{'child': C, 'parent': A, 'kind': 'cli', 'rule': 'content', 'seen': now, 'started': now, 'node': SUB1},
-                                                 {'child': KID, 'parent': A, 'kind': 'cli', 'rule': 'time', 'seen': now, 'started': now}])):
+            D = KID2
+            rows = [{'child': B, 'parent': A, 'kind': 'cli', 'rule': 'env', 'seen': now, 'started': now},
+                    {'child': D, 'parent': A, 'kind': 'cli', 'rule': 'out', 'seen': now, 'started': now}]
+            extra = [{'child': C, 'parent': A, 'kind': 'cli', 'rule': 'content', 'seen': now, 'started': now, 'node': SUB1},
+                     {'child': KID, 'parent': A, 'kind': 'cli', 'rule': 'time', 'seen': now, 'started': now}]
+            for version, want in ((1, [B, D]), (2, [B, D]), (3, [B, D, C])):
                 with open(p, 'w') as fh:
                     json.dump({'version': version, 'links': rows + extra}, fh)
                 os.chmod(p, 0o600)
-                got = lineage.read_cache(p, now=now)
-                self.assertEqual([r['child'] for r in got], [B] if version == 1 else [B, C], version)
-            self.assertEqual(got[1].get('node'), SUB1)
+                info = {}
+                got = lineage.read_cache(p, now=now, info=info)
+                self.assertEqual([r['child'] for r in got], want, version)
+                self.assertEqual(info, {'version': version})
+            self.assertEqual(got[2].get('node'), SUB1)
             with open(p, 'w') as fh:
-                json.dump({'version': 3, 'links': rows}, fh)
+                json.dump({'version': 4, 'links': rows}, fh)
             os.chmod(p, 0o600)
-            self.assertEqual(lineage.read_cache(p, now=now), [])
+            info = {}
+            self.assertEqual(lineage.read_cache(p, now=now, info=info), [])
+            self.assertEqual(info, {})                                                   # a version this one does not know is not read at all
 
     def test_a_remembered_link_survives_a_restart_without_the_records_evidence(self):
         ln = lineage.Lineage()
@@ -1911,6 +1919,165 @@ class LaunchKindsInRecords(CliFixture):
         self.assertIsNone(c)                                                                          # not a call the Codex rules look at
         stranger = {'id': '019a0001-0000-7000-8000-00000000000a', 'origin': 'exec', 'guardian': False, 'meta_ts': T0 + 2, 'first_user': 'x', 'cwd': '/w'}
         self.assertEqual(link.cx_link([], [stranger]), {})
+
+
+class WordsThatOnlyTravel(CliFixture):
+    """WP0: words that only travel as text (typed into a terminal, printed) are no launch of the call that carries them. That call is nobody's launcher, not even
+    as a guess, and it is no rival of the session that really ran `claude -p`."""
+    RELAY = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    LAUNCHER = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+
+    SHAPES = {
+        'send-keys': "tmux send-keys -t w -l '%s' && tmux send-keys -t w Enter",
+        'send-keys, chained': "cd /w && tmux send-keys -t w:0.1 -l '%s'; sleep 1; tmux send-keys -t w:0.1 Enter",
+        'send, remote': "ssh box \"tmux send-keys -t w '%s' Enter\"",
+        'python -c': "python3 -c \"import subprocess; subprocess.run(['tmux', 'send-keys', '-t', 'w', '-l', '%s'])\"",
+        'echo': "echo 'Run: %s'",
+        'printf': "printf '%%s\\n' \"%s\"",
+        'screen': "screen -S w -X stuff '%s'",
+        'paste-buffer': "tmux set-buffer -b x '%s' && tmux paste-buffer -b x -t w",
+    }
+
+    def relay(self, shape, sid=None):
+        cmd = self.SHAPES[shape] % ('claude -p "%s"' % TEXT)
+        self.write(sid or self.RELAY, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}}),
+                                       bash_line(T0, cmd, tid='toolu_relay'), result_line(T0 + 0.5, 'toolu_relay')])
+        return cmd
+
+    def launcher(self):
+        self.write(self.LAUNCHER, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'run it'}}),
+                                   bash_line(T0 + 1, 'cd /w && claude -p --model m "%s"' % TEXT, tid='toolu_run'), result_line(T0 + 30, 'toolu_run')])
+
+    def run_scan(self):
+        self.write(KID, child_lines(T0 + 2, text=TEXT))
+        with mock.patch('time.time', lambda: T0 + 600):
+            self.scan()
+        return self.links.cli_owners.get(KID)
+
+    def test_a_relay_is_nobodys_launcher(self):
+        for shape in self.SHAPES:
+            with self.subTest(shape):
+                self.setUp()
+                self.relay(shape)
+                self.assertIsNone(self.run_scan(), shape)
+                self.assertEqual([c for c in self.links.decisions[KID].claims], [], shape)           # not even a call the child could be accounted to
+
+    def test_a_relay_and_the_real_launcher_are_no_tie(self):
+        for shape in self.SHAPES:
+            with self.subTest(shape):
+                self.setUp()
+                self.relay(shape)
+                self.launcher()
+                o = self.run_scan()
+                self.assertEqual((o['sid'], o['rule'], o['certain']), (self.LAUNCHER, 'content', True), shape)
+
+    def test_a_short_literal_is_not_linked_to_a_relay_either(self):
+        self.write(self.RELAY, [bash_line(T0, "tmux send-keys -t w -l 'claude -p \"/init\"' && tmux send-keys -t w Enter", tid='toolu_relay'), result_line(T0 + 0.5, 'toolu_relay')])
+        self.write(KID, child_lines(T0 + 2, text='/init'))
+        with mock.patch('time.time', lambda: T0 + 600):
+            self.scan()
+        self.assertIsNone(self.links.cli_owners.get(KID))
+
+    def test_the_commands_that_run_what_they_are_given_still_link(self):
+        for cmd in ('tmux new-session -d -s w \'claude -p "%s"\'', 'tmux -L sock new-window -d \'cd /w && claude -p "%s"\'', 'ssh box \'claude -p "%s"\'',
+                    'printf "%%s\\n" go | xargs -I{} claude -p "%s"', 'bash -c \'claude -p "%s"\'', 'docker exec c claude -p "%s"', 'env -i PATH=$PATH claude -p "%s"'):
+            with self.subTest(cmd):
+                self.setUp()
+                self.write(self.RELAY, [bash_line(T0, cmd % TEXT, tid='toolu_t'), result_line(T0 + 5, 'toolu_t')])
+                o = self.run_scan()
+                self.assertIsNotNone(o, cmd)
+                self.assertEqual((o['sid'], o['certain']), (self.RELAY, True), cmd)
+
+    def test_code_given_to_python_may_start_a_session_and_is_a_guess_at_most(self):
+        self.write(self.RELAY, [bash_line(T0, 'python3 -c "import subprocess; subprocess.run([\'claude\', \'-p\', \'%s\'])"' % TEXT, tid='toolu_py'), result_line(T0 + 5, 'toolu_py')])
+        o = self.run_scan()
+        self.assertIsNotNone(o)
+        self.assertEqual((o['sid'], o['certain']), (self.RELAY, False))                                       # assumed: at most the guess of rank 4
+        self.assertEqual(link.launch_kinds('python3 -c "subprocess.run([\'claude\', \'-p\'])"', '/w'), (frozenset(), frozenset({'claude'})))
+
+
+    def cache(self, version, rule='content'):
+        d = os.path.join(os.path.realpath(self.tmp.name), 'cache')
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+        path = os.path.join(d, 'links.json')
+        with open(path, 'w') as fh:
+            json.dump({'version': version, 'links': [{'child': KID, 'parent': self.RELAY, 'kind': 'cli', 'rule': rule, 'seen': time.time() - 100, 'started': T0 + 2}]}, fh)
+        os.chmod(path, 0o600)
+        self.links.lineage.enable_cache(path)
+
+    def test_a_content_link_a_relay_got_in_an_older_file_does_not_come_back(self):
+        self.write(self.RELAY, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}})])
+        self.cache(2)
+        self.assertIsNone(self.run_scan())                                                       # nothing in the records says it: the old link is gone, not a fallback
+        self.assertNotIn(KID, self.links.lineage.saved)
+
+    def test_the_same_link_in_a_current_file_is_a_fallback(self):
+        self.write(self.RELAY, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}})])
+        self.cache(3)
+        o = self.run_scan()
+        self.assertEqual((o['sid'], o['rule']), (self.RELAY, 'cache'))
+
+    def test_the_other_rules_of_an_older_file_are_kept(self):
+        self.write(self.RELAY, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}})])
+        self.cache(2, rule='out')
+        o = self.run_scan()
+        self.assertEqual((o['sid'], o['rule']), (self.RELAY, 'cache'))
+
+
+class WhereAWordRuns(unittest.TestCase):
+    """exec_regions: the pieces of a command where the words claude / codex run, and where they only may."""
+
+    def words(self, cmd):
+        run, maybe = link.exec_regions(cmd)
+        return link._tools_named('\n'.join(run)), link._tools_named('\n'.join(maybe))
+
+    def test_where_it_runs(self):
+        none, claude = frozenset(), frozenset({'claude'})
+        for cmd, want in (('claude -p x', (claude, none)),
+                          ('cd /w && nohup claude -p x &', (claude, none)),
+                          ('timeout 600 claude -p x', (claude, none)),
+                          ('FOO=1 sudo -u me claude -p x', (claude, none)),
+                          ("tmux new-session -d 'claude -p x'", (claude, none)),
+                          ("tmux -L s -f /x/conf split-window 'claude -p x'", (claude, none)),
+                          ("tmux send-keys -t w 'claude -p x' Enter", (none, none)),
+                          ('tmux send-keys -t w claude -p x Enter', (none, none)),
+                          ("tmux send -t w 'claude -p x'", (none, none)),
+                          ("tmux paste-buffer -t w; tmux set-buffer 'claude -p x'", (none, none)),
+                          ("screen -dmS w claude -p x", (claude, none)),
+                          ("screen -S w -p 0 -X stuff 'claude -p x'", (none, none)),
+                          ("echo 'claude -p x'", (none, none)),
+                          ('echo claude -p x', (none, none)),
+                          ("printf '%s' 'claude -p x' | tmux load-buffer -", (none, none)),
+                          ("ssh h 'claude -p x'", (claude, none)),
+                          ("ssh h \"echo 'claude -p x'\"", (none, none)),
+                          ('xargs -n1 claude -p', (claude, none)),
+                          ("docker exec c sh -c 'claude -p x'", (claude, none)),
+                          ('docker logs claude', (none, none)),
+                          ("python3 -c \"os.system('claude -p x')\"", (none, claude)),
+                          ("python3 -c \"os.system('tmux send-keys claude -p x')\"", (none, none)),
+                          ("node -e \"exec('claude -p x')\"", (none, claude)),
+                          ('script -qc "claude -p x" /dev/null', (claude, none)),
+                          ('script -q out.txt', (none, none)),
+                          ("grep 'claude -p' notes.md", (none, none)),
+                          ('git commit -m "claude -p"; python3 run.py', (none, none)),
+                          ('bash run.sh; echo "codex exec y"', (none, none)),
+                          ('codex exec "y"', (frozenset({'codex'}), none)),
+                          ('echo "$(claude -p x)"', (claude, none)),
+                          ("echo 'unbalanced claude -p", (none, none))):
+            self.assertEqual(self.words(cmd), want, cmd)
+
+    def test_a_weak_launch_is_only_where_it_runs(self):
+        for cmd, want in (("tmux new-session -d -s w 'claude -p \"go\"'", True), ("tmux send-keys -t w 'claude -p \"go\"' Enter", False),
+                          ("echo claude -p go", False), ("printf '%s\\n' go | xargs claude -p", True), ("ssh h 'claude -p go'", True),
+                          ("python3 -c \"os.system('claude -p go')\"", False), ("python3 - <<'EOF'\nclaude -p go\nEOF", False),
+                          ("screen -S w -X stuff 'claude -p go'", False)):
+            self.assertEqual(link._weak_launch(cmd), want, cmd)
+
+    def test_a_span_is_made_only_for_a_call_that_can_run_the_words_or_a_script(self):
+        for cmd, want in (("tmux send-keys -t w 'claude -p go.sh' Enter", False), ("tmux new-session -d 'claude -p go'", True), ('bash run.sh', True),
+                          ('python3 tool.py claude', True), ("echo 'claude -p go'", False), ('python3 -c "os.system(\'claude -p go\')"', True)):
+            self.assertEqual(link._launchy_call(cmd), want, cmd)
 
 
 class FolderScenes(CliFixture):
