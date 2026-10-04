@@ -551,7 +551,8 @@ def loop_factor(text, code, upto):
 
 
 # ---------- script files ----------
-# When a Bash command runs a script file **in command position** (`bash file` · `sh file` · `source file` · `. file` · `./file` · running an absolute or relative path), the runs inside that file are looked at too.
+# When a Bash command runs a script file **in command position** (`bash file` · `sh file` · `source file` · `. file` · `./file` · running an absolute or relative path, or a path that starts with a variable
+# the same command sets to a literal: `R=/x/runs; $R/run.sh`), the runs inside that file are looked at too.
 # One level only (a script that calls a script is not followed). The file is opened under the same policy as the document view (open_safe: regular files only, dot paths and secret names refused).
 SCRIPT_MAX = 256 << 10        # a script bigger than this is not looked at
 SCRIPT_RUNS_MAX = 8           # cap on the number of scripts followed from one command
@@ -559,7 +560,7 @@ SCRIPT_TAIL = 4096            # cap on the text from which the file name and arg
 SCRIPT_RUN_RE = re.compile(
     r'(?:^|[;&|(`]|\$\()\s*(?:(?:do|then|else|if|elif|while|until|!|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*'
     r'(?:(?:timeout\s+\S+|nohup|setsid|time|exec|env(?:\s+[A-Za-z_]\w*=\S*)*)\s+)*'
-    r'(?:(?P<sh>(?:[^\s;&|()<>`$\'"]*/)?(?:bash|sh|zsh|dash|ksh))\s+|(?P<src>source|\.)\s+|(?=[^\s;&|()<>`$]*/))', re.M)
+    r'(?:(?P<sh>(?:[^\s;&|()<>`$\'"]*/)?(?:bash|sh|zsh|dash|ksh))\s+|(?P<src>source|\.)\s+|(?=(?:\$\{?[A-Za-z_]\w*\}?)?[^\s;&|()<>`$]*/))', re.M)
 SCRIPT_HEREDOC_RE = re.compile(r'<<-?[ \t]*([\'"]?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|\Z)', re.S)     # for a cheap filter: a heredoc body is not execution anyway
 SCRIPT_CD_RE = re.compile(r'\b(?:cd|pushd)\b')
 SCRIPT_ASSIGN_RE = re.compile(r'(?:^|[;&|(])[ \t]*(?:(?:export|local|readonly|declare)[ \t]+)?([A-Za-z_]\w*)=', re.M)
@@ -897,6 +898,8 @@ def launch_kinds(cmd, base_cwd):
         pick = _script_pick(kind, os.path.basename(m.group('sh') or ''), _words_at(cmd, code, m.end()))
         if not pick or (kind == 'path' and not pick[0].endswith('.sh')):
             continue                                                   # a program run by path is not a script we expect to read
+        if kind == 'path' and '$' in pick[0] and not _cx_expand(pick[0], assigns):
+            continue                                                   # `$R/run.sh` is a script file only where the command itself says what `$R` is
         got, guess = _file_tools(pick[0], shell_cwd(cmd, code, m.start(), assigns, base_cwd), assigns, False)
         named |= got
         assumed |= guess

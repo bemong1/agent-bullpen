@@ -1921,6 +1921,48 @@ class LaunchKindsInRecords(CliFixture):
         self.assertEqual(link.cx_link([], [stranger]), {})
 
 
+class ScriptByVariablePath(CliFixture):
+    """`R=/x/runs; $R/run.sh a b`: the script is a file the command runs where the command itself says what `$R` is (the run of a script by a path that starts with a variable)."""
+    SECOND = 'and now the second part of the work: check the amber basin and report what you find in plain words, please.'
+
+    def runs_dir(self):
+        d = os.path.join(os.path.realpath(self.tmp.name), 'runs')
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, 'run.sh'), 'w') as fh:
+            fh.write('#!/bin/bash\nR=%s\ncd /w || exit 1\nclaude -p "$(cat "$R/$1/$2")" --resume "$3" --model m\n' % d)
+        os.chmod(os.path.join(d, 'run.sh'), 0o755)
+        return d
+
+    def test_what_the_script_starts_is_named_when_the_variable_is_set_in_the_command(self):
+        d = self.runs_dir()
+        link._SCRIPTS.clear()
+        for cmd, want in (('R=%s; $R/run.sh a b c' % d, ({'claude'}, set())), ('R=%s\n${R}/run.sh a b c' % d, ({'claude'}, set())),
+                          ('$R/run.sh a b c', (set(), set())),                                           # nobody says what $R is: nothing is shown, nothing is assumed
+                          ('$HOME/run.sh a b c', (set(), set())), ('%s/run.sh a b c' % d, ({'claude'}, set())),
+                          ('R=%s; $R/missing.sh a' % d, (set(), {'claude', 'codex'}))):                      # a script that is not there may start either
+            named, assumed = link.launch_kinds(cmd, '/w')
+            self.assertEqual((set(named), set(assumed)), want, cmd)
+        self.assertEqual([os.path.basename(x['path']) for x in link.bash_scripts('R=%s; $R/run.sh a b c' % d, '/w')], ['run.sh'])
+        self.assertEqual(link.bash_scripts('$R/run.sh a b c', '/w'), [])
+
+    def test_the_run_that_resumed_the_child_is_credited_to_that_call(self):
+        d = self.runs_dir()
+        kid = '55555555-5555-4555-8555-555555555555'
+        first = 'Please review the amber basin cedar delta ember fjord grove harbor island juniper kelp lagoon meadow nectar orchard prairie quartz ridge summit tundra umber.'
+        cmd = ('sleep 2; for p in $(pgrep -f "claude -p"); do echo "still running $p"; done; R=%s; cat > $R/more.txt <<\'EOF\'\n%s\nEOF\n$R/run.sh t more.txt %s' % (d, self.SECOND, kid))
+        self.write(self.PARENT, [bash_line(T0, 'cd /w && claude -p "%s"' % first, tid='toolu_1'), result_line(T0 + 9, 'toolu_1'),
+                                 bash_line(T0 + 3600, cmd, tid='toolu_2'), result_line(T0 + 3650, 'toolu_2')])
+        self.write(kid, child_lines(T0 + 2, text=first) + [dump({'type': 'cost-state', 'timestamp': iso(T0 + 8), 'sessionId': kid, 'totalDuration': 6000})]
+                   + [dump({'type': 'user', 'timestamp': iso(T0 + 3602), 'cwd': '/w', 'promptSource': 'sdk', 'turnPosition': {'promptIndex': 0, 'turnIndex': 2},
+                            'message': {'role': 'user', 'content': self.SECOND}})])
+        with mock.patch('time.time', lambda: T0 + 7200):
+            self.scan()
+        o = self.links.cli_owners[kid]
+        self.assertEqual(o['calls'], ['toolu_1', 'toolu_2'])
+        self.assertEqual(o['by'], [(self.PARENT, None), (self.PARENT, None)])
+        self.assertTrue(all(o['calls_certain']))
+
+
 class WordsThatOnlyTravel(CliFixture):
     """WP0: words that only travel as text (typed into a terminal, printed) are no launch of the call that carries them. That call is nobody's launcher, not even
     as a guess, and it is no rival of the session that really ran `claude -p`."""
