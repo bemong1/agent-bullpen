@@ -1285,7 +1285,7 @@ class LinkCacheVersion2(unittest.TestCase):
             with open(cache) as fh:
                 text = fh.read()
             d = json.loads(text)
-            self.assertEqual(d['version'], 4)
+            self.assertEqual(d['version'], 5)
             rows = [r for r in d['links'] if r['kind'] == 'cli']
             self.assertTrue(rows)
             for r in rows:
@@ -1299,7 +1299,8 @@ class LinkCacheVersion2(unittest.TestCase):
             shutil.rmtree(root, ignore_errors=True)
 
     def test_rows_of_older_versions_are_still_read_but_not_their_content_links_and_unknown_rules_are_not(self):
-        """Version 3 is the first whose `content` links come from a reader that does not count words that only travel as text: an older file's `content` rows are not read."""
+        """Version 5 is the first whose `content` links come from a reader that does not count words that only travel as text, the plain arguments of an ordinary program and a python
+        file that only mentions the tool: an older file's `content` rows are not read."""
         with tempfile.TemporaryDirectory() as d:
             os.chmod(d, 0o700)
             p = os.path.join(d, 'links.json')
@@ -1309,7 +1310,7 @@ class LinkCacheVersion2(unittest.TestCase):
                     {'child': D, 'parent': A, 'kind': 'cli', 'rule': 'out', 'seen': now, 'started': now}]
             extra = [{'child': C, 'parent': A, 'kind': 'cli', 'rule': 'content', 'seen': now, 'started': now, 'node': SUB1},
                      {'child': KID, 'parent': A, 'kind': 'cli', 'rule': 'time', 'seen': now, 'started': now}]
-            for version, want in ((1, [B, D]), (2, [B, D]), (3, [B, D]), (4, [B, D, C])):
+            for version, want in ((1, [B, D]), (2, [B, D]), (3, [B, D]), (4, [B, D]), (5, [B, D, C])):
                 with open(p, 'w') as fh:
                     json.dump({'version': version, 'links': rows + extra}, fh)
                 os.chmod(p, 0o600)
@@ -1319,7 +1320,7 @@ class LinkCacheVersion2(unittest.TestCase):
                 self.assertEqual(info, {'version': version})
             self.assertEqual(got[2].get('node'), SUB1)
             with open(p, 'w') as fh:
-                json.dump({'version': 5, 'links': rows}, fh)
+                json.dump({'version': 6, 'links': rows}, fh)
             os.chmod(p, 0o600)
             info = {}
             self.assertEqual(lineage.read_cache(p, now=now, info=info), [])
@@ -2067,6 +2068,13 @@ class WordsThatOnlyTravel(CliFixture):
         self.assertIsNone(self.run_scan())
         self.assertNotIn(KID, self.links.lineage.saved)
 
+    def test_the_content_link_of_a_version_4_file_does_not_come_back_either(self):
+        """Version 5: a python file that only mentions the tool (a relay that types it into a terminal) is no longer a launch, so what a version 4 file remembers of the kind is read again."""
+        self.write(self.RELAY, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}})])
+        self.cache(4)
+        self.assertIsNone(self.run_scan())
+        self.assertNotIn(KID, self.links.lineage.saved)
+
     def test_the_other_rules_of_an_older_file_are_kept(self):
         self.write(self.RELAY, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}})])
         self.cache(2, rule='out')
@@ -2180,6 +2188,96 @@ class ScriptFilesAreReadLikeCommands(CliFixture):
             with self.subTest(text):
                 got, may = link.script_tools(text)
                 self.assertEqual((set(got), set(may)), want, text)
+
+
+class PythonFilesAreReadAsCode(CliFixture):
+    """A python file starts a tool where a call of the subprocess family hands it the command, and only there: a relay that types the instruction into a terminal runs nothing, and a mention
+    anywhere else (a string, a comment, a name, a file that does not parse) is only assumed, so it is never the certain parent of a child that carries the instruction."""
+    RELAY = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    NONE = (frozenset(), frozenset())
+
+    def pyfile(self, text):
+        path = os.path.join(os.path.realpath(self.tmp.name), 'relay.py')
+        with open(path, 'w') as fh:
+            fh.write(text)
+        link._SCRIPTS.clear()
+        link._PY_TOOLS.clear()
+        return path
+
+    def owner_of_child(self, cmd):
+        self.write(self.PARENT, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}}),
+                                 bash_line(T0 - 3, cmd, tid='toolu_relay'), result_line(T0 - 2.5, 'toolu_relay')])
+        self.write(KID, child_lines(T0 + 2, text=TEXT))
+        with mock.patch('time.time', lambda: T0 + 600):
+            self.scan()
+        return self.links.cli_owners.get(KID)
+
+    def test_a_relay_that_types_the_instruction_into_a_terminal_is_no_launch(self):
+        path = self.pyfile('import subprocess, sys\nsubprocess.run(["tmux", "send-keys", "-t", "w", "claude -p \\"%s\\"" % sys.argv[1], "Enter"])\n')
+        cmd = 'python3 %s "%s"' % (path, TEXT)
+        self.assertEqual(link.launch_kinds(cmd, '/w'), self.NONE)
+        self.assertIsNone(self.owner_of_child(cmd))
+
+    def test_other_ways_a_python_file_only_carries_the_words(self):
+        typed = ('import os\nos.system("tmux send-keys -t w \'claude -p x\' Enter")\n',
+                 'import subprocess\nsubprocess.run("tmux paste-buffer -t w; echo claude -p x", shell=True)\n',
+                 'import subprocess\nsubprocess.check_call(["screen", "-S", "w", "-X", "stuff", "claude -p x"])\n',
+                 'import subprocess\nsubprocess.run(["ssh", "box", "tmux", "send-keys", "-t", "w", "claude -p x", "Enter"])\n')
+        for text in typed:                                                                          # text typed into a terminal: nothing, not even a guess
+            with self.subTest(text):
+                self.assertEqual(link.py_tools(text), self.NONE, text)
+        for text in ('import subprocess\nsubprocess.run(["echo", "claude", "-p"])\n',
+                     'import subprocess\nsubprocess.run(["curl", "--data", "claude -p", "http://example.invalid/"])\n', 'print("claude -p x")\n'):
+            with self.subTest(text):
+                self.assertEqual(link.py_tools(text)[0], frozenset(), text)                         # named only where a call runs it
+
+    def test_what_a_python_file_starts_is_read_from_the_calls(self):
+        claude, codex = frozenset({'claude'}), frozenset({'codex'})
+        for text, want in (("import subprocess\nsubprocess.run(['claude', '-p', 'x'])\n", claude),
+                           ("import subprocess as sp\nsp.Popen(['claude', '-p', prompt])\n", claude),
+                           ("from subprocess import run\nrun(['codex', 'exec', 'x'])\n", codex),
+                           ("import subprocess\nsubprocess.run(['nohup', '/usr/local/bin/claude', '-p', 'x'])\n", claude),
+                           ("import subprocess\nsubprocess.run(['tmux', 'new-window', 'claude -p x'])\n", claude),
+                           ("import subprocess\nsubprocess.run(f'cd /w && claude -p {prompt}', shell=True)\n", claude),
+                           ("import os\nos.system('claude -p ' + sys.argv[1])\n", claude),
+                           ("import os\nos.execvp('claude', ['claude', '-p', 'x'])\n", claude),
+                           ("import os\nos.spawnvp(os.P_NOWAIT, 'codex', ['codex', 'exec'])\n", codex),
+                           ("import subprocess, shlex\nsubprocess.run(shlex.split('claude -p x'))\n", claude),
+                           ("import subprocess\nsubprocess.run(['claude', '-p', 'x'])\nsubprocess.run(['codex', 'exec', 'y'])\n", claude | codex)):
+            with self.subTest(text):
+                self.assertEqual(link.py_tools(text), (want, frozenset()), text)
+
+    def test_a_mention_anywhere_else_is_only_assumed(self):
+        claude = frozenset({'claude'})
+        for text in ('"""Starts claude for a run."""\nprint(1)\n', '# claude -p is started by the wrapper\nimport sys\n', 'TOOL = "claude"\nimport subprocess\nsubprocess.run([TOOL, "-p", "x"])\n',
+                     'import subprocess\nsubprocess.run(cmd)\nNAME = "claude"\n', 'def (:\nclaude -p x\n'):
+            with self.subTest(text):
+                self.assertEqual(link.py_tools(text), (frozenset(), claude), text)
+        self.assertEqual(link.py_tools('print(1)\n'), self.NONE)                                        # no mention: nothing
+
+    def test_a_file_that_starts_the_tool_is_a_certain_parent(self):
+        path = self.pyfile('import subprocess, sys\nsubprocess.run(["claude", "-p", sys.argv[1]])\n')
+        cmd = 'python3 %s "%s"' % (path, TEXT)
+        self.assertEqual(link.launch_kinds(cmd, '/w'), (frozenset({'claude'}), frozenset()))
+        o = self.owner_of_child(cmd)
+        self.assertEqual((o['sid'], o['rule'], o['certain']), (self.PARENT, 'content', True))
+
+    def test_a_file_that_only_mentions_the_tool_is_not_a_certain_parent(self):
+        path = self.pyfile('# Hands the instruction to claude -p\nimport subprocess, sys\nsubprocess.run([sys.argv[2], sys.argv[1]])\n')
+        cmd = 'python3 %s "%s"' % (path, TEXT)
+        self.assertEqual(link.launch_kinds(cmd, '/w'), (frozenset(), frozenset({'claude'})))
+        o = self.owner_of_child(cmd)
+        self.assertFalse(o is not None and o['certain'], o)                                            # a guess at most
+
+    def test_a_python_file_that_cannot_be_read_is_assumed_as_before(self):
+        self.assertEqual(link.launch_kinds('python3 /nonexistent/dir/relay.py "x"', '/w'), (frozenset(), link.BOTH_TOOLS))
+
+    def test_the_source_is_read_once_per_text(self):
+        text = 'import subprocess\nsubprocess.run(["claude", "-p", "x"])\n'
+        link._PY_TOOLS.clear()
+        first = link.py_tools(text)
+        with mock.patch('ast.parse', side_effect=AssertionError('read again')):
+            self.assertIs(link.py_tools(text), first)
 
 
 class WhereAWordRuns(unittest.TestCase):

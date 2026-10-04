@@ -121,7 +121,7 @@ class CacheFile(Fixture):
         links.lineage.scan({P, C, D, E}, self.index.get)                                   # the first scan writes it again
         with open(self.cache) as f:
             d = json.load(f)
-        self.assertEqual(d['version'], 4)
+        self.assertEqual(d['version'], 5)
         self.assertEqual(sorted(r['child'] for r in d['links']), sorted([D, E]))
         again = server.LinkIndex()
         again.lineage.enable_cache(self.cache)
@@ -181,7 +181,7 @@ class CacheFile(Fixture):
     def test_limits_are_the_approved_ones(self):
         self.assertEqual((lineage.CACHE_MAX, lineage.CACHE_DAYS, link.UNLINKED_MAX), (MAX_PAIRS, MAX_DAYS, MAX_UNLINKED))
         self.assertEqual(lineage.CACHE_RULES, ('proc', 'env', 'out', 'content'))       # version 2 adds the links that rest on an output file or a long instruction
-        self.assertEqual((lineage.CACHE_VERSION, lineage.CONTENT_FROM), (4, 4))        # version 4: the `content` links of an older file are not read
+        self.assertEqual((lineage.CACHE_VERSION, lineage.CONTENT_FROM), (5, 5))        # version 5: the `content` links of an older file are not read
 
     def test_size_and_age_limits_on_read(self):
         many = [row(child='%08d-0000-4000-8000-000000000000' % i, seen=NOW - 1000 - i) for i in range(MAX_PAIRS + 50)]
@@ -207,7 +207,7 @@ class CacheFile(Fixture):
         self.assertEqual(os.listdir(os.path.dirname(self.cache)), ['links.json'])  # no temporary file is left behind
         with open(self.cache) as f:
             d = json.load(f)
-        self.assertEqual(d['version'], 4)
+        self.assertEqual(d['version'], 5)
         by = {(r['kind'], r['child']): r for r in d['links']}
         self.assertEqual(set(by), {('cli', C), ('codex', TID)})
         self.assertEqual((by[('cli', C)]['parent'], by[('cli', C)]['rule'], by[('cli', C)]['started']), (P, 'env', T0 + 1))

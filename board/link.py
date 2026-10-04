@@ -3,6 +3,7 @@ When Bash runs a script file (`bash file` · `source file` · `./file`), the run
 The firmest evidence is the process lineage (board/lineage.py): a link made once while the process was alive comes before the rules above."""
 
 import array
+import ast
 import collections
 import glob
 import itertools
@@ -14,6 +15,7 @@ import stat
 import bisect
 import threading
 import time
+import warnings
 
 from . import affil, facts
 from . import fingerprint as fp
@@ -862,19 +864,159 @@ def _tools_in(text):
     return frozenset(t for t in BOTH_TOOLS if t in text)
 
 
-def _file_tools(word, cwd, assigns, mentions):
-    """For a script file word of a command: (the tools it names, the tools that are only assumed). Both, assumed, when the path cannot be worked out or the
-    file cannot be read (missing, too big, a link, refused, binary): nothing rules them out and nothing shows them. Otherwise (mentions) the tools its text
-    names, none when it names neither."""
+# ---------- python files ----------
+# A python file is not read as shell words, but as code: it starts a tool where a call of the subprocess family hands it a command to run, and only there. A relay written in python
+# (`subprocess.run(["tmux", "send-keys", "-t", "w", "claude -p " + sys.argv[1], "Enter"])`) only carries the words, like `tmux send-keys` typed in a shell does: no launch. A mention anywhere
+# else (a string, a comment, a name) is only assumed. A source that does not parse (or that types text into a terminal, as `python -c` code does) says no more than that.
+PY_EXEC_NAMES = (frozenset(('subprocess.run', 'subprocess.call', 'subprocess.check_call', 'subprocess.check_output', 'subprocess.Popen', 'subprocess.getoutput', 'subprocess.getstatusoutput',
+                            'os.system', 'os.popen', 'os.posix_spawn', 'os.posix_spawnp', 'pty.spawn', 'asyncio.create_subprocess_exec', 'asyncio.create_subprocess_shell'))
+                 | frozenset('os.exec' + k for k in ('l', 'le', 'lp', 'lpe', 'v', 've', 'vp', 'vpe'))
+                 | frozenset('os.spawn' + k for k in ('l', 'le', 'lp', 'lpe', 'v', 've', 'vp', 'vpe')))
+PY_SHELL_NAMES = frozenset(('os.system', 'os.popen', 'subprocess.getoutput', 'subprocess.getstatusoutput', 'asyncio.create_subprocess_shell'))     # the string is a shell command
+PY_NODES_MAX = 20000              # a source with more nodes than this is not walked for calls
+_PY_TOOLS = {}
+_PY_TOOLS_BYTES = [0]
+
+
+def _py_aliases(tree):
+    """{local name: dotted name} for the names `import` and `from … import` bind (`import subprocess as sp`, `from subprocess import Popen`)."""
+    out = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for a in node.names:
+                out[(a.asname or a.name).split('.')[0]] = a.name if a.asname else a.name.split('.')[0]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            for a in node.names:
+                out[a.asname or a.name] = node.module + '.' + a.name
+    return out
+
+
+def _py_dotted(node, aliases):
+    """The dotted name a call's function stands for (`sp.run` -> `subprocess.run`), or None."""
+    parts = []
+    while isinstance(node, ast.Attribute):
+        parts.append(node.attr)
+        node = node.value
+    if not isinstance(node, ast.Name):
+        return None
+    parts.append(aliases.get(node.id, node.id))
+    return '.'.join(reversed(parts))
+
+
+def _py_text(node):
+    """The text a string expression stands for, with `x` where it is not known (a name, a call, a formatted value), or None when the expression is not a text at all (a name, a call).
+    Literals, f-strings, `a + b`, `"…" % x` and `"…".format(x)` are read."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        return ''.join(v.value if isinstance(v, ast.Constant) and isinstance(v.value, str) else 'x' for v in node.values)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.Add, ast.Mod)):
+        left = _py_text(node.left)
+        if left is None:
+            return None
+        if isinstance(node.op, ast.Mod):
+            return left
+        right = _py_text(node.right)
+        return left + (right if right is not None else 'x')
+    if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == 'format' and isinstance(node.func.value, (ast.Constant, ast.JoinedStr)):
+        return _py_text(node.func.value)
+    return None
+
+
+def _py_argv_line(node):
+    """A list or tuple of words as one shell command line (a word that is not known is `x`), or None when it is not a list of words."""
+    if not isinstance(node, (ast.List, ast.Tuple)) or not node.elts or len(node.elts) > 64:
+        return None
+    return ' '.join(shlex.quote(_py_text(e) or 'x') for e in node.elts)
+
+
+def _py_command(name, call):
+    """What a call of the subprocess family runs, as shell text to read like a command: the shell string for the calls that take one (and `shell=True`), the words of the list otherwise.
+    '' when that cannot be told."""
+    args = list(call.args)
+    kw = {k.arg: k.value for k in call.keywords if k.arg}
+    if name.startswith('os.exec') or name.startswith('os.posix_spawn'):
+        word = _py_text(args[0]) if args else None                     # the program (`os.execvp("claude", [...])`)
+        return shlex.quote(word) if word else ''
+    if name.startswith('os.spawn'):
+        word = _py_text(args[1]) if len(args) > 1 else None
+        return shlex.quote(word) if word else ''
+    if name == 'asyncio.create_subprocess_exec':
+        return ' '.join(shlex.quote(_py_text(a) or 'x') for a in args[:64])
+    first = args[0] if args else kw.get('args')
+    if first is None:
+        return ''
+    shell = name in PY_SHELL_NAMES or (isinstance(kw.get('shell'), ast.Constant) and kw['shell'].value is True)
+    if shell:
+        return _py_text(first) or ''
+    line = _py_argv_line(first)
+    if line is not None:
+        return line
+    if isinstance(first, ast.Call) and _py_dotted(first.func, {}) == 'shlex.split' and first.args:      # `shlex.split("claude -p …")`: the words of that text
+        return _py_text(first.args[0]) or ''
+    word = _py_text(first)                                              # a plain string without `shell=True` names the program itself
+    return shlex.quote(word) if word else ''
+
+
+def py_tools(text):
+    """(the tools a python source starts, the tools it may start) - for a program started by `subprocess`, `os.exec*`, `os.spawn*`, `os.system` or the like, the command it is given is read as a
+    shell command is (exec_regions): `claude` or `codex` at a command position counts, the words in what is typed into a terminal (`tmux send-keys`) do not. Every other mention in the source is
+    only assumed, unless the source types text into a terminal (then it is nothing). A source that does not parse can only be assumed."""
+    hit = _PY_TOOLS.get(text)
+    if hit is not None:
+        return hit
+    mentioned = _tools_in(text)
+    named, assumed = set(), set()
+    if mentioned:
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter('ignore')                         # (an escape the source writes wrong is its own matter)
+                tree = ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError, MemoryError):
+            tree = None
+        delivery = DELIVERY_RE.search(text) is not None
+        if tree is not None:
+            aliases = _py_aliases(tree)
+            for k, node in enumerate(ast.walk(tree)):
+                if k > PY_NODES_MAX:
+                    break
+                if not isinstance(node, ast.Call):
+                    continue
+                name = _py_dotted(node.func, aliases)
+                if name in PY_EXEC_NAMES:
+                    cmd = _py_command(name, node)
+                    if cmd and _tools_in(cmd):
+                        got, may = script_tools(cmd)
+                        named |= got
+                        assumed |= may
+        if not delivery:
+            assumed |= mentioned - named
+    got = (frozenset(named), frozenset(assumed - named))
+    if _PY_TOOLS_BYTES[0] + len(text) > SCRIPTS_CACHE_MAX:
+        _PY_TOOLS.clear()
+        _PY_TOOLS_BYTES[0] = 0
+    _PY_TOOLS[text] = got
+    _PY_TOOLS_BYTES[0] += len(text)
+    return got
+
+
+def _file_path(word, cwd, assigns):
+    """The absolute path a script file word of a command stands for, or None when it cannot be worked out."""
     path = _cx_expand(word, assigns)
     if path and not os.path.isabs(path):
         path = os.path.join(cwd, path) if cwd and os.path.isabs(cwd) else None
-    if not path:
-        return frozenset(), BOTH_TOOLS
-    got = read_script(os.path.normpath(path))
+    return os.path.normpath(path) if path else None
+
+
+def _file_tools(word, cwd, assigns, python):
+    """For a script file word of a command: (the tools it names, the tools that are only assumed). Both, assumed, when the path cannot be worked out or the
+    file cannot be read (missing, too big, a link, refused, binary): nothing rules them out and nothing shows them. A shell script is read for what it runs (script_tools) by its caller;
+    a python file (`python`) is read as code (py_tools)."""
+    path = _file_path(word, cwd, assigns)
+    got = read_script(path) if path else None
     if got is None:
         return frozenset(), BOTH_TOOLS
-    return (_tools_in(got[0]) if mentions else frozenset()), frozenset()
+    return py_tools(got[0]) if python else (frozenset(), frozenset())
 
 
 def launch_kinds(cmd, base_cwd):

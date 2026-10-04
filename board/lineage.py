@@ -37,12 +37,13 @@ ENV_NAMES = (b'CLAUDE_CODE_SESSION_ID', b'CLAUDE_PID')           # only these tw
 # record of the links found by firm rules (so they are not forgotten across a restart). It holds only session ids, rule and time (no path, instruction, fingerprint or environment
 # variable value). Version 2 adds the links that rest on an output file (`out`) or a long instruction (`content`), with the sub-agent id when the node is one; version 1 files are still read.
 # Version 3 is the first whose `content` links come from a reader that does not take words that only travel as text (`tmux send-keys …`, `echo`) for a launch; version 4 the first whose
-# `content` links also leave out the plain arguments of an ordinary program (`curl --data claude -p …`) and the words a script file only prints or types: the `content` links of an
-# older file are not read (the records give them again, rightly), the other rules of an older file are kept.
+# `content` links also leave out the plain arguments of an ordinary program (`curl --data claude -p …`) and the words a script file only prints or types; version 5 the first whose
+# `content` links also leave out a python file that only mentions the tool (a relay that types it into a terminal): the `content` links of an older file are not read (the records give
+# them again, rightly), the other rules of an older file are kept.
 LINK_CACHE = os.path.join(os.environ.get('XDG_CACHE_HOME') or os.path.join(HOME, '.cache'), 'agent-bullpen', 'links.json')
-CACHE_VERSION = 4
-CACHE_READ_VERSIONS = (1, 2, 3, 4)
-CONTENT_FROM = 4                  # the first file version whose `content` links are read
+CACHE_VERSION = 5
+CACHE_READ_VERSIONS = (1, 2, 3, 4, 5)
+CONTENT_FROM = 5                  # the first file version whose `content` links are read
 CACHE_MAX = 2000                  # cap on the number of pairs (the oldest are dropped first)
 CACHE_DAYS = 90                   # entries first seen longer ago than this are cleaned up
 CACHE_FILE_MAX = 2 << 20          # cap on the file read
