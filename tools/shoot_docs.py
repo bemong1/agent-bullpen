@@ -10,6 +10,7 @@ an empty HOME for empty.png. Starts two boards, runs tools/shoot_docs.js once pe
 --stopped  (--scene synth) add the stopped and nested work of `synth_home.py --stopped` (a usage limit, API errors, runs cut off, a paused debate cell, grandchildren)
 --lang    the screen language of the pictures (default both): English goes to <out>/en/ (README.md), Korean to <out>/ko/ (README.ko.md)
 --src     folder whose server.py (and static/ beside it) is shown; default: this repository. The synthetic HOME always comes from this repository's tools/.
+The moving picture docs/images/<lang>/office.gif is not taken here: see tools/shoot_gif.py.
 <pw> is any folder where `npm i playwright && npx playwright install chromium` was run. Each picture must stay under 500 KB.
 """
 import argparse

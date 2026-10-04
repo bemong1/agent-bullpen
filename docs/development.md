@@ -133,6 +133,8 @@ Each script has a `usage:` comment near the top; `<fixture prefix>` is the path 
 
 To retake the pictures in `docs/images/en/` (English screen, for `README.md` and `guide.md`) and `docs/images/ko/` (Korean screen, for `README.ko.md` and `guide.ko.md`): `python3 tools/shoot_docs.py` (it builds the docs scene, starts its own servers on that and on an empty HOME and stops them again; it picks the moment of the lounge so that two people sit at a tea table; `--lang en|ko` takes one language; `--scene synth --busy --stopped` takes the crowded stress scene instead; it needs Playwright with Chromium, see its `--help`). Keep each picture under 500 KB, and look at every one before committing: nothing real may appear in it.
 
+The moving picture at the top of the READMEs, `docs/images/en/office.gif` and `docs/images/ko/office.gif` (the office page's "New work" demo on the docs scene: agents walk in, write their reports in a room and walk to the lounge), is retaken with `python3 tools/shoot_gif.py` (same Playwright setup, and `ffmpeg` on the PATH; it plays the page on a clock it steps by hand, so it does not depend on the speed of the machine; `--lang en|ko` takes one language, `--frames <folder>` keeps the PNG frames). Keep each GIF under 3 MB, and look at a few of its frames before committing (`ffmpeg -i office.gif -vf fps=2 f%03d.png`): nothing real may appear in it.
+
 ## Scenario generator and measurements
 
 These are maintainer tools. The unit tests run the generator on every `unittest discover`, so a regression shows there; the rest you run by hand.

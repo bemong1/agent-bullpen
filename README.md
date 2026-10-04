@@ -11,9 +11,9 @@ When one Claude Code session starts sub-agents, `claude -p` runs and Codex runs,
 - **See where things stand** — who has turned in what in each round, when the usage limit that stopped a run resets, and what each agent costs (at API list prices).
 - **No setup** — it reads the transcripts Claude Code and Codex already write. No hooks, no install, no account.
 
-![Dashboard](docs/images/en/dashboard.png)
+![Agents walk in, work in a room, then rest in the lounge](docs/images/en/office.gif)
 
-![Pixel-art office view](docs/images/en/office.png)
+![Dashboard](docs/images/en/dashboard.png)
 
 ## What it shows
 
@@ -28,6 +28,8 @@ When one Claude Code session starts sub-agents, `claude -p` runs and Codex runs,
 - **Diagnostics**: what the dashboard noticed but could not settle (a tie between two possible launchers, a path it could not work out, an unknown transcript format), in a list that never contains transcript text.
 
 Every panel is explained in the [screen guide](docs/guide.md).
+
+![Pixel-art office view](docs/images/en/office.png)
 
 ![Agent list: a run that launched two levels of runs, and runs that stopped (usage limit, time limit)](docs/images/en/agents.png)
 

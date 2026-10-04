@@ -11,9 +11,9 @@ Claude Code 세션 하나가 서브에이전트, `claude -p`, Codex 실행을 �
 - **진행 상황을 바로** — 라운드마다 누가 제출했는지, 사용 한도로 멈춘 실행의 한도가 언제 풀리는지, 에이전트별 비용(API 정가 기준)까지 보입니다.
 - **설정이 필요 없음** — Claude Code와 Codex가 이미 남기는 기록을 읽기만 합니다. 훅도, 설치도, 계정도 필요 없습니다.
 
-![현황판](docs/images/ko/dashboard.png)
+![에이전트가 들어와 일하고 휴게실에서 쉬는 모습](docs/images/ko/office.gif)
 
-![도트 사무실 화면](docs/images/ko/office.png)
+![현황판](docs/images/ko/dashboard.png)
 
 ## 무엇을 보여 주나
 
@@ -28,6 +28,8 @@ Claude Code 세션 하나가 서브에이전트, `claude -p`, Codex 실행을 �
 - **진단**: 현황판이 알아챘지만 판정하지 못한 것(두 후보 사이의 비김, 풀지 못한 경로, 모르는 기록 형식)을 기록의 글 없이 목록으로 보여 줍니다.
 
 화면 하나하나의 설명은 [화면 설명서](docs/guide.ko.md)에 있습니다.
+
+![도트 사무실 화면](docs/images/ko/office.png)
 
 ![에이전트 목록: 두 단계로 띄운 실행과 서로 다른 이유로 멈춘 실행(사용 한도·시간 제한)](docs/images/ko/agents.png)
 
