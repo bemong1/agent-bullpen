@@ -1137,6 +1137,7 @@ def cx_link(all_calls, threads, fixed=None, rules=None):
 WORD_PAT = r'(?<![\w./~-])(?:claude|codex)(?![\w-])'                     # the word itself: not `.claude/`, `~/.claude`, `claude-code`, `my_claude`
 LAUNCHY_RE = re.compile(WORD_PAT + r'|\.(?:sh|py)(?![\w.])')            # loose: a call that might launch something (a candidate, never a proof)
 WORD_RE = re.compile(WORD_PAT)
+WEAK_PRINT_RE = re.compile(r'\s(?:-p|--print)(?![\w-])')
 WEAK_LAUNCH_RE = re.compile(r'(?<![\w./~-])claude(?![\w-])[^\n;|&]*?\s(?:-p|--print)(?![\w-])')       # `claude … -p`: a launch the command reader did not place
 SCRIPTY_RE = re.compile(r'claude|codex|\.sh\b')          # a sub-agent's command that might run a script file worth reading (the main record's commands are all looked at; a script without a .sh name run from a sub-agent is not followed)
 LAUNCHY_B_RE = re.compile(WORD_PAT.encode() + rb'|\.(?:sh|py)(?![\w.])')
@@ -1482,47 +1483,81 @@ def _runs_arguments(prog, args):
     return any(a in subs for a in args[:8])
 
 
+EXEC_KEEP_TEXT = 16 << 10         # the regions of a command are remembered for a while (one command is read as a launch, a probe and a span) when it is this short ...
+EXEC_KEEP = 4 << 20               # ... and all the remembered commands together are about this many bytes
+_EXEC = collections.OrderedDict()
+_EXEC_BYTES = [0]
+_EXEC_LOCK = threading.Lock()
+
+
 def exec_regions(text, depth=0):
-    """(run, maybe): the pieces of a command's text in which the words `claude` and `codex` run, and those in which they only may. `run`: the masked text of each
-    simple command that does not only print (its program and its unquoted arguments), and, for a program that runs a command line it is given (tmux
-    new-session, ssh, xargs, docker exec …), each word of its arguments read again as a command line. `maybe`: the code a `python -c` / `node -e` is given
-    (unless it types text into a terminal). A simple command of `echo`, `printf`, `tmux send-keys` … gives nothing."""
-    run, maybe = [], []
+    """(run, maybe): the pieces of a command's text in which the words `claude` and `codex` run, and those in which they only may (tuples of text). `run`: the masked text of each
+    simple command that does not only print (its program and its unquoted arguments), and, for a program that runs a command line it is given (tmux new-session, ssh, xargs,
+    docker exec …), each word of its arguments read again as a command line. `maybe`: the code a `python -c` / `node -e` is given (unless it types text into a terminal).
+    A simple command of `echo`, `printf`, `tmux send-keys` … gives nothing."""
     if not isinstance(text, str):
-        return run, maybe
+        return (), ()
+    keep = depth == 0 and len(text) <= EXEC_KEEP_TEXT
+    if keep:
+        with _EXEC_LOCK:
+            hit = _EXEC.get(text)
+            if hit is not None:
+                _EXEC.move_to_end(text)
+                return hit
+    got = _exec_regions(text, depth)
+    if keep:
+        with _EXEC_LOCK:
+            _EXEC[text] = got
+            _EXEC_BYTES[0] += 2 * len(text) + sum(2 * len(t) for part in got for t in part)
+            while _EXEC_BYTES[0] > EXEC_KEEP and _EXEC:
+                old, (r, m) = _EXEC.popitem(last=False)
+                _EXEC_BYTES[0] -= 2 * len(old) + sum(2 * len(t) for t in r + m)
+    return got
+
+
+def _exec_regions(text, depth):
+    run, maybe = [], []
     code = _masked(text)
     for a in _command_starts(code):
-        toks, end = _simple_tokens(code, a)
-        try:
-            words = shlex.split(text[a:min(end, a + EXEC_SEG_MAX)])
-        except ValueError:
-            words = None
-        k = _program_index(words) if words else None
-        prog = os.path.basename(words[k]) if k is not None else None
+        end = _simple_tokens(code, a)[1]
+        seg = code[a:end]
+        masked = seg.split()                                             # the words as the masked text shows them: enough to tell the program, which is not quoted
+        k = _program_index(masked)
+        prog = os.path.basename(masked[k]) if k is not None else None
         if prog in PRINT_CMDS:
             continue
-        args = words[k + 1:] if prog is not None else ()
-        runs = prog is not None and _runs_arguments(prog, args)
-        if prog in SUBCOMMAND_PROGRAMS and not runs:
-            continue                                                     # `tmux send-keys`, `screen -X stuff`, `docker logs` …: what follows is not a command line
-        run.append(code[a:end])
-        if prog is None:
+        if prog is not None and (prog in RUN_PROGRAMS or prog in SUBCOMMAND_PROGRAMS or INLINE_NAME_RE.fullmatch(prog)):
+            # a program that runs what it is given, or code given to an interpreter: the arguments are read as words (quotes taken off)
+            try:
+                words = shlex.split(text[a:min(end, a + EXEC_SEG_MAX)])
+            except ValueError:
+                words = None
+            k = _program_index(words) if words else None
+            if k is None:
+                run.append(seg)
+                continue
+            args = words[k + 1:]
+            runs = _runs_arguments(prog, args)
+            if prog in SUBCOMMAND_PROGRAMS and not runs:
+                continue                                                 # `tmux send-keys`, `screen -X stuff`, `docker logs` …: what follows is not a command line
+            run.append(seg)
+            if runs:
+                if depth < EXEC_DEPTH:
+                    for w in args:
+                        if len(w) <= EXEC_ARG_MAX and _maybe_launchy(w):
+                            r, m = exec_regions(w, depth + 1)
+                            run += r
+                            maybe += m
+            else:
+                im = INLINE_NAME_RE.fullmatch(prog)
+                flag = INLINE_CODE.get(im.group(1)) if im else None
+                if flag and flag in args[:-1]:
+                    snippet = args[args.index(flag) + 1]
+                    if not DELIVERY_RE.search(snippet):
+                        maybe.append(snippet)
             continue
-        if runs:
-            if depth < EXEC_DEPTH:
-                for w in args:
-                    if len(w) <= EXEC_ARG_MAX and _maybe_launchy(w):
-                        r, m = exec_regions(w, depth + 1)
-                        run += r
-                        maybe += m
-        else:
-            im = INLINE_NAME_RE.fullmatch(prog)
-            flag = INLINE_CODE.get(im.group(1)) if im else None
-            if flag and flag in args[:-1]:
-                snippet = args[args.index(flag) + 1]
-                if not DELIVERY_RE.search(snippet):
-                    maybe.append(snippet)
-    return run, maybe
+        run.append(seg)
+    return tuple(run), tuple(maybe)
 
 
 def _arg_literals(pos, env, stdin):
@@ -1701,8 +1736,10 @@ def _weak_launch(cmd):
     """Whether a command that the reader found no `claude -p` in still starts one: the words stand unquoted in an argument (`xargs … claude -p`), or a
     quoted string is handed to a program that runs it (`tmux new-session`, ssh, ...). Text in a heredoc, a comment, a string given to anything else
     (`python3 - <<EOF`) or one that is only typed into a terminal (`tmux send-keys`, `echo`) is not a launch."""
-    run, _ = exec_regions(cmd[:LAUNCHY_SCAN])
-    return any(WEAK_LAUNCH_RE.search(t) for t in run)
+    head = cmd[:LAUNCHY_SCAN]
+    if 'claude' not in head or not WEAK_PRINT_RE.search(head):
+        return False                                                   # cheap: no `claude` or no `-p` / `--print` anywhere
+    return any(WEAK_LAUNCH_RE.search(t) for t in exec_regions(head)[0])
 
 
 def _launchy_call(cmd):
