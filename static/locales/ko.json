@@ -736,6 +736,7 @@
     "event.orch_ask.title": "선택지 질문",
     "event.user_answer.title": "선택",
     "event.spawn_cli.title": "Claude Code 실행",
+    "event.encrypted.text": "지시 내용은 기록에서 암호화되어 있어 볼 수 없습니다.",
     "event.notify.done": "작업 끝",
     "event.notify.failed": "실패",
     "event.notify.killed": "중지됨",

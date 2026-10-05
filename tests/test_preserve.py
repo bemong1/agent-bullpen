@@ -75,7 +75,7 @@ class ToolAndSayRecording(unittest.TestCase):
         self.assertEqual([(x['kind'], x['name'], x['cat']) for x in acts],
                          [('tool', 'exec_command', 'bash'), ('tool', 'shell', 'other'), ('tool', 'exec', 'other'), ('text', '', 'other')])
         self.assertEqual(acts[1]['text'], server.trunc('z' * 300, 240))
-        self.assertEqual(acts[2]['text'], 'console.log(1)')
+        self.assertEqual(acts[2]['text'], '')
         self.assertEqual(acts[3]['text'], 'done.')
         self.assertEqual(list(a.texts), [{'ts': T + 10, 'text': 'done.'}])
         self.assertEqual((a.tool_count, dict(a.tool_counts), [c for _, c in a.ticks]),

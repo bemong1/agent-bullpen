@@ -24,7 +24,7 @@ from compat import patched, server  # noqa: E402
 import test_runstate as rst  # noqa: E402  (small record builders)
 import test_stage1 as st1  # noqa: E402
 import test_stage2 as st2  # noqa: E402
-from board import affil, catalog, diag, runstate as RS, sessions, views  # noqa: E402
+from board import affil, catalog, diag, lineage, runstate as RS, sessions, views  # noqa: E402
 
 T0 = st2.T0
 SECRET = 'SECRET-INSTRUCTION-TEXT-do-not-leak'
@@ -279,6 +279,66 @@ class WrongShapedLine(Fixture):
         s.poll()
         self.assertGreaterEqual(s.parse_errors, 1)
         self.assertIn(self.C1, s.agents)
+
+
+class ChildTitleLater(Fixture):
+    """A child that a remembered line (or a live environment) places is shown at the first screen, before the sub-agents' records are read; the call that started it is in one of them.
+    When the link names the call, the child's title, its start and its spawn event (the title, the launcher) are made again from it."""
+    WORDS = ('Draft the release notes from the settled rulings, grouped by package, and keep the migration notes for the end where the readers of the changelog will look for them '
+             'first; mention every renamed option and every removed flag.')
+    SUB = 'a' + 'b' * 16
+
+    def make(self):
+        self.write(self.PARENT, [dump({'type': 'user', 'timestamp': st2.iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'go'}})])
+        d = os.path.join(self.proj, self.PARENT, 'subagents')
+        os.makedirs(d)
+        with open(os.path.join(d, 'agent-%s.jsonl' % self.SUB), 'w') as f:
+            f.write(st2.bash_line(T0 - 2, 'cd /w && claude -p "%s"' % self.WORDS, tid='toolu_sub', desc='Draft the release notes in a separate run') + '\n'
+                    + st2.result_line(T0 + 30, tid='toolu_sub') + '\n')
+        with open(os.path.join(d, 'agent-%s.meta.json' % self.SUB), 'w') as f:
+            json.dump({'description': 'helper', 'agentType': 'general-purpose', 'toolUseId': 'toolu_x'}, f)
+        self.write(self.C1, [child_user(T0, self.WORDS), say_line(T0 + 20)])
+        path = os.path.join(os.path.realpath(self.tmp.name), 'cache', 'links.json')
+        os.makedirs(os.path.dirname(path), mode=0o700)
+        os.chmod(os.path.dirname(path), 0o700)
+        with open(path, 'w') as fh:
+            json.dump({'version': lineage.CACHE_VERSION, 'links': [{'child': self.C1, 'parent': self.PARENT, 'kind': 'cli', 'rule': 'env', 'seen': time.time() - 100, 'started': T0}]}, fh)
+        os.chmod(path, 0o600)
+        self.links.lineage.enable_cache(path)
+        self.links.deep_inline = False                              # the server's way: the first scan is stage 1 alone
+        with mock.patch('time.time', lambda: T0 + 600):
+            self.scan()
+        s = server.Session(os.path.join(self.proj, self.PARENT + '.jsonl'))
+        s.poll()
+        return s
+
+    def test_the_title_and_the_spawn_event_are_made_again_when_the_call_is_known(self):
+        s = self.make()
+        o = self.links.cli_owners[self.C1]
+        self.assertEqual((o['rule'], o['call'], o['bash_desc']), ('file', None, ''))               # stage 1: the remembered line places it, the sub-agent's call is not read yet
+        a = s.agents[self.C1]
+        spawn = next(e for e in s.feed if e['kind'] == 'spawn' and e['agent'] == self.C1)
+        self.assertEqual((a.description, a.title, spawn['title'], spawn['from'], spawn.get('title_i18n', {}).get('key')), ('claude -p', 'claude -p', 'Claude Code 실행', 'orch', 'event.spawn_cli.title'))
+        with mock.patch('time.time', lambda: T0 + 600):
+            self.links.scan_deep()
+        o = self.links.cli_owners[self.C1]
+        self.assertEqual((o['rule'], o['node'], o['call'], o['bash_desc']), ('file', self.SUB, 'toolu_sub', 'Draft the release notes in a separate run'))
+        s.poll()
+        a = s.agents[self.C1]
+        self.assertEqual((a.description, a.title, a.spawn_ts), ('Draft the release notes in a separate run', 'Draft the release notes in a separate run', o['bash_ts']))
+        spawn = next(e for e in s.feed if e['kind'] == 'spawn' and e['agent'] == self.C1)
+        self.assertEqual((spawn['title'], spawn['from'], 'title_i18n' in spawn, 'title_is_default' in spawn), ('Draft the release notes in a separate run', self.SUB, False, False))
+        by = {x['id']: x for x in self.state(s)['agents']}
+        self.assertEqual(by[self.C1]['title'], 'Draft the release notes in a separate run')
+
+    def test_nothing_is_made_again_while_nothing_changed(self):
+        s = self.make()
+        with mock.patch('time.time', lambda: T0 + 600):
+            self.links.scan_deep()
+        s.poll()
+        before = [dict(e) for e in s.feed]
+        s.poll()
+        self.assertEqual(s.feed, before)                                                          # nothing is made again while nothing changed
 
 
 class GrandChild(Fixture):

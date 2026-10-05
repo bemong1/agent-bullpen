@@ -877,13 +877,14 @@ def proc_snapshot(entries):
 @dataclass
 class RunFacts:
     """Everything `judge` reads about one agent."""
-    kind: str                                              # cli | subagent | codex
+    kind: str                                              # cli | subagent | codex | cxsub (a native sub-agent thread of Codex)
     runs: List[RunRec] = field(default_factory=list)
     last_ts: Optional[float] = None
     spawn_ts: Optional[float] = None
     pending: List[float] = field(default_factory=list)
     notes: List[Note] = field(default_factory=list)        # completion notices of this child (its agent id, or the Bash tasks that launched it)
     stops: List[float] = field(default_factory=list)       # TaskStop calls on it
+    cuts: List[float] = field(default_factory=list)        # cxsub: the times its parent recorded that it interrupted it (`SubAgentActivity interrupted`)
     handbacks: List[float] = field(default_factory=list)   # times of its final report as seen by the launcher
     parent_over: bool = False                              # sub-agent: its parent agent is over
     torn: int = 0
@@ -984,6 +985,8 @@ def judge(f, proc, now):
         resets, basis = (r.err.resets_at if why == 'limit' else None), 'error_line'
     elif f.kind == 'subagent':
         st, why, basis = _sub_status(f, proc, r, n, last, now)
+    elif f.kind == 'cxsub':
+        st, basis = _cxsub_status(f, proc, r, last, now)
     elif closed:
         if n is not None and n.reason == 'time_limit':
             st, why, basis = 'interrupted', 'time_limit', 'bg_chain'
@@ -1017,6 +1020,18 @@ def _sub_status(f, proc, r, n, last, now):
         return 'ended', None, 'parent_over'
     st, basis = _alive_status(f, proc, last, now)
     return st, None, basis
+
+
+def _cxsub_status(f, proc, r, last, now):
+    """A native sub-agent thread of Codex (what judge did not settle by its own end of turn or error line: a run that ended with `task_complete` is done whatever its parent
+    or the process does, and an interrupt that came after that changes nothing). It has no process of its own: the runtime of its root thread is the one `proc` tells about
+    (a sub-agent's rollout is never open). A turn that was interrupted (its own `turn_aborted`, or its parent's `interrupted` after the turn began) is interrupted; a turn
+    that is open when the runtime is gone has ended; else it works."""
+    if r is not None and ((r.exited and r.aborted) or (not r.exited and any(t >= (r.start_ts or 0.0) - NOTE_SLACK for t in f.cuts))):
+        return 'interrupted', 'interrupt'
+    if proc.alive is False:
+        return 'ended', 'process'
+    return _alive_status(f, proc, last, now)
 
 
 def _ended_at(r, last, now, n):

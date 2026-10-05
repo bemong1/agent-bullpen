@@ -10,6 +10,7 @@ import time
 
 from . import lineage, procs, runstate as RS
 from .facts import NODE_ID_RE
+from .codex_index import CODEX
 from .link import LINKS
 from .util import SID_RE, short_path
 
@@ -156,6 +157,26 @@ def _invisible_now(s):
     return n
 
 
+def codex_drift(s):
+    """The shapes of Codex records that the board could not read, among the Codex threads of this page (its own thread when it is a Codex page, and every Codex agent on it), as
+    `format_drift` names: a thread whose first line is of a shape the board does not know (`internal`, hidden like a guardian: another `source`, a parent where none is expected, a
+    sub-agent whose history end is unknown) and command records that could not be read. Made again only when the Codex index changed or the threads of the page did."""
+    ids = frozenset(([s.id] if s.provider == 'codex' else []) + [a.id for a in s.agents.values() if a.provider == 'codex'])
+    key = (CODEX.version, ids)
+    hit = getattr(s, '_cx_drift', None)
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    what = set()
+    for tid in ids:
+        e = CODEX.get(tid)
+        if e is not None and e.get('cmds_skipped'):
+            what.add('invalid:CommandExecution')
+        if any(c.get('kind') == 'internal' and c.get('drift') for c in CODEX.children(tid)):
+            what.add('invalid:thread_source')
+    s._cx_drift = (key, what)
+    return what
+
+
 def collect(s, now, verdicts, groups):
     """The diagnostics of one session page as a list of entries (see the module text), most serious first, at most MAX_PER_SESSION.
     `verdicts` {agent id: runstate.Verdict}, `groups` the runstate.LimitGroups of this moment."""
@@ -185,8 +206,10 @@ def collect(s, now, verdicts, groups):
     runs = getattr(s, 'runs', None)
     if runs is not None and (runs.torn or runs.lost):
         out.append(_entry('torn_lines', 'orch', None, recovered=runs.torn, lost=runs.lost))
-    if runs is not None and runs.drift:                                  # a known marker gone from its window, or a value that is no version; a version outside what was checked says nothing by itself
-        out.append(_entry('format_drift', 'orch', None, what=sorted('%s:%s' % x for x in runs.drift), version=runs.version))
+    seen = {'%s:%s' % x for x in runs.drift} if runs is not None and runs.drift else set()           # a known marker gone from its window, or a value that is no version; a version outside what was checked says nothing by itself
+    seen |= codex_drift(s)
+    if seen:
+        out.append(_entry('format_drift', 'orch', None, what=sorted(seen), version=runs.version if runs is not None and runs.drift else None))
     if getattr(s, 'parse_errors', 0):
         out.append(_entry('parse_errors', 'session', None, n=s.parse_errors))
     ln = LINKS.lineage

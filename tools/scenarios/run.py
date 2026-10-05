@@ -20,7 +20,7 @@ says `None` for a sub-agent's child has claimed the main session (wrong).
     python3 -m tools.scenarios.run                 # summary table
     python3 -m tools.scenarios.run --md            # also print the table of red cells (to standard output)
     python3 -m tools.scenarios.run --md red.md     # ... or write it to a file
-    python3 -m tools.scenarios.run --cases 'aff:*way=tmux*'    # only the cases whose id matches the glob
+    python3 -m tools.scenarios.run --cases 'aff:*way=tmux*'    # only the cases whose id matches the glob ('cxo:*': the Codex orchestrator cases)
 """
 
 import argparse
@@ -41,9 +41,9 @@ from .observe import MISSING
 
 REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-CLAIM_NONE = ('node',)               # a `None` the board reports is a claim ("the main session"), not an absence
+CLAIM_NONE = ('node', 'parent')      # a `None` the board reports is a claim ("the main session", "under the orchestrator"), not an absence
 CLASS_ORDER = ('none', 'guess', 'certain')
-ALWAYS_REPORTED = ('node',)          # not emitting it is a miss even when the truth is None
+ALWAYS_REPORTED = ('node', 'parent')     # not emitting it is a miss even when the truth is None
 
 
 def resolve(val, b):
@@ -74,7 +74,7 @@ def grade(field, want, got):
     if got is MISSING:
         return 'pass' if (want is None or want == 'none') and field not in ALWAYS_REPORTED else 'miss'
     if want is None or want == 'none':
-        if field == 'node':
+        if field in CLAIM_NONE:
             return 'pass' if got is None else 'wrong'
         return 'pass' if got is None or got == 'none' else 'wrong'
     if want == 'unknown':
@@ -194,12 +194,20 @@ def run_case(case, root):
 # ---------------------------------------------------------------------------------------------------------------------
 # selection
 # ---------------------------------------------------------------------------------------------------------------------
+PAIR_SKIP = {'env': ('stale',)}      # a value added after the cover was fixed has its own cases (cxo_shapes): the cover of the older values stays exactly as it was
+
+
+def pair_values(name):
+    """The values of an axis the pairwise cover is made of."""
+    return [x for x in AXES[name] if x not in PAIR_SKIP.get(name, ())]
+
+
 def _pair_rows(bundle, names, a, x, b, y, uncovered, tries):
     """Candidate rows that keep the pair (a=x, b=y) after normalisation, best first. Random fills seeded by the pair, so the result never changes between runs."""
     rnd = random.Random(int(axes.digest('pair', bundle, a, x, b, y, n=12), 16))
     best, best_gain = None, -1
     for _ in range(tries):
-        row = {n: rnd.choice(AXES[n]) for n in names}
+        row = {n: rnd.choice(pair_values(n)) for n in names}
         row[a], row[b] = x, y
         case = normalize(Case(bundle, row))
         if case.v[a] != x or case.v[b] != y:
@@ -214,7 +222,7 @@ def pairwise(bundle, names, seed_cases=(), tries=300):
     """A deterministic greedy cover of every pair of values of the axes `names`. A pair the normaliser folds away in every random completion is impossible
     and dropped (the test re-checks that claim with more tries)."""
     names = list(names)
-    uncovered = {(a, x, b, y) for a, b in itertools.combinations(names, 2) for x in AXES[a] for y in AXES[b]}
+    uncovered = {(a, x, b, y) for a, b in itertools.combinations(names, 2) for x in pair_values(a) for y in pair_values(b)}
     chosen, seen = [], set()
 
     def take(case):
@@ -243,6 +251,7 @@ PAIR_AXES = {
     'sta': [a for a in BUNDLES['sta'] if a not in axes.OPTIONAL['sta']],
     'cpl': list(BUNDLES['cpl']),
     'room': ['guide', 'shape', 'talk', 'trees', 'people', 'proof', 'phase', 'site', 'ref'],
+    'cxo': ['top', 'chain', 'subj', 'host', 'env', 'how', 'look'],
 }
 BAITS = ('cwd_mismatch', 'text_mismatch', 'too_old', 'echo_only', 'other_user', 'pid_reuse')
 CODEX_LOOKALIKES = ('cwd_mismatch', 'text_mismatch', 'too_old', 'echo_only')        # what replaces the launch of a Codex exec thread (the others need a Claude process)
@@ -373,6 +382,69 @@ def shapes():
     for entry, tail, process in itertools.product(AXES['entry'], AXES['tail'], AXES['process']):
         out.append(normalize(Case('sta', dict(skind='main', life='running', entry=entry, tail=tail, process=process))))
     out += room_shapes()
+    out += cxo_shapes()
+    return out
+
+
+def cxo_shapes():
+    """The Codex orchestrator: each shape is a product of a few values with the ones they interact with (the pairwise cover of the plain axes is made apart)."""
+    cx = lambda **v: normalize(Case('cxo', v))                                     # noqa: E731
+    out = []
+    # a run started from a shell of the page's thread (or of a native sub-agent of it): who runs the call x how x what the environment says x when the board looks x which top
+    for subj, host, env, how, look, top in itertools.product(('cl', 'cx'), AXES['host'], ('codex', 'none'), AXES['how'], AXES['look'], ('cx_tui', 'cx_exec')):
+        out.append(cx(subj=subj, host=host, env=env, how=how, look=look, top=top))
+    # the record of the command: written when the process ends, never (the turn ended first), or long after the child started; with and without an environment
+    for subj, how, look, env, rec in itertools.product(('cl', 'cx'), ('fg', 'detach'), AXES['look'], ('codex', 'none'), ('lost', 'late')):
+        out.append(cx(subj=subj, how=how, look=look, env=env, rec=rec))
+    for host, subj in itertools.product(AXES['host'], ('cl', 'cx')):
+        out.append(cx(subj=subj, host=host, env='none', how='fg', look='ended', rec='late'))
+    # a chain: Claude > codex exec > claude -p, Codex > claude -p > its sub-agent, Codex > codex exec > codex exec; with the last call's way, the environment (both providers' names
+    # in the first), when the board looks, who runs the first call
+    for chain, env, how, look, host in itertools.product(AXES['chain'][1:], AXES['env'], AXES['how'], AXES['look'], AXES['host']):
+        out.append(cx(chain=chain, env=env, how=how, look=look, host=host))
+    for how, look, rec in itertools.product(('fg', 'detach'), AXES['look'], ('end', 'lost')):                       # the run of the middle one is linked by a guess only when nothing proves it
+        out.append(cx(chain='cl>cx>cl', env='both', how=how, look=look, rec=rec, edge='guess'))
+    # a native sub-agent: how it ends x who spawns it x which top x a guardian beside it
+    for substate, host, top, guard in itertools.product(AXES['substate'], AXES['host'], ('cx_tui', 'cx_exec'), AXES['guard']):
+        out.append(cx(subj='cx_sub', substate=substate, host=host, top=top, guard=guard))
+    # a guardian beside every other kind of team
+    for guard, subj, top, look, host in itertools.product(('one',), ('cl', 'cx'), ('cx_tui', 'cx_exec'), AXES['look'], AXES['host']):
+        out.append(cx(guard=guard, subj=subj, top=top, look=look, host=host))
+    out.append(cx(guard='one', chain='cx>cl>sub'))
+    out.append(cx(guard='one', chain='cx>cx'))
+    # the lookalikes: who relays the instruction (a plain call, or inside `python3 -c`), two orchestrators of one folder with the same words, a script, a command nobody can read yet
+    for lure, env, how, look, rec in itertools.product(('relay', 'relay_py', 'twin_orch', 'twin_out'), ('codex', 'none'), ('fg', 'detach'), AXES['look'], ('end', 'lost')):
+        out.append(cx(lure=lure, env=env, how=how, look=look, rec=rec))
+    for look, top, guard in itertools.product(AXES['look'], ('cx_tui', 'cx_exec'), AXES['guard']):
+        out.append(cx(lure='user_script', look=look, top=top, guard=guard))
+        out.append(cx(lure='gap', look=look, top=top, guard=guard))
+    # the child is a participant of a debate folder of the repository
+    for subj, how, look, top in itertools.product(('cl', 'cx'), ('fg', 'detach'), AXES['look'], ('cx_tui', 'cx_exec')):
+        out.append(cx(topic='talk', subj=subj, how=how, look=look, top=top))
+    # what only passes the words on, however it is written (a script that types them, `xargs`, `ssh`, `kubectl exec`, an argument of `curl`)
+    for lure, env, how, look in itertools.product(('relay_script', 'relay_pyfile', 'relay_xargs', 'relay_ssh', 'relay_kube', 'relay_curl'), ('codex', 'none'), ('fg', 'detach'), AXES['look']):
+        out.append(cx(lure=lure, env=env, how=how, look=look))
+        if env == 'none' and how == 'detach':
+            out.append(cx(lure=lure, env=env, how=how, look=look, rec='lost'))
+    # ... and what starts a run through a wrapper that is a launch, by a session that is not the page's
+    for lure, look, top in itertools.product(axes.CXO_OWN_LAUNCHES, AXES['look'], ('cx_tui', 'cx_exec')):
+        out.append(cx(lure=lure, look=look, top=top))
+    # the names of a Codex thread that has been over for hours, carried by a tmux server to a child another session started
+    for top in ('cx_tui', 'cx_exec'):
+        out.append(cx(env='stale', top=top))
+    # names in the environment of the child that nobody can check: a Codex thread the index does not have, a Claude session whose names a tmux server kept, a Codex thread's
+    # names from an earlier turn
+    for lure, top in itertools.product(('pin_unknown', 'pin_stale_claude', 'stale_turn'), ('cx_tui', 'cx_exec')):
+        out.append(cx(lure=lure, top=top))
+    # macOS: `ps` does not say which file a process holds open (Claude > codex exec > claude -p, the names of both providers)
+    for how, rec in itertools.product(('fg', 'detach'), ('end', 'lost')):
+        out.append(cx(chain='cl>cx>cl', env='both', how=how, look='live', rec=rec, os='mac'))
+    # a Codex thread with a command nobody can read yet beside a Claude call with the same words and a child nobody's environment names
+    for top, guard in itertools.product(('cx_tui', 'cx_exec'), AXES['guard']):
+        out.append(cx(lure='gap', env='none', top=top, guard=guard))
+    # a rerun: the same script is run again after the participants stopped (one case for each choice of who runs twice)
+    for parts, stop in itertools.product(AXES['parts'], AXES['stop']):
+        out.append(normalize(Case('rer', {'parts': parts, 'stop': stop})))
     return out
 
 
@@ -608,6 +680,27 @@ REASONS = {
     'R-ROOM-CODE': ('units/debates', 'Participants that mostly change code outside the guide\'s folder and only report beside a plan are made one room: where the rest of their work goes is not counted, so a parallel implementation with a report each is taken for a meeting.'),
     'R-ROOM-CITE': ('units/debates', 'A guide and a notes path that an instruction only quotes (one line, a code fence, a Markdown block quote) or tells as a read-only review are read as the participant\'s own: a room, a seat and a cell appear for words nobody was asked to act on. The check for a quote covers a short one-line quote only.'),
     'R-ROOM-MSG-FAIL': ('units/debates', 'A message that was answered with an error is kept as a message sent (the call is noted when it is made and its result is not read), so participants whose messages never arrived are made a meeting by message.'),
+    # Codex orchestrator
+    'X-LAUNCHER': ('link/lineage', 'A shell call of a Codex thread starts nothing the board can see: a `claude -p` or `codex exec` run below a Codex thread has no owner. Its command is in a `CommandExecution` record, its environment names `CODEX_THREAD_ID`, its process is below the Codex process; link.py reads the Bash calls of Claude sessions only and lineage.py the names of Claude.'),
+    'X-GRAPH': ('link', 'No ownership graph: the board has no `owner_of`, `page_of` or `descendants`, so no run or thread has a page above it.'),
+    'X-PAGE-AGENTS': ('sessions/views', 'The page of a Codex orchestrator lists no agents (CodexSession makes none): neither a run started from its shell nor a native sub-agent thread is on it, so there is no status, no card to hang under, no event and no name.'),
+    'X-SUB-HIDDEN': ('codex_index', 'A native sub-agent thread is taken for a guardian (a parent thread and a dict source): it is hidden and has no owner, no tree and no kind.'),
+    'X-FORK-LEAK': ('codex_index', 'The front part of a sub-agent rollout (the parent\'s meta, first turn and first user message) is read as the sub-agent\'s own: its first instruction is the parent\'s.'),
+    'X-GUARD-TOKENS': ('agents', 'Every child thread of the page\'s thread is counted as an approval review (cx_sync_guardians): a native sub-agent\'s tokens are added to the page\'s approval-review tokens.'),
+    'X-RELAY': ('link', 'A session that only relays the instruction (`tmux send-keys -l`, or the same inside `python3 -c`, in a script, through `xargs`, `ssh`, `kubectl exec`, or as an argument of `curl`) is taken for the launcher: the command line inside its call is read as a launch and its words match the run, as a certain content link (link.py _weak_launch, launch_kinds).'),
+    'X-TWIN': ('link', 'Two orchestrators of one folder say the same words and start a child each: the child of the Codex one is given to the Claude one by its words, as if the Claude launch were the only one (the Codex launch is not read, so there is no tie, and no environment or lineage of Codex is read to settle it).'),
+    'X-GAP': ('link', 'A Codex thread of the folder has a command whose record has not come (an exec cell still running): the board does not know that, and a Claude launch that matches the child by its words is called certain (also when the child is the Codex thread\'s own, started by `tmux new-window`).'),
+    'X-BOTH-ENV': ('lineage/link', 'The names of both providers in one environment: the grandchild of Claude > codex exec > claude -p is given to the top Claude session (CLAUDE_CODE_SESSION_ID); the Codex run between is never the parent.'),
+    'X-EDGE': ('lineage/link', 'The names of both providers where the codex exec run is linked to the Claude session by a guess only: the grandchild is linked to the top Claude session as if the environment proved it (no hold, no `evidence_conflict`).'),
+    'X-ORPHAN': ('link', 'A `&` launch from a Codex shell that left no run behind is not counted: `orphan_launch` is made from Bash calls of Claude sessions only.'),
+    'X-DEBATE': ('units/debates', 'A still-running foreground `codex exec` sits in no debate yet: its CommandExecution (with `-o`) is written only when the process ends, so its report path is not known until then (the plan\'s limit: JS is not interpreted).'),
+    'X-WRAP-LAUNCH': ('link', 'A wrapper that is a launch (`tmux new-session -d \'claude -p "..."\'`, `xargs -I{} claude -p "{}"`) is no longer read as one, or the Claude session that used it is not linked to its child.'),
+    'X-STALE-ENV': ('lineage/link', 'The names (`CODEX_THREAD_ID`, `CODEX_SESSION_ID`) a tmux server passes on from a Codex thread that has been over for hours, or from an earlier turn of a thread that is working again, are read as the launcher\'s: the child of another session is given to that thread.'),
+    'X-PIN-UNKNOWN': ('lineage/link', 'The names of a Codex thread the index does not have are dropped as if there were none: the child is given to the Claude call with the same words as a certain content link, although it may be the unknown thread\'s.'),
+    'X-PIN-CLAUDE': ('lineage/link', 'The names of a Claude session that a tmux server kept (its process is alive, it had no call running) are read as the launcher\'s: the child that a Codex thread started (its command record shows it) is given to that session.'),
+    'X-MAC-BOTH': ('lineage/link', 'On macOS `ps` does not say which file a process holds open, so a Codex process is not known to be an agent: the grandchild of Claude > codex exec > claude -p is given to the top Claude session by the names of both providers.'),
+    # rerun
+    'R-RERUN-SEAT': ('units/debates', 'A first run that was closed with `cost-state` and no end of turn (interrupted) keeps its seat when the same script is run again with the same instruction: both runs claim the seat, it is held (`seat_tie_held`) and the new run, which wrote its report, has no seat. A first run whose record was cut off gives its seat up.'),
     # coupling
     'C-UNLINKED': ('link', 'The participant was launched by a sub-agent or a child and is not linked, so it shows no status and no cell.'),
 }
@@ -633,6 +726,48 @@ def aff_shape_reason(a):
     return None
 
 
+def cxo_reason(c):
+    """The reason id of a red cell of the Codex orchestrator bundle."""
+    a, f = c.axes, c.field
+    head = f.split(':')[0].split('=')[0]
+    if head == 'guardian_calls':
+        return 'X-GUARD-TOKENS'
+    if head == 'first_user':
+        return 'X-FORK-LEAK'
+    # a case that is built around one lookalike: whichever field shows it, the cell is about that
+    if a['lure'] == 'gap':
+        return 'X-GAP'
+    if a['lure'] in axes.CXO_OWN_LAUNCHES:
+        return 'X-WRAP-LAUNCH'
+    if a['lure'] == 'pin_unknown':
+        return 'X-PIN-UNKNOWN'
+    if a['lure'] == 'pin_stale_claude':
+        return 'X-PIN-CLAUDE'
+    if a['env'] == 'stale':
+        return 'X-STALE-ENV'
+    if a['os'] != 'linux' and a['chain'] == 'cl>cx>cl' and c.role == 'child':
+        return 'X-MAC-BOTH'
+    if a['lure'] in axes.CXO_RELAYS:
+        return 'X-RELAY'
+    if head == 'diag':
+        return {'orphan_launch': 'X-ORPHAN', 'evidence_conflict': 'X-EDGE'}.get(f[5:].split('.')[0])
+    if head == 'page':
+        return 'X-GRAPH'
+    if head in ('unit', 'round', 'seat', 'cell', 'role', 'placements', 'units'):
+        return 'X-DEBATE'
+    if a['chain'] == 'cl>cx>cl' and a['edge'] == 'guess' and c.role == 'child' and c.result == 'wrong':
+        return 'X-EDGE'
+    if a['chain'] == 'cl>cx>cl' and c.role == 'child' and (c.result == 'wrong' or head == 'forbid'):
+        return 'X-BOTH-ENV'
+    if a['lure'] in ('twin_orch', 'twin_out') and (c.result == 'wrong' or head == 'forbid'):
+        return 'X-TWIN'
+    if head in ('listed', 'parent', 'status', 'label', 'events'):
+        return 'X-PAGE-AGENTS'
+    if a['subj'] == 'cx_sub':
+        return 'X-SUB-HIDDEN'
+    return 'X-LAUNCHER'
+
+
 def reason_of(c):
     """The reason id of a red cell, by what the cell is about and which axis values make the scene. None when no rule explains it (the xfail writer refuses)."""
     from board import facts            # noqa: PLC0415  (the diagnostic code lists; the oracle itself never imports board)
@@ -640,6 +775,10 @@ def reason_of(c):
     head = f.split(':')[0].split('=')[0]
     if f.startswith('diag:') and f[5:].split('.')[0] == 'proc_unknown':
         return 'D-PROC'
+    if b == 'cxo':
+        return cxo_reason(c)
+    if b == 'rer':
+        return 'R-RERUN-SEAT'
     if b == 'room':
         kind, _, _, why = oracle.room_trace(a)
         if why:

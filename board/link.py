@@ -15,13 +15,14 @@ import stat
 import bisect
 import threading
 import time
+import types
 import warnings
 
 from . import affil, facts
 from . import fingerprint as fp
 from .facts import NODE_ID_RE, Redirect, Span
 from .util import PROJECTS, SID_RE, line_error, open_regular, open_safe, parse_ts, short_path, stat_plain
-from .codex_parse import CX_PROMPT_MIN, CX_WINDOW
+from .codex_parse import CX_PROMPT_MIN, CX_WINDOW, cx_alive, cx_open, cx_procs
 from .codex_index import CODEX
 from .lineage import Lineage
 
@@ -1194,26 +1195,28 @@ def cx_differs(L, t):
     return a != b and not (len(raw) >= CX_FIRST_MAX and a.startswith(b))
 
 
-def cx_link(all_calls, threads, fixed=None, rules=None):
+def cx_link(all_calls, threads, fixed=None, rules=None, nodes=None, held=(), blind=None, up=None):
     """{thread_id: {sid, rule, call, bash_ts, bash_desc, dt, cwd}}.
     1 instruction (fullmatch, 40 or more characters outside variables, cwd, 30 s) → 2 an id inside a run call → 3 only when there is 1 candidate and 1 run call (an estimate)
     → 4 session only: if the run calls within 30 s before the thread started all belong to one Claude session, the agent of that session (an estimate, which call is not known).
     If two Claude sessions try to take the same thread, it is not linked.
     fixed {thread_id: parent session id} are links already decided by the process lineage (rule 'proc'): they come before the rules above, so a call of another session cannot take that thread
     (it is dropped from the candidates of rules 3 and 4 too), and if a call of the same session matches by rule 1 or 2, the details of that call (which call, when) are filled in.
-    rules {thread_id: rule} are the rule names of fixed (proc by default, env if found through the environment variable, file if read from the file)."""
-    execs = [t for t in threads if t['origin'] == 'exec' and not t['guardian'] and t['meta_ts']]
+    rules {thread_id: rule} are the rule names of fixed (proc by default, env if found through the environment variable, file if read from the file).
+    nodes {thread_id: node}: the node a fixed link names exactly (the environment of a Codex shell says which thread ran the command; None is a root).
+    A call's source `sid` is the tree of the record that holds it (a Claude session or a Codex root thread): a thread is never taken for what it launched itself.
+    held {thread_id}: threads whose environment names two parents that nothing tells apart (Lineage.pending): no rule below the environment places them.
+    blind(thread, trust_free=True, turns=True) → {(tree, node)}: the Codex threads that may have run a command their facts do not hold when this thread began (in its folder or above it; none when
+    nothing can have come from a Codex shell, unless `trust_free` is False; an open turn counts unless `turns` is False): competitors nobody can read. The instruction match of a launcher of another tree is then an estimate (`time`) with `incomplete`, not the rule `prompt` (a link the
+    lineage placed is not touched). A thread of the launcher's own tree, or above it in the chain of certain links `up(tree)`, is no competitor (it cannot change the tree).
+    The tree, the node and the call are decided on their own (R1): the node a fixed link names is not changed by the words of a command of another node; when the launches that fit a
+    thread are in several nodes of one tree, the tree is sure, the node and the call are held (`node_unresolved`): the nearest in time is not a reason."""
+    execs = [t for t in threads if t['origin'] == 'exec' and not t['guardian'] and t['meta_ts'] and t['id'] not in held]
     known = {t['id'] for t in execs}
     fixed = {tid: sid for tid, sid in (fixed or {}).items() if tid in known}
     rules = rules or {}
-    owners = {t['id']: {'sid': fixed[t['id']], 'rule': rules.get(t['id'], 'proc'), 'call': None, 'bash_ts': None, 'bash_desc': '', 'dt': None,
-                        'cwd': t['cwd'], 'cwd_ok': False, 'prompt_ok': False} for t in execs if t['id'] in fixed}
-
-    def info(rule, sid, c, t, L=None):
-        return {'sid': sid, 'node': c.get('node'), 'rule': rule, 'call': c['id'], 'bash_ts': c['ts'], 'bash_desc': c['desc'],
-                'dt': round(t['meta_ts'] - c['ts'], 3) if c['ts'] else None, 'cwd': t['cwd'],
-                'cwd_ok': bool(L and L['cwd'] and os.path.normpath(t['cwd'] or '') == L['cwd']),
-                'prompt_ok': rule == 'prompt'}
+    nodes = nodes or {}
+    tmap = {t['id']: t for t in execs}
 
     def cwd_ok(L, t):
         return not L['cwd'] or os.path.normpath(t['cwd'] or '') == L['cwd']
@@ -1224,25 +1227,54 @@ def cx_link(all_calls, threads, fixed=None, rules=None):
             if L['resume'] is not None or L['literal'] < CX_PROMPT_MIN or not c['ts']:
                 continue
             for t in execs:
+                if t['id'] == sid:
+                    continue
                 dt = t['meta_ts'] - c['ts']
                 first = (t['first_user'] or '').strip()
                 if (0 <= dt <= CX_WINDOW or cx_running(c, t['meta_ts'])) and first and cwd_ok(L, t) and L['rx'].fullmatch(first):
                     cand[t['id']].append((dt, sid, c, L))
-    tmap = {t['id']: t for t in execs}
+    stale_pins = {}
+    for tid in [t for t in fixed if rules.get(t) == 'env']:
+        # the names a tmux server carries on from the shell that started it: the pin counts while its tree can have started the thread (a call of it that runs `codex` was running then, or the
+        # facts of a Codex thread may lack a command); it is out when nothing of the tree can have, and another tree's launch fits the first words of the thread (not a guess)
+        tree, t = fixed[tid], tmap[tid]
+        if any(sid == tree and c['launch'] and c['ts'] and (0 <= t['meta_ts'] - c['ts'] <= CX_WINDOW or cx_running(c, t['meta_ts'])) for sid, c in all_calls):
+            continue
+        gaps = blind(t, False) if blind else set()                      # (whatever the pin says: the names that are in question cannot be what rules out a Codex shell)
+        if blind and any(k[0] == tree for k in blind(t, False, False)):
+            continue                                                    # the facts of the pin's own tree may lack a command (an open turn alone is no reason: its commands are all there)
+        rivals = {x[1] for x in cand.get(tid, ()) if x[1] != tree}
+        if len(rivals) != 1:
+            continue
+        win = next(iter(rivals))
+        if not {k for k in gaps if k[0] not in (win, tree) and k[0] not in set(up(win) if up else ())}:
+            stale_pins[tid] = fixed.pop(tid)
+    owners = {t['id']: {'sid': fixed[t['id']], 'node': nodes.get(t['id']), 'rule': rules.get(t['id'], 'proc'), 'call': None, 'bash_ts': None, 'bash_desc': '', 'dt': None,
+                        'cwd': t['cwd'], 'cwd_ok': False, 'prompt_ok': False} for t in execs if t['id'] in fixed}
+
+    def info(rule, sid, c, t, L=None):
+        return {'sid': sid, 'node': c.get('node'), 'rule': rule, 'call': c['id'], 'bash_ts': c['ts'], 'bash_desc': c['desc'],
+                'dt': round(t['meta_ts'] - c['ts'], 3) if c['ts'] else None, 'cwd': t['cwd'],
+                'cwd_ok': bool(L and L['cwd'] and os.path.normpath(t['cwd'] or '') == L['cwd']),
+                'prompt_ok': rule == 'prompt'}
+
     for tid, lst in cand.items():
         if tid in fixed:
-            lst = [x for x in lst if x[1] == fixed[tid]]
+            lst = [x for x in lst if x[1] == fixed[tid] and (tid not in nodes or x[2].get('node') == nodes[tid])]       # the environment named the node: only a call of that thread
         if lst and len({x[1] for x in lst}) == 1:
             dt, sid, c, L = min(lst, key=lambda x: x[0])
             owners[tid] = info('prompt', sid, c, tmap[tid], L)
+            if len({x[2].get('node') for x in lst}) > 1:                 # launches of several nodes of the tree fit it: the tree is sure, the node and the call are not
+                owners[tid].update(node=None, call=None, bash_ts=None, bash_desc='', dt=None, node_unresolved=True)
     claims = collections.defaultdict(list)
     for sid, c in all_calls:
         if c['launch']:
             for tid in c.get('resumes', ()) & known:
-                claims[tid].append((c['ts'] or 0, sid, c))
+                if tid != sid:
+                    claims[tid].append((c['ts'] or 0, sid, c))
     for tid, lst in claims.items():
         if tid in fixed:
-            lst = [x for x in lst if x[1] == fixed[tid]]
+            lst = [x for x in lst if x[1] == fixed[tid] and (tid not in nodes or x[2].get('node') == nodes[tid])]
         if (tid not in owners or (tid in fixed and owners[tid]['rule'] == rules.get(tid, 'proc'))) and lst and len({x[1] for x in lst}) == 1:
             _, sid, c = min(lst, key=lambda x: x[0])
             owners[tid] = info('id', sid, c, tmap[tid])
@@ -1251,7 +1283,7 @@ def cx_link(all_calls, threads, fixed=None, rules=None):
         for L in c['L']:
             if L['resume'] is not None or L['literal'] >= CX_PROMPT_MIN:
                 continue
-            cands = [t for t in execs if t['id'] not in owners and 0 <= t['meta_ts'] - c['ts'] <= CX_WINDOW and cwd_ok(L, t) and not cx_differs(L, t)]
+            cands = [t for t in execs if t['id'] not in owners and t['id'] != sid and 0 <= t['meta_ts'] - c['ts'] <= CX_WINDOW and cwd_ok(L, t) and not cx_differs(L, t)]
             if len(cands) != 1:
                 continue
             t = cands[0]
@@ -1268,12 +1300,31 @@ def cx_link(all_calls, threads, fixed=None, rules=None):
         if t['id'] in owners:
             continue
         near = [(t['meta_ts'] - c['ts'], sid, c, L) for sid, c in launches for L in c['L']
-                if L['resume'] is None and 0 <= t['meta_ts'] - c['ts'] <= CX_WINDOW and cwd_ok(L, t) and not cx_differs(L, t)
+                if sid != t['id'] and L['resume'] is None and 0 <= t['meta_ts'] - c['ts'] <= CX_WINDOW and cwd_ok(L, t) and not cx_differs(L, t)
                 and (c['id'] is None or taken[(sid, c['id'])] < room[(sid, c['id'])])]
         if near and len({x[1] for x in near}) == 1:
             dt, sid, c, L = min(near, key=lambda x: x[0])
             owners[t['id']] = info('session', sid, c, t, L)
             taken[(sid, c['id'])] += 1
+    if blind:
+        # A competitor nobody can read (a Codex thread that may have run a command its facts do not hold): the match of a launcher of another tree is an estimate then. Not a thread of the
+        # launcher's tree, nor one above it in the chain of certain links (this round's links, then `up` for what is not a thread of Codex).
+        above_of = {tid: o['sid'] for tid, o in owners.items() if certain(o['rule'])}
+
+        def above(x):
+            out = []
+            for _ in range(MAX_NEST):
+                nxt = above_of.get(x) or (next(iter(up(x)), None) if up else None)
+                if nxt is None or nxt in out or nxt == x:
+                    break
+                out.append(nxt)
+                x = nxt
+            return set(out)
+        for tid, o in owners.items():
+            if o['rule'] == 'prompt' and tid not in fixed and tid in tmap:
+                gone = above(o['sid'])
+                if {k for k in blind(tmap[tid]) if k[0] not in (o['sid'], stale_pins.get(tid)) and k[0] not in gone}:       # (the tree whose names were found not to be about it is no competitor nobody can read)
+                    o['rule'], o['incomplete'] = 'time', True
     # a thread the process lineage or the environment placed has no call; the call that started it is looked for among the calls of its own session so that the
     # node (the sub-agent whose record holds the call) can be shown. Only the calls that could have started it are read (a `codex exec` inside the window, in its
     # folder, and with the thread's first words when the call gives them); the node is set when they agree on it, the call when there is one of them.
@@ -1288,12 +1339,17 @@ def cx_link(all_calls, threads, fixed=None, rules=None):
         said = [(c, L) for c, L in near if L['literal'] >= CX_PROMPT_MIN and first and L['rx'].fullmatch(first)]
         near = said or near
         calls = {id(c): c for c, L in near}
+        if tid in nodes:
+            calls = {k: c for k, c in calls.items() if c.get('node') == nodes[tid]}      # the environment named the node: only a call of that thread can be the call
         if calls and len({c.get('node') for c in calls.values()}) == 1:
             c = next(iter(calls.values()))
             o['node'] = c.get('node')
             if len(calls) == 1:
                 o['call'], o['bash_ts'], o['bash_desc'] = c['id'], c['ts'], c['desc']
                 o['dt'] = round(t['meta_ts'] - c['ts'], 3) if c['ts'] else None
+    for tid, tree in stale_pins.items():
+        if tid in owners:
+            owners[tid]['stale_pin'] = tree                               # the names were not about it: `evidence_conflict` says so
     return owners
 
 
@@ -1969,6 +2025,7 @@ BASH_EVENTS_INSERT_MAX = 2000      # more new calls than this at once: the event
 FINISH_EVERY = 30.0               # the judgment is redone at least this often (a call that never ended ages out, an `orphan_launch` count waits for the clock)
 RESULT_WINDOW = 256 << 10           # a call's result is looked for this far after its own line first (a result follows its call closely)
 PEND_MAX = 16                     # calls whose end is still being looked for, per record
+MAX_NEST = 8                      # how many links up the graph of who started whom is followed (a cycle is cut earlier)
 CHUNK = 16 << 20
 LINE_MAX = 64 << 20               # a record line longer than this is not read: it is dropped, once, up to its end (the position moves past it)
 OUT_READ_HEAD = 4096
@@ -2162,6 +2219,16 @@ class OutIndex:
                 if len(lst) > 1 and lst[-2][0].span.start > call.span.start:
                     lst.sort(key=lambda x: x[0].span.start)
 
+    def drop(self, calls):
+        """Forgets the redirects of these calls (a record that was written again: what its calls said is not true any more)."""
+        gone = {id(c) for c in calls}
+        for path in list(self.by_path):
+            kept = [x for x in self.by_path[path] if id(x[0]) not in gone]
+            if kept:
+                self.by_path[path] = kept
+            else:
+                del self.by_path[path]
+
     def refresh(self):
         """Looks at every redirect file again (a stat each) and re-reads the ones that changed. True if the set of ids changed."""
         changed = False
@@ -2266,6 +2333,18 @@ class LinkIndex:
         self._chunk = None         # (bytes, offset) of the chunk being read: a call's result is looked for in it right away
         self._recheck_until = 0.0
         self._memo = {}            # child sid -> (inputs, Decision) of the children that are settled
+        self.cx_files = {}         # Codex thread id -> per-thread facts (the roots and the sub-agents: the threads whose commands can launch something)
+        self.cx_roots = frozenset()      # the ids of the Codex root threads that have a record here: a tree of a relation can be one of them
+        self._cx_ver = None        # CODEX.version at the last sync of the thread facts
+        self._ent, self._ent_ver = [], None      # the copy of the Codex entries and the version of the index it was made at
+        self._entmap, self._entmap_ver = {}, None          # the same by thread id
+        self._stale = {}           # `claude -p` child id -> the tree its environment names, for a child whose Codex names are older than any turn it could have begun in (no pin: said as a diagnostic)
+        self._stale_cx = {}        # the same for the `codex exec` threads
+        self._cx_ev = ([], [])     # every command of every Codex thread as (start, tree, folder) in time order, and the starts (for the missed candidates)
+        self._cx_dirty = None      # the earliest time a Codex fact arrived for (a command, a gap) since the settled judgments were last checked
+        self._cx_gaps = None       # {thread id: [(start, end, why)]} where the commands of a thread may be missing (for the blind test), made once for one judgment
+        self._graph_key, self._graph_state = None, (0, {}, {})                 # the graph of who started whom (owner_of, page_of, descendants), made again when its inputs changed: (version, edges, children)
+        self._pub = 0              # rises each time the links are published (the children's, the threads') or the Codex threads change: what the graph is made of
 
     def _quota(self, raw):
         try:
@@ -2555,7 +2634,12 @@ class LinkIndex:
                     self._grew = True
             CODEX.refresh()
             try:
-                if self.lineage.scan(present, CODEX.get):
+                if self._sync_codex():
+                    self._dirty = True
+            except Exception as e:   # noqa: BLE001 — the Claude records are judged even when the Codex facts cannot be read
+                print('codex facts error', type(e).__name__, flush=True)
+            try:
+                if self.lineage.scan(present, CODEX.get, CODEX.root_of):
                     self._dirty = True
             except Exception as e:   # noqa: BLE001 — the other rules keep running even if the lineage cannot be read
                 print('lineage scan error', type(e).__name__, e, flush=True)
@@ -2568,21 +2652,39 @@ class LinkIndex:
                 self._guard(lambda: self._finish(content=False))
             self.ready.set()
 
+    def _all_files(self):
+        """Every launching record: the Claude sessions, their sub-agents, and the Codex threads."""
+        return list(self.files.values()) + list(self.sub.values()) + list(self.cx_files.values())
+
     def _link_codex(self):
-        key = (CODEX.version, sum(len(f['calls']) for f in self.files.values()) + sum(len(f['calls']) for f in self.sub.values()), self.lineage.version)
-        changed = any(f.pop('_calls_changed', False) for f in list(self.files.values()) + list(self.sub.values()))
+        key = (CODEX.version, sum(len(f['calls']) for f in self._all_files()), self.lineage.version)
+        changed = any(f.pop('_calls_changed', False) for f in self._all_files())
         if changed or key != self._key:
             self._key = key
-            for f in list(self.files.values()) + list(self.sub.values()):
+            for f in self._all_files():
                 for c in f['calls']:
                     sp = f['spans'].get(c['id'])
                     if sp is not None:
                         c['span_end'] = sp.span.end                    # None: still running (or its end never seen)
-            all_calls = [(f['tree'], c) for f in list(self.files.values()) + list(self.sub.values()) for c in f['calls']]
-            self._entries = CODEX.entries()
-            owners = cx_link(all_calls, self._entries, self.lineage.cx, {t: i['rule'] for t, i in self.lineage.cx_info.items()})
+            all_calls = [(f['tree'], c) for f in self._all_files() for c in f['calls']]
+            self._entries = self._codex_entries()
+            self._cx_gaps = None
+            self._cx_gaps = None
+            cx, info, entmap = self.lineage.cx, self.lineage.cx_info, self._cx_ent_map()
+            fixed, self._stale_cx = {}, {}
+            for t, parent in cx.items():
+                if info[t].get('exact') and not self._cx_env_fresh(info[t].get('node') or parent, (entmap.get(t) or {}).get('meta_ts')):
+                    self._stale_cx[t] = parent                        # the names of a Codex thread older than any turn it could have begun this thread in: not about it
+                else:
+                    fixed[t] = parent
+            owners = cx_link(all_calls, self._entries, fixed, {t: i['rule'] for t, i in info.items()},
+                             {t: i.get('node') for t, i in info.items() if t in fixed and i.get('exact')},
+                             {t for t, w in self.lineage.pending.items() if w['kind'] == 'cx'}, self._cx_blind_for, self._up_of(self.cli_owners, self.owners))
+            for o in owners.values():
+                o['parent_kind'] = self.tree_kind(o['sid'])
             with self.lock:
                 self.owners = owners
+                self._pub += 1
 
     def _stage2(self):
         self._text_ok = True
@@ -2625,7 +2727,8 @@ class LinkIndex:
 
     def _judgment_due(self):
         """Whether the judgment has to be made again: something changed, the lineage or the live processes changed, or it is time (a call that never ended ages out)."""
-        return (self._dirty or self._signature() != self._pins_sig or time.time() - self._finished_at > FINISH_EVERY or time.time() < self._recheck_until)
+        return (self._dirty or self._signature() != self._pins_sig or time.time() - self._finished_at > FINISH_EVERY or time.time() < self._recheck_until
+                or bool(self.lineage.pending))             # a child with two environments waits for the chain: it is looked at again on every scan
 
     def _bash(self, f, raw, off=0):
         """A line holding a Bash call: gathers the Codex run calls (f['calls']), the `claude -p` launches (f['cli']) (including those inside scripts) and the call's span
@@ -2743,25 +2846,31 @@ class LinkIndex:
         tid = b.get('id')
         if not tid:
             return
+        call = self._make_call(f, tid, ts, cmd, d.get('cwd'), _input(b).get('description') or '', launches, (off, ln), lambda: self._can_launch(f, tid, off, ln))
+        self._track_end(f, call)
+        self._dirty = True
+
+    def _make_call(self, f, tid, ts, cmd, cwd, desc, launches, loc, probe, end=None, end_status='running'):
+        """The affil.Call of one launching command of a record `f` (a Claude Bash call or a Codex command), registered with its owner and the output index.
+        `end`: when the call is already over (a Codex command is written when it ends)."""
         reds = [r for L in launches for r in L['redirects']]
-        span = Span(owner_tree=f['tree'], owner_node=f['node'], call_id=tid, start=ts, end=None, launchy=True,
-                    cwd=os.path.normpath(d['cwd']) if isinstance(d.get('cwd'), str) and d['cwd'] else None, redirects=reds)
+        span = Span(owner_tree=f['tree'], owner_node=f['node'], call_id=tid, start=ts, end=end, end_status=end_status, launchy=True,
+                    cwd=os.path.normpath(cwd) if isinstance(cwd, str) and cwd else None, redirects=reds)
         lits = short_literals(cmd) if (launches or (('claude' in cmd or 'codex' in cmd) and WORD_RE.search(cmd))) else frozenset()
         launch_list = [affil.Launch(L['cwd'], L['n'], L['arg'], L['loop_args'], L['resume'], L['session_id'], L['persist'], True, L['redirects'], L['reopens'], L['cwds'],
                                     _WrittenText(self, f, L['src'], ts) if L.get('src') else None)
                        for L in launches]
         if not launch_list and 'claude' in cmd and _weak_launch(cmd):
             launch_list = [affil.Launch(None, 1, None, (), None, None, True, False, [])]      # not read (tmux, xargs, ...): never a refutation, only counted
-        call = affil.Call(span, launch_list, lits, _input(b).get('description') or '', (off, ln),
+        call = affil.Call(span, launch_list, lits, desc, loc,
                          frozenset(ID_ARG_RE.findall(cmd[:SCRIPT_TAIL * 4])) if ('--resume' in cmd or '--session-id' in cmd or ' -r' in cmd) else frozenset(),
-                         probe=lambda: self._can_launch(f, tid, off, ln))
+                         probe=probe)
         f['spans'][tid] = call
         if call.launches:
             f['launch_calls'].append(call)
         f['owner'].add(call)
         self.out.add(call)
-        self._track_end(f, call)
-        self._dirty = True
+        return call
 
     def _close_pending(self, f, body, base):
         """Looks in this chunk for the end of every call still waiting (a call whose result or notification is further on than its own search window)."""
@@ -2832,8 +2941,8 @@ class LinkIndex:
         """The normalised text the file `path` held at time `ts`, as far as the record `f` shows it: the newest Write of that file before `ts`, none of the
         Edits after it. None when that is not known (no such Write, an Edit changed the file since, the line was cut). Only once the text index is wanted
         (stage 2, or an index that runs it inline): the first screen does not read the Write/Edit lines."""
-        if not (self.deep_inline or self._text_ok):
-            return None
+        if not (self.deep_inline or self._text_ok) or f.get('provider') == 'codex':
+            return None                                              # (a Codex thread's file writes are not in its facts)
         self._scan_we(f, ts - fp.WINDOW_BEFORE, ts)
         tw = f['tw']
         for x in range(bisect.bisect_right(tw.ts, ts) - 1, -1, -1):
@@ -2868,6 +2977,249 @@ class LinkIndex:
         self.heads[p] = (ts, cwd)
         return (ts, cwd)
 
+    # ---------- the Codex threads as launchers ----------
+    # A Codex root thread (and each of its sub-agents) is a launching record like a Claude session: the commands it ran (the facts of board/codex_index.py: the
+    # command string as written, the folder, when it started and ended) are read by the same command reader as a Bash call. The tree is the root thread, the node
+    # the sub-agent thread (None for the root itself). Only a command that is over is known (Codex writes it when the process ends): a command still running, or
+    # whose text is not kept, is a gap (`CODEX.gaps`), and a thread that may have such a command is a competitor nobody can read (affil._blind).
+    def _new_cx_file(self, e, root):
+        tid = e['id']
+        f = {'provider': 'codex', 'tid': tid, 'gen': e.get('gen', 0), 'sid': tid, 'tree': root, 'node': None if tid == root else tid, 'calls': [], 'spans': {}, 'launch_calls': [], 'pos': 0,
+             'ids': set(), 'items': [], 'events': [], 'tb': _Idx(), 'entry': e, 'last_id': None}
+        f['owner'] = affil.Owner(root, f['node'], pool=lambda lo, hi, f=f: self._cx_pool(f, lo, hi), text_of=lambda call, f=f: self._cx_text(f, call.span.call_id),
+                                 provider='codex', cwd=e['cwd'] or None, blind_at=lambda lo, hi, f=f: self._cx_blind(f, lo, hi),
+                                 gap_at=lambda lo, hi, f=f: self._cx_blind(f, lo, hi, False))
+        return f
+
+    def _codex_entries(self):
+        """CODEX.entries() (a copy of every entry), made once for one version of the index."""
+        ver = CODEX.version
+        if self._ent_ver != ver:
+            self._ent, self._ent_ver = CODEX.entries(), ver
+        return self._ent
+
+    def _cx_ent_map(self):
+        """{thread id: entry} of the Codex index, made once for one version of it."""
+        ver = CODEX.version
+        if self._entmap_ver != ver:
+            self._entmap, self._entmap_ver = {e['id']: e for e in self._codex_entries()}, ver
+        return self._entmap
+
+    def _cx_env_fresh(self, thread, t0):
+        """Whether a child that began at `t0` can have been started by a shell of the Codex thread whose names its environment carries: its turn was running then (it began before, and
+        it ended after the child began less RUN_GRACE, or it is open and the process of its root is there). The names of a thread stay in the environment of whatever a shell of it left
+        running (a tmux server, a daemon): a child it starts much later is not that thread's. True when that cannot be told (no time for the child, no turns known of the thread)."""
+        e = self._cx_ent_map().get(thread)
+        turns = e.get('turns') if e else None
+        if t0 is None or e is None or turns is None:
+            return True
+        alive = None
+        for tr in turns:
+            start, end = tr.get('start'), tr.get('end')
+            if start is not None and start > t0 + affil.RUN_SLACK_BEFORE:
+                continue                                              # began after the child
+            if end is not None:
+                if t0 <= end + affil.RUN_GRACE:
+                    return True
+                continue
+            if alive is None:                                         # an open turn: it is running while its process is there (unknown counts as there)
+                f = self.cx_files.get(thread)
+                root = self._cx_ent_map().get(f['tree']) if f else e
+                alive = not self._cx_dead(root) if root and self._cx_dead(root) is not None else None
+            if alive is not False or t0 <= (e['last_ts'] or 0) + affil.RUN_GRACE:
+                return True
+        return False
+
+    def _sync_codex(self):
+        """Brings the Codex launching records up to date with the Codex index (when it changed). True when a command or a thread is new."""
+        ver = CODEX.version
+        if ver == self._cx_ver:
+            return False
+        self._cx_ver = ver
+        changed, roots, seen = False, set(), set()
+        for e in self._codex_entries():
+            tid = e['id']
+            if e.get('kind') not in ('root', 'sub'):
+                continue
+            root = CODEX.root_of(tid)
+            if root is None:
+                continue
+            seen.add(tid)
+            f = self.cx_files.get(tid)
+            if f is not None and (f['tree'] != root or f['gen'] != e.get('gen', 0)):
+                self._cx_forget(f)                                   # the rollout was written again (it shrank, or its start changed): what was read of the old one is not true
+                f = None
+            if f is None:
+                f = self.cx_files[tid] = self._new_cx_file(e, root)
+                changed = True
+            f['entry'] = e
+            f['owner'].first_ts, f['owner'].last_ts, f['owner'].cwd = e['meta_ts'], e['last_ts'], e['cwd'] or None
+            if e.get('kind') == 'root':
+                roots.add(tid)
+            changed = self._cx_commands(f) or changed
+        for tid in [t for t in self.cx_files if t not in seen]:
+            self._cx_forget(self.cx_files.pop(tid))
+            changed = True
+        gaps = {tid: tuple(CODEX.gaps(tid)) + tuple((at, None, 'running') for at in CODEX.running(tid)) for tid in self.cx_files}
+        for tid, g in gaps.items():
+            old = self.cx_files[tid].get('gaps')
+            if old != g:
+                self.cx_files[tid]['gaps'] = g
+                for start, end, _ in set(g) ^ set(old or ()):
+                    self._cx_touch(start if start != -float('inf') else end)
+                changed = True
+        self._cx_gaps = None
+        if changed:
+            self._pub += 1
+            ev = sorted((st, f['tree'], cw) for f in self.cx_files.values() for st, cw in f['events'])
+            self._cx_ev = (ev, [x[0] for x in ev])
+        if frozenset(roots) != self.cx_roots:
+            self.cx_roots, changed = frozenset(roots), True
+        return changed
+
+    def _cx_forget(self, f):
+        """What was made of a Codex thread's commands is dropped (its calls, spans, redirects, the texts held for the fingerprint) and every settled judgment is made again: a rollout that
+        was written again may hold other commands under the same ids, or none."""
+        self.out.drop(list(f['spans'].values()))
+        self.tcache.drop_prefix(f['tid'])
+        self._cx_dirty = float('-inf')
+
+    def _cx_touch(self, t):
+        """A fact of the Codex index at time `t` arrived (or went): a settled judgment of a child that started after it is not settled."""
+        if t is not None and t == t and abs(t) != float('inf') and (self._cx_dirty is None or t < self._cx_dirty):
+            self._cx_dirty = t
+
+    def _cx_commands(self, f):
+        """The new commands of one thread: indexed for the text pool, and read for launches when one names a tool or a script. True when there were new ones."""
+        tid = f['tid']
+        cmds = CODEX.cmds(tid)
+        if not cmds or cmds[-1]['item_id'] == f['last_id']:
+            return False
+        fresh = []
+        for c in reversed(cmds):
+            if c['item_id'] in f['ids']:
+                break
+            fresh.append(c)
+        if not fresh:
+            f['last_id'] = cmds[-1]['item_id']
+            return False
+        for c in reversed(fresh):                                     # oldest first
+            f['ids'].add(c['item_id'])
+            f['tb'].insert(c['start'], len(f['items']), 0)
+            f['items'].append(c['item_id'])
+            f['events'].append((c['start'], os.path.normpath(c['cwd']) if isinstance(c['cwd'], str) and c['cwd'] else None))
+            self._cx_touch(c['start'])
+            try:
+                self._cx_command(f, c)
+            except Exception as e:   # noqa: BLE001 — one command that cannot be read must not stop the rest
+                line_error(tid, None, e)
+        f['last_id'] = cmds[-1]['item_id']
+        return True
+
+    def _cx_command(self, f, c):
+        """One finished command of a Codex thread, as a launching call (when it can launch) and as a call the Codex rules look at (`codex exec`)."""
+        text = c['cmd'] if c['cmd'] is not None else CODEX.cmd_text(f['tid'], c['item_id'])
+        if not isinstance(text, str):
+            return                                                     # no text (not a shell command, over the limit, not kept): its time is a gap
+        cwd, tid, item = c['cwd'], f['tid'], c['item_id']
+        scripts = bash_scripts(text, cwd) if (f['node'] is None or SCRIPTY_RE.search(text)) else []
+        if 'codex' in text or scripts:
+            cc = cx_parse_call(c['start'], item, {'command': text}, cwd, scripts=scripts)
+            if cc:
+                cc['node'] = f['node']
+                cc['span_end'] = c['end']
+                f['calls'].append(cc)
+        launches = []
+        if (('claude' in text and (' -p' in text or '--print' in text)) or scripts):
+            found = [(text, shell_code(text), None, cwd)] if 'claude' in text else []
+            found += [(x['text'], x['code'], x['env'], x['cwd']) for x in scripts if 'claude' in x['text']]
+            launches = [L for t, code, env, base in found for L in launch_facts(t, code, base, env, 'claude')]
+        if launches or scripts or _launchy_call(text):
+            self._make_call(f, item, c['start'], text, cwd, '', launches, None, lambda: self._cx_kinds(tid, item, cwd), end=c['end'], end_status='result')
+
+    @staticmethod
+    def _cx_kinds(tid, item, cwd):
+        """launch_kinds of a Codex command (the text is read again from the index when it was dropped): both tools, assumed, when it cannot be read."""
+        text = CODEX.cmd_text(tid, item)
+        return launch_kinds(text, cwd) if isinstance(text, str) else (frozenset(), BOTH_TOOLS)
+
+    def _cx_text(self, f, item):
+        """The normalised text of one command of a thread (cut at LINE_BYTES, which ends it with fp.CUT); '' when the index does not hold it."""
+        key = (f['tid'], item)
+        t = self.tcache.get(key)
+        if t is not None:
+            return t
+        raw = CODEX.cmd_text(f['tid'], item)
+        if not isinstance(raw, str):
+            return ''
+        head = fp.clip(raw, fp.LINE_BYTES)
+        t = fp.normalize(head)
+        t = t + fp.CUT if len(head) < len(raw) and t else t
+        self.tcache.put(key, t)
+        return t
+
+    def _cx_pool(self, f, lo, hi):
+        """(normalised text, complete) of the commands of a thread that started between two times, newest first, at most OWNER_BYTES. Not complete when a command
+        in the window has no text here (it was not kept) as well as when the window was cut."""
+        idx = f['tb']
+        i, j = bisect.bisect_left(idx.ts, lo), bisect.bisect_right(idx.ts, hi)
+        if i >= j:
+            return '', True
+        texts, size, missing = [], 0, False
+        for x in sorted(range(i, j), key=lambda k: -idx.ts[k]):
+            t = self._cx_text(f, f['items'][idx.off[x]])
+            if not t:
+                missing = True
+                continue
+            texts.append(t)
+            size += fp.nbytes(t)
+            if size > fp.OWNER_BYTES:
+                break
+        pool, complete = fp.join_pool(texts)
+        return pool, complete and not missing
+
+    def _cx_dead(self, root_entry):
+        """Whether nobody has the rollout of a root thread open and that can be told (the open files are known: /proc): the process of the thread is gone (None: not known)."""
+        opened = cx_open(root_entry['path'], root_entry['id'], cx_procs())
+        return None if opened is None else not opened
+
+    def _cx_gap_map(self):
+        """{thread id: [(start, end, why)]}: where the commands of a thread may be missing (and what says so, see CODEX.gaps; `running`: a command that runs now in an open turn, CODEX.running), for the threads that have such a place. A turn that never ended in a thread nobody has open
+        (its process is gone, nothing writes to it any more) ends at the last time the thread was written; the process of a sub-agent is its root's. A gap that starts at the very
+        beginning of what is known (-inf: only the end of a big file was read) starts when the thread did."""
+        if self._cx_gaps is not None:
+            return self._cx_gaps
+        out, dead = {}, {}
+        for tid, f in self.cx_files.items():
+            g = f.get('gaps')
+            if not g:
+                continue
+            e = f['entry']
+            cap = None
+            if any(why == 'turn' and end is None for _, end, why in g):
+                root = f['tree']
+                if root not in dead:
+                    dead[root] = self._cx_dead(self.cx_files[root]['entry']) if root in self.cx_files else None
+                cap = e['last_ts'] if dead[root] and e['last_ts'] else None
+            floor = e['meta_ts'] if e['meta_ts'] is not None else float('-inf')
+            out[tid] = [(floor if start == float('-inf') else start, cap if (end is None and why in ('turn', 'running') and cap is not None) else end, why) for start, end, why in g]
+        self._cx_gaps = out
+        return out
+
+    def _cx_blind_for(self, t, trust_free=True, turns=True):
+        """The (tree, node) of the Codex threads that may have run a command their facts do not hold when the thread `t` began, in its folder or above it (not its own tree; none for a
+        thread whose environment was read and holds no name of Codex while something says why: lineage.codex_free, unless `trust_free` is False)."""
+        if trust_free and self.lineage.codex_free.get(t['id']) is True:
+            return set()
+        lo, hi = t['meta_ts'] - affil.RUN_GRACE, t['meta_ts'] + affil.RUN_SLACK_BEFORE
+        return {(f['tree'], f['node']) for f in self.cx_files.values()
+                if f['tree'] != t['id'] and self._cx_blind(f, lo, hi, turns) and affil._under(t['cwd'] or None, f['owner'].cwd)}
+
+    def _cx_blind(self, f, lo, hi, turns=True):
+        """Whether the thread may have run a command between two times that its facts do not hold. An open turn is a place where one may be missing (a command that runs is written when it
+        ends); with `turns` False it is left out: whether a thread whose commands are all there started something is asked of the commands that run, not of the turn being open."""
+        return any(s <= hi and (e is None or e >= lo) for s, e, why in self._cx_gap_map().get(f['tid'], ()) if turns or why != 'turn')
+
     # ---------- the judgment ----------
     def _finish(self, content=True):
         """Judges every child again with what is known now and publishes it. The judgment is made without self.lock (the requests that read the links wait
@@ -2880,6 +3232,7 @@ class LinkIndex:
             unlinked = self.unlinked_map
         with self.lock:
             self.decisions, self.assignment, self.cli_owners, self.diags, self.unlinked_map = res['decisions'], res['assignment'], res['cli_owners'], res['diags'], unlinked
+            self._pub += 1
         self._remember(res['decisions'])
         self._dirty = False
         self._finished_at = time.time()
@@ -2897,7 +3250,12 @@ class LinkIndex:
             ts, _ = self._head(f['path'])
             o.first_ts, o.last_ts = ts, f['mtime']
             out.append(o)
+        out += [f['owner'] for f in self.cx_files.values()]
         return out
+
+    def tree_kind(self, sid):
+        """Whose record a tree id is: `codex` (a root thread) or `claude` (a session)."""
+        return 'codex' if sid in self.cx_roots else 'claude'
 
     def _children(self):
         out = []
@@ -2906,17 +3264,70 @@ class LinkIndex:
                 continue                                         # a session a person opened is never a child
             ts, cwd = self._head(p)
             runs = f['rs'].runs if f['rs'] is not None else []
-            out.append(affil.ChildFacts(f['sid'], runs[0].ts if runs else ts, cwd, self.entry.get(p), runs))
+            out.append(affil.ChildFacts(f['sid'], runs[0].ts if runs else ts, cwd, self.entry.get(p), runs, self.lineage.codex_free.get(f['sid']) is True))
         return out
 
-    def _pins_of(self, csid, known):
+    def _pins_of(self, csid, known, cf=None):
         """The live process / environment / remembered link of a child as rank 2 evidence; only a parent that has a record can be shown."""
+        w = self.lineage.pending.get(csid)
+        if w and w['kind'] == 'cli':
+            # the evidence of the environment is not a parent: the environment names the two providers and the chain does not say which is the direct parent, or it contradicts itself
+            # (`CODEX_SESSION_ID` is not the root of `CODEX_THREAD_ID`): the trees it names are a tie at rank 2 (a remembered line of the same child does not count against it)
+            if 'unknown' in w:
+                return [{'kind': 'env', 'tree': None, 'ts': w.get('ts'), 'unknown': w['unknown']}]       # it names a Codex thread nothing is known of: nothing is claimed, and nothing firm is made of the text
+            return [{'kind': 'env', 'tree': None, 'ts': w.get('ts'), 'conflict': w.get('conflict') or [(w['claude'], None), (w['codex'][0], w['codex'][1])]}]
         p = self.lineage.cli.get(csid)
         if not p or p['sid'] not in known:
             return []
-        return [{'kind': p['rule'], 'tree': p['sid'], 'ts': p.get('ts')}]
+        if p.get('exact') and cf is not None and not self._cx_env_fresh(p.get('node') or p['sid'], cf.t0):
+            self._stale[csid] = p['sid']                              # a Codex environment older than the thread's turns: it is not about this child
+            return []
+        return [{'kind': p['rule'], 'tree': p['sid'], 'ts': p.get('ts'), 'node': p.get('node'), 'exact': bool(p.get('exact'))}]
 
     def _link_cli(self, content=True):
+        """The judgment of every `claude -p` child (_judge), made again while a child whose two providers' environments name different parents gets its parent from the
+        ownership chain (Lineage.resolve): the links are decided from the parents down, once more as long as something changed (at most MAX_NEST rounds)."""
+        res = self._judge(content)
+        for _ in range(MAX_NEST):
+            if not self.lineage.pending or not self._resolve_pending(res):
+                break
+            res = self._judge(content)
+        return res
+
+    def _up_of(self, cli, cx):
+        """up(id): the ids above a session or thread through links that are certain (the session or thread that started it, and what started that …, nearest first), read from the
+        links of the `claude -p` children `cli` and the `codex exec` threads `cx` and the sub-agents' meta; a link that is only a guess is no part of it."""
+        def parent(x):
+            o = cli.get(x)
+            if o and o['certain'] and o['sid'] != x:
+                return o['sid']
+            o = cx.get(x)
+            if o and certain(o['rule']) and o['sid'] != x:
+                return o['sid']
+            e = CODEX.get(x)
+            return e['parent'] if e and e.get('kind') == 'sub' else None
+
+        def up(x):
+            out, seen = [], {x}
+            for _ in range(MAX_NEST):
+                x = parent(x)
+                if x is None or x in seen:
+                    break
+                out.append(x)
+                seen.add(x)
+            return out
+        return up
+
+    def _resolve_pending(self, res):
+        """Gives the children with two environments their direct parent when the chain of certain links says it. The chain is read from this round's judgment, the Codex
+        threads' links and the sub-agents' meta; a link that is only a guess is no part of it. True when a child was decided."""
+        up = self._up_of(res['cli_owners'], self.owners)
+        if not self.lineage.resolve(up):
+            return False
+        self._link_codex()                                       # a Codex thread that was decided changes who started what
+        return True
+
+    def _judge(self, content=True):
         """claude -p child → the session (and node, and call) that launched it: board/affil.py decides from the facts gathered above. A child decided by the
         process lineage keeps that link as rank 2 evidence; an output file or the content can be firmer or can contradict it (reported as a diagnostic).
         A child whose last run started more than SETTLE seconds ago is judged once and remembered (nothing that happens later can change what was running
@@ -2924,20 +3335,31 @@ class LinkIndex:
         session id); the others are judged as usual. Returns the results, publishes nothing: {decisions, assignment, cli_owners, diags}."""
         if self.out.refresh():
             self._memo.clear()
+        if self._cx_dirty is not None:
+            # a command or a gap of a Codex thread arrived (or went) at some time: a settled judgment of a child that started after it saw less than there is now (a
+            # command is written when it ends, so one can come long after the child began)
+            dirty, self._cx_dirty = self._cx_dirty, None
+            for csid in [c for c, (k, _) in self._memo.items() if k[1] is None or k[1] >= dirty - 2]:
+                del self._memo[csid]
+        self._cx_gaps = None
+        self._stale = {}
         owners = self._owner_list()
-        known = {f['sid'] for f in self.files.values()}
+        known = {f['sid'] for f in self.files.values()} | self.cx_roots
+        up = self._up_of(self.cli_owners, self.owners)                 # (the links of the last judgment: a child's own parent is older than the child)
         decisions, failed, now = {}, [], time.time()
+        redo = []
         for cf in self._children():
-            pins = self._pins_of(cf.sid, known)
+            pins = self._pins_of(cf.sid, known, cf)
             saved = self.lineage.saved.get(cf.sid)
             last = cf.runs[-1].ts if cf.runs else cf.t0
-            key = (len(cf.runs), last, tuple((p['kind'], p['tree'], p.get('ts')) for p in pins), saved and (saved['tree'], saved['node']), content, len(owners))
+            key = (len(cf.runs), last, tuple((p['kind'], p['tree'], p.get('ts'), p.get('node'), p.get('exact'), tuple(p.get('conflict') or ()), p.get('unknown')) for p in pins),
+                   saved and (saved['tree'], saved['node']), content, len(owners), cf.codex_free)
             hit = self._memo.get(cf.sid)
             if hit is not None and hit[0] == key:
                 dec = hit[1]
             else:
                 try:
-                    dec = affil.decide(cf, owners, pins, self.out, saved, content)
+                    dec = affil.decide(cf, owners, pins, self.out, saved, content, up)
                 except Exception as e:   # noqa: BLE001 — one child that cannot be judged must not stop the others
                     line_error(cf.sid, None, e)
                     failed.append(cf)
@@ -2947,7 +3369,21 @@ class LinkIndex:
                     dec = affil.Decision(cf)                      # the launching session has no record to show it in
                 if last is not None and now - last > SETTLE and not dec.incomplete:
                     self._memo[cf.sid] = (key, dec)
+                elif dec.incomplete:
+                    redo.append((cf, pins, saved))
             decisions[cf.sid] = dec
+        if redo:
+            # a comparison left incomplete by a thread nobody can read: whether that thread is above the winner's tree is known from this round's links, which the first look did not have
+            up = self._up_of({c: {'sid': d.tree, 'certain': d.certain} for c, d in decisions.items() if d.tree is not None}, self.owners)
+            for cf, pins, saved in redo:
+                try:
+                    dec = affil.decide(cf, owners, pins, self.out, saved, content, up)
+                except Exception as e:   # noqa: BLE001
+                    line_error(cf.sid, None, e)
+                    continue
+                if dec.tree is not None and dec.tree not in known:
+                    dec = affil.Decision(cf)
+                decisions[cf.sid] = dec
         self._share_calls(decisions)
         asg = affil.assign_launches([((csid, k), dec.run_ts[k], dec.calls[k], cl) for csid, dec in decisions.items() for k, cl in enumerate(dec.run_claims)])
         heads = {f['sid']: self._head(p) for p, f in self.files.items()}
@@ -2957,14 +3393,17 @@ class LinkIndex:
                 diags.append(dict(detail, code=code, subject=csid, tree=dec.tree, node=dec.node))
             if dec.tree is None:
                 continue
-            calls = [asg.call_of.get((csid, k)) for k in range(len(dec.run_claims))]
-            call = calls[0] if calls else None                  # for the spawn time and description: the call the evidence names for the first run, else the one the launches count to (FIFO)
+            # the call of a run: the one the evidence names, else the one the launches count to (FIFO) - but not for a run whose tree a live process, an environment or a remembered line settled (rank 2) and
+            # whose text names no call: counting would hand it a call that another child's launch is waiting for (the launches are counted for the orphans, not to give a child a title)
+            calls = [c if (csid, k) in asg.named or (dec.run_ranks[k] if k < len(dec.run_ranks) else None) != 2 else None
+                     for k, c in ((k, asg.call_of.get((csid, k))) for k in range(len(dec.run_claims)))]
+            call = calls[0] if calls else None                  # for the spawn time and description
             pin = self.lineage.cli.get(csid) or {}
             readers = [l for l in (call.launches if call else []) if l.reader]
             cw = decisions[csid].child.cwd
             L = next((l for l in readers if l.cwd and cw and os.path.normpath(l.cwd) == os.path.normpath(cw)), readers[0] if readers else None)
             first = (decisions[csid].child.runs[0].ts if decisions[csid].child.runs else heads.get(csid, (None,))[0])
-            owners_out[csid] = {'sid': dec.tree, 'node': dec.node, 'rule': dec.rule, 'by': list(dec.by), 'certain': bool(dec.relation.certain.get('tree')),
+            owners_out[csid] = {'sid': dec.tree, 'node': dec.node, 'parent_kind': self.tree_kind(dec.tree), 'rule': dec.rule, 'by': list(dec.by), 'certain': bool(dec.relation.certain.get('tree')),
                                 'bash_ts': call.span.start if call else (pin.get('ts') or heads.get(csid, (None,))[0] or time.time()),
                                 'bash_desc': call.desc if call else '', 'call': dec.call.span.call_id if dec.call else None,
                                 'calls': [c.span.call_id if c else None for c in calls], 'calls_certain': [(csid, k) in asg.named for k in range(len(calls))],
@@ -2977,6 +3416,14 @@ class LinkIndex:
             if f.get('unreadable'):
                 diags.append({'code': 'parse_errors', 'subject': f['sid'], 'tree': f['tree'], 'node': f['node'], 'n': 1, 'what': 'unreadable'})
         diags += self._orphans(asg)
+        diags += [{'code': 'evidence_conflict', 'subject': c, 'tree': None, 'node': None, 'other': t} for c, t in list(self._stale.items()) + list(self._stale_cx.items())]
+        for tid, o in list(self.owners.items()):                                  # what the judgment of a `codex exec` thread left open
+            if o.get('node_unresolved'):
+                diags.append({'code': 'node_unresolved', 'subject': tid, 'tree': o['sid'], 'node': None})
+            if o.get('incomplete'):
+                diags.append({'code': 'fingerprint_incomplete', 'subject': tid, 'tree': o['sid'], 'node': o.get('node')})
+            if o.get('stale_pin'):
+                diags.append({'code': 'evidence_conflict', 'subject': tid, 'tree': o['sid'], 'node': None, 'other': o['stale_pin']})
         return {'decisions': decisions, 'assignment': asg, 'cli_owners': owners_out, 'diags': diags}
 
     def _share_calls(self, decisions):
@@ -3011,7 +3458,7 @@ class LinkIndex:
         say `orphan_launch` with `ambiguous`. -> the diagnostics."""
         now = time.time()
         sure, maybe = collections.Counter(), collections.Counter()
-        for f in list(self.files.values()) + list(self.sub.values()):
+        for f in self._all_files():
             me = (f['tree'], f['node'])
             for call in f['launch_calls']:
                 s_ = call.span
@@ -3034,6 +3481,10 @@ class LinkIndex:
                 else:
                     for w in who:
                         maybe[w] += lack
+        threads = [e for e in self._entries if e['origin'] == 'exec' and not e['guardian'] and e['meta_ts']]
+        for f in self.cx_files.values():                              # the `codex exec` launches of the Codex threads (the Claude sessions' are not counted)
+            for c in f['calls']:
+                sure[(f['tree'], f['node'])] += self._cx_lack(f, c, threads, now)
         out = []
         for tree, node in sorted(set(sure) | set(maybe), key=lambda k: (k[0], k[1] or '')):
             n, m = sure[(tree, node)], maybe[(tree, node)]
@@ -3041,13 +3492,30 @@ class LinkIndex:
                 out.append(dict({'code': 'orphan_launch', 'subject': tree, 'tree': tree, 'node': node, 'n': n + m}, **({'ambiguous': True} if m else {})))
         return out
 
+    @staticmethod
+    def _cx_lack(f, c, threads, now):
+        """How many of the `codex exec` launches of one command of a Codex thread have no thread behind them: the launches the command reader placed (a loop counts as many as its
+        known count), less the threads that could have been started by it (they began in its time, in its folder, and its literal instruction does not refute them: a thread
+        that was not linked is still a child of the call, so a launch is not called childless on account of a link that is missing). A command that is over counts after
+        ORPHAN_GRACE seconds. A `&` command of a Codex shell takes the run down with the call: no thread was ever written, which is what this finds."""
+        launches = [x for x in c['L'] if x['resume'] is None]
+        end = c.get('span_end')
+        if not launches or end is None or now - end <= ORPHAN_GRACE or not c['ts']:
+            return 0
+        known = sum(x['n'] for x in launches if x['n'] < LOOP_UNKNOWN)
+        unknown = any(x['n'] >= LOOP_UNKNOWN for x in launches)
+        got = sum(1 for t in threads if t['id'] != f['tree'] and any(
+            (0 <= t['meta_ts'] - c['ts'] <= CX_WINDOW or cx_running(c, t['meta_ts'])) and (not x['cwd'] or os.path.normpath(t['cwd'] or '') == x['cwd']) and not cx_differs(x, t)
+            for x in launches))
+        return max(0, known - got) + (1 if unknown and not got and not known else 0)
+
     def _remember(self, decisions):
         """A link that rests on an output file or on a long instruction is kept (id, rule, time; the node id when it is a sub-agent) in the link cache."""
         for csid, dec in decisions.items():
             if dec.tree is None or dec.kind not in ('out', 'content', 'resume') or not dec.certain:
                 continue
             try:
-                self.lineage.remember(csid, dec.tree, dec.node, dec.rule, dec.child.t0)
+                self.lineage.remember(csid, dec.tree, dec.node, dec.rule, dec.child.t0, pk=self.tree_kind(dec.tree))
             except Exception as e:   # noqa: BLE001
                 print('link cache remember error', type(e).__name__, flush=True)
 
@@ -3119,12 +3587,17 @@ class LinkIndex:
             for k in range(bisect.bisect_left(tss, start - window), bisect.bisect_right(tss, start)):
                 if ev[k][1] != xid:
                     near.setdefault(ev[k][1], []).append(ev[k][2])
+            cev, ctss = self._cx_ev                                              # the commands of the Codex threads: a thread of Codex is a launcher too
+            for k in range(bisect.bisect_left(ctss, start - window), bisect.bisect_right(ctss, start)):
+                if cev[k][1] != xid:
+                    near.setdefault(cev[k][1], []).append(cev[k][2])
             for sid, cwds in near.items():
-                f = files[sid]
+                fs = [files[sid]] if sid in files else [f for f in self.cx_files.values() if f['tree'] == sid]
                 if provider == 'claude':
-                    launches = [l['cwd'] for l in f['cli'] if l['ts'] and 0 <= start - l['ts'] <= window]
+                    launches = [l['cwd'] for f in fs if 'cli' in f for l in f['cli'] if l['ts'] and 0 <= start - l['ts'] <= window]
+                    launches += [L.cwd for f in fs if f.get('provider') == 'codex' for call in f['launch_calls'] if 0 <= start - call.span.start <= window for L in call.launches]
                 else:
-                    launches = [L['cwd'] for c in f['calls'] if c['ts'] and 0 <= start - c['ts'] <= window for L in c['L'] if L['resume'] is None]
+                    launches = [L['cwd'] for f in fs for c in f['calls'] if c['ts'] and 0 <= start - c['ts'] <= window for L in c['L'] if L['resume'] is None]
                 if launches:
                     if not any(cw is None or cw == xcwd for cw in launches):
                         continue                                                  # only runs started in another folder: not this session's share
@@ -3147,6 +3620,84 @@ class LinkIndex:
 
     def cli_count(self, sid):
         return sum(1 for o in list(self.cli_owners.values()) if o['sid'] == sid)
+
+    # ---------- who started whom: one graph of sessions and threads ----------
+    # Every link there is, in one place: a `claude -p` child (kind `cli`), a `codex exec` thread (`cx`), a native sub-agent thread of Codex (`sub`). The vertices are
+    # sessions and threads; a Claude Agent-tool sub-agent is no vertex (it is the `node` of a link: the page reads its folder).
+    def _graph(self):
+        """(version, {id: {parent, node, kind, rule, certain}}, {parent id: [child id]}) made again when the links or the Codex index changed. The three are taken together under the
+        lock and never changed afterwards, so a reader that uses only this tuple sees one graph, whatever is published meanwhile. The version is a whole number that rises each time
+        the graph is made again."""
+        with self.lock:
+            # the whole number rises with every publication; the identity of the two dicts also counts, so that a reader that puts a dict of links in place by hand (a test, a tool) is seen too
+            key = (self._pub, CODEX.version, id(self.cli_owners), id(self.owners))
+            if self._graph_key == key:
+                return self._graph_state
+            g = {}
+            for csid, o in self.cli_owners.items():
+                g[csid] = {'parent': o['sid'], 'node': o.get('node'), 'kind': 'cli', 'rule': o['rule'], 'certain': bool(o['certain'])}
+            for tid, o in self.owners.items():
+                g[tid] = {'parent': o['sid'], 'node': o.get('node'), 'kind': 'cx', 'rule': o['rule'], 'certain': certain(o['rule'])}
+            for tid, f in self.cx_files.items():
+                e = f['entry']
+                if e.get('kind') != 'sub' or not e.get('parent'):
+                    continue
+                started = [c['call_id'] for c in CODEX.collab(e['parent']) if c['kind'] == 'started' and c['agent_thread_id'] == tid]
+                g[tid] = {'parent': e['parent'], 'node': None, 'kind': 'sub', 'rule': 'subagent', 'certain': True,
+                          'call': started[0] if len(started) == 1 else None, 'call_certain': len(started) == 1}
+            kids = {}
+            for cid, info in g.items():
+                kids.setdefault(info['parent'], []).append(cid)
+            self._graph_key, self._graph_state = key, (self._graph_state[0] + 1, g, kids)
+            return self._graph_state
+
+    def edges(self):
+        """(version, {id: {parent, node, kind, rule, certain[, call, call_certain]}}): every link of the graph, read only (a view of what the graph is made of: do not change the values).
+        The version is a whole number that rises each time the graph was made again (the links were published, a Codex thread changed): a reader that keeps what it made from the edges
+        asks again when the version is not the one it saw. The version and the edges are of the same graph."""
+        ver, g, _ = self._graph()
+        return ver, types.MappingProxyType(g)
+
+    def owner_of(self, id):
+        """Who started a session or thread: {parent (the session or thread above it), node (the agent inside the parent that did: a Claude sub-agent `a…` or a Codex sub-agent
+        thread, None for the parent itself), kind (`sub`: a native Codex sub-agent, `cli`: a `claude -p` child, `cx`: a `codex exec` thread), rule, certain}, a copy; None when
+        nothing is known of who started it (a session or thread a person opened). A `sub` also has `call` (the call that spawned it, from the parent's record) and `call_certain`."""
+        o = self._graph()[1].get(id)
+        return dict(o) if o else None
+
+    def page_of(self, id):
+        """The session or thread at the top of the links above `id` (the page its card is shown on); `id` itself when nothing is above it or the links go round in a circle. At most
+        MAX_NEST links up."""
+        g = self._graph()[1]
+        x, seen = id, {id}
+        for _ in range(MAX_NEST):
+            o = g.get(x)
+            if not o:
+                return x
+            x = o['parent']
+            if x in seen:
+                return id
+            seen.add(x)
+        return x
+
+    def descendants(self, page):
+        """Every session and thread started from `page`, directly or through others (down the links, at most MAX_NEST deep), parents before their children, each once (the sub-agents
+        of a thread first, then the `codex exec` threads, then the `claude -p` children, each by id). A circle is cut."""
+        _, g, kids = self._graph()
+        out, seen = [], {page}
+        level = [page]
+        for _ in range(MAX_NEST):
+            nxt = []
+            for p in level:
+                for c in sorted(kids.get(p, ()), key=lambda c: (('sub', 'cx', 'cli').index(g[c]['kind']), c)):
+                    if c not in seen:
+                        seen.add(c)
+                        out.append(c)
+                        nxt.append(c)
+            if not nxt:
+                break
+            level = nxt
+        return out
 
     def _line(self, f, raw):
         try:

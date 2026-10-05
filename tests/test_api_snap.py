@@ -49,6 +49,13 @@ class Allowed(unittest.TestCase):
         ask = event('orch_ask', questions=[{'header': None, 'question': 'Which?', 'options': []}])
         self.assert_accepted(event('orch_ask'), dict(ask, **NEW_EVENT))
 
+    def test_the_body_key_of_an_event_the_server_wrote(self):
+        old, new = event('spawn', text='지시 내용은 기록에서 암호화되어 있어 볼 수 없습니다.'), event('spawn', text='지시 내용은 기록에서 암호화되어 있어 볼 수 없습니다.', text_i18n={'key': 'event.encrypted.text', 'params': {}})
+        self.assert_accepted({'feed': [old]}, {'feed': [new]}, rule='event text_i18n')
+        out, used = strip({'k': {'text': 'x'}}, {'k': {'text': 'x', 'text_i18n': {'key': 'a', 'params': {}}}})
+        self.assertIn('text_i18n', out['k'])                                         # not an event: still a difference
+        self.assertFalse(used)
+
     def test_notify_status_only_on_a_notify_event(self):
         self.assert_accepted(event('notify'), event('notify', status='done'), rule='notify event status')
         out, used = strip(event('orch_say'), event('orch_say', status='done'))
@@ -101,7 +108,7 @@ class StatusFields(unittest.TestCase):
 
     def test_agent_fields_and_the_link_keys(self):
         old = {'agents': [agent_dict()], 'orch': {'state': 'idle', 'tokens': {}}, 'session': {}}
-        new = {'agents': [dict(agent_dict(), **NEW_AGENT, link={'rule': 'subagent', 'certain': True, 'rule_class': 'certain', 'incomplete': False, 'assumed': False, 'tree': 's'})],
+        new = {'agents': [dict(agent_dict(), **NEW_AGENT, link={'rule': 'subagent', 'certain': True, 'rule_class': 'certain', 'incomplete': False, 'assumed': False, 'tree': 's', 'parent_kind': 'codex'})],
                'orch': {'state': 'idle', 'tokens': {}, 'resets_at': None, 'auto': False}, 'session': {}, 'diag': {'n': 0, 'warn': 0, 'info': 0, 'by_code': {}, 'capped': False}}
         out, used = strip(old, new)
         self.assertEqual(api_snap.norm(out), api_snap.norm(old))
@@ -249,7 +256,7 @@ class Script(unittest.TestCase):
     def test_the_table_names_every_field_that_the_api_adds(self):
         keys = {k for _, _, ks in api_snap.API_SNAP_ALLOW for k in ks}
         self.assertEqual(keys, {'title_i18n', 'title_is_default', 'questions', 'status', 'text_i18n', 'title_params', 'model_costs', 'error_code',      # the language work (+ the limit alert's params)
-                                'reason', 'resets_at', 'node', 'by', 'parent', 'runs', 'work_units', 'rule_class', 'incomplete', 'assumed', 'tree', 'auto', 'diag',         # the status and link work
+                                'reason', 'resets_at', 'node', 'by', 'parent', 'runs', 'work_units', 'rule_class', 'incomplete', 'assumed', 'tree', 'parent_kind', 'auto', 'diag',    # the status and link work
                                 'room', 'guide', 'copies'})                                                                                                               # the work rooms, the folded copies of a debate
 
     def test_raw_mode_accepts_nothing_and_the_default_mode_accepts_the_table(self):

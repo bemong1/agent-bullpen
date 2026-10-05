@@ -6,6 +6,7 @@
     python3 tools/synth_home.py /tmp/acme-home --busy --live   # the large scene (acme-robot): what the screenshots in docs/images show
     python3 tools/synth_home.py /tmp/acme-home --busy --live --links   # + `claude -p` children the board can only guess or could not link (UI: guess mark, "not linked" box)
     python3 tools/synth_home.py /tmp/acme-home --busy --live --stopped  # + work that stopped: a usage limit, API errors, runs cut off, a paused debate cell, grandchildren, diagnostics
+    python3 tools/synth_home.py /tmp/acme-home --codex-orch --live     # + a Codex orchestrator: native sub-agents, `claude -p` and `codex exec` runs started from its shell, a small debate
     python3 tools/synth_home.py /tmp/acme-home --stop     # stop the fake processes and remove the registration files this tool wrote (only in a folder it made)
     env -u CLAUDE_CONFIG_DIR -u CODEX_HOME HOME=/tmp/acme-home python3 server.py --port 8811
 
@@ -32,6 +33,9 @@ import signal
 import subprocess
 import sys
 import time
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from tools.scenarios import cx_record                    # the one place the shape of a Codex rollout lives (stdlib only, imports nothing of the board)
 
 MARK = '.synth-home'                      # written into a folder we made, so a re-run may replace it (and nothing else)
 MARK_TEXT = 'synthetic HOME made by tools/synth_home.py; safe to delete\n'
@@ -92,6 +96,53 @@ class Jsonl:
     def save(self):
         rows = sorted(self.rows, key=lambda r: r[:2])
         put(self.path, ''.join(dump(d) + '\n' for _, _, d in rows), rows[-1][0] if rows else None)
+
+
+class CxThread:
+    """One Codex `exec` thread of a scene, written in the shapes of the real records (tools/scenarios/cx_record.py): each shell command is a call of the exec tool, its output and,
+    when its process ended, a `CommandExecution` item that holds the command; a turn that ended has its `task_complete`, one that is still going has none (and a call that has not
+    returned has no `CommandExecution` yet)."""
+
+    def __init__(self, path, tid, cwd, t0, version='0.157.0'):
+        self.r = cx_record.Rollout(path, tid, cwd, 'synth:' + tid, origin='codex_exec', version=version)
+        self.r.meta(t0)
+        self.tid, self.cwd, self.n, self.turn_id, self.started = tid, cwd, 0, None, None
+
+    def turn(self, t, prompt):
+        """A turn starts: its `task_started`, the turn's context and the user's message."""
+        self.n += 1
+        self.turn_id = 'turn-' + hx(self.tid, str(self.n), n=16)
+        self.started = t
+        self.r.task_started(t, self.turn_id)
+        self.r.turn_context(t + 0.1, self.turn_id)
+        self.r.user(t + 0.2, prompt, self.turn_id)
+
+    def say(self, t, text):
+        self.r.say(t, text, self.turn_id)
+
+    def command(self, t, cmd, output='', read=None, cwd=None, secs=0.6, call_id=None):
+        """A shell command called at `t` that ran for `secs`. `read`: a file the command only reads (Codex's own parsing of it says so), its path as the command names it."""
+        parsed = [{'type': 'read', 'cmd': cmd, 'name': os.path.basename(read), 'path': read}] if read else None
+        self.r.shell(t, cmd, cwd or self.cwd, call_id or 'call_' + hx(self.tid, cmd, str(t), n=16), self.turn_id, end=t + secs, out_at=t + secs + 0.2, text=output, parsed=parsed)
+
+    def running(self, t, cmd):
+        """A call that has not returned: the turn is still going, and there is no `CommandExecution` for it yet."""
+        self.r.shell(t, cmd, self.cwd, 'call_' + hx(self.tid, 'open', n=16), self.turn_id, end=None, out_at=None)
+
+    def tokens(self, t, inp, out, cached, reasoning, rates, n):
+        self.r.usage(t, self.turn_id, inp, out, cached, reasoning, rates, 'resp_' + hx(self.tid, str(n), n=12))
+
+    def finish(self, t, text):
+        self.r.complete(t, self.turn_id, text, started=self.started)
+
+    def save(self):
+        return self.r.save()
+
+
+def rate_limits(used, resets):
+    """The account's `rate_limits` of a `token_count` line."""
+    return {'limit_id': 'codex', 'primary': {'used_percent': used, 'window_minutes': 10080, 'resets_at': int(resets)}, 'secondary': None,
+            'credits': {'has_credits': False, 'unlimited': False, 'balance': None}, 'plan_type': 'pro', 'rate_limit_reached_type': None}
 
 
 # ---------- text of the debate folder ----------
@@ -506,70 +557,38 @@ class Synth:
         tid, unit, m = CODEX_THREAD, self.unit['t1_env'], self.m
         tu = self.tilde(unit)
         t0 = self.codex_calls[1][2] + 2.4                    # the rollout starts ~2.4 s after the Bash call
-        rows = []
-
-        def add(t, typ, payload):
-            rows.append((t, dump({'timestamp': iso(t), 'type': typ, 'payload': payload})))
-
-        add(t0, 'session_meta', {'id': tid, 'timestamp': iso(t0), 'cwd': self.work, 'originator': 'codex_exec', 'cli_version': '0.157.0',
-                                 'source': 'exec', 'model_provider': 'openai'})
-        total = dict.fromkeys(('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_output_tokens', 'total_tokens'), 0)
-        resets = self.now + 3.4 * 86400
-
-        def tokens(t, n, cached):
-            u = {'input_tokens': 14000 + 2600 * n, 'cached_input_tokens': cached, 'cache_write_input_tokens': 0,
-                 'output_tokens': 700 + 120 * n, 'reasoning_output_tokens': 400 + 60 * n}
-            u['total_tokens'] = u['input_tokens'] + u['output_tokens']
-            for key in total:
-                total[key] += u[key]
-            add(t, 'token_usage_record', {'response_id': 'resp_' + hx('cx', str(n), n=12), 'usage': u, 'thread_token_usage': dict(total)})
-            add(t + 0.01, 'event_msg', {'type': 'token_count', 'info': {'total_token_usage': dict(total), 'model_context_window': 258400},
-                                        'rate_limits': {'limit_id': 'codex', 'primary': {'used_percent': self.CODEX_USED, 'window_minutes': 10080, 'resets_at': int(resets)},
-                                                        'secondary': None, 'credits': {'has_credits': False, 'unlimited': False, 'balance': None},
-                                                        'plan_type': 'pro', 'rate_limit_reached_type': None}})
-
-        def command(t, cmd, read=None, output=''):
-            cid = 'call_' + hx(cmd, n=16)
-            add(t, 'response_item', {'type': 'function_call', 'name': 'exec_command', 'arguments': dump({'cmd': cmd}), 'call_id': cid})
-            if read:                                         # Codex's own reading of the command: counts as "read" in the cross-review
-                add(t + 0.4, 'event_msg', {'type': 'item_completed', 'item': {'type': 'CommandExecution', 'cwd': 'file://' + unit,
-                                                                           'parsed_cmd': [{'type': 'read', 'path': read}]}})
-            add(t + 0.8, 'response_item', {'type': 'function_call_output', 'call_id': cid, 'output': output})
-
-        def turn(t, rnd, prompt):
-            add(t, 'event_msg', {'type': 'task_started', 'model_context_window': 258400})
-            add(t + 0.2, 'response_item', {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': prompt}]})
-            add(t + 0.4, 'turn_context', {'cwd': self.work, 'model': CODEX_MODEL, 'effort': 'high'})
-
-        def finish(t, rnd):
-            text = REPORTS[('t1_env', rnd, 'C')]
-            add(t, 'event_msg', {'type': 'task_complete', 'last_agent_message': text})
-            put(os.path.join(unit, 'r%d' % rnd, 'C.md'), text, t + 0.3)     # `-o` writes the last message verbatim: the board matches it by sha1
-
-        t = t0 + 0.2
-        turn(t, 1, CODEX_TURNS[1] % {'unit': tu})
-        add(t + 3, 'response_item', {'type': 'message', 'role': 'assistant', 'phase': 'commentary',
-                                     'content': [{'type': 'output_text', 'text': 'Reading the topic brief, then running the loader tests against both naming schemes.'}]})
-        command(t + 5, 'sed -n 1,60p %s/brief.md' % tu, output='# T1 Env override naming ...')
-        tokens(t + 20, 1, 9000)
-        command(t + 60, 'python -m pytest tests/config -q -k "flat or nested"', output='12 passed in 0.9s')
-        tokens(t + 90, 2, 21000)
-        finish(m(106.5), 1)
-        t2 = self.codex_calls[2][2] + 1.2                    # round 2: `codex exec resume` continues the same rollout
-        turn(t2, 2, CODEX_TURNS[2] % {'unit': tu})
-        command(t2 + 3, 'cat r1/A.md', 'r1/A.md', REPORTS[('t1_env', 1, 'A')])
-        command(t2 + 8, 'cat r1/B.md', 'r1/B.md', REPORTS[('t1_env', 1, 'B')])
-        tokens(t2 + 30, 3, 30000)
-        add(t2 + 40, 'response_item', {'type': 'message', 'role': 'assistant', 'phase': 'commentary',
-                                       'content': [{'type': 'output_text', 'text': 'No new objections; checking the alias is never written back.'}]})
-        command(t2 + 120, 'pytest tests/config/test_env_override.py -q', output='3 passed in 0.4s')
-        tokens(t2 + 400, 4, 52000)
-        finish(m(88.4), 2)
         lt = time.localtime(t0)
         path = os.path.join(self.codex, 'sessions', '%04d' % lt.tm_year, '%02d' % lt.tm_mon, '%02d' % lt.tm_mday,
                             'rollout-%s-%s.jsonl' % (time.strftime('%Y-%m-%dT%H-%M-%S', lt), tid))
-        rows.sort(key=lambda r: r[0])
-        put(path, ''.join(r[1] + '\n' for r in rows), rows[-1][0])
+        th = CxThread(path, tid, self.work, t0)
+        rates = rate_limits(self.CODEX_USED, self.now + 3.4 * 86400)
+
+        def tokens(t, n, cached):
+            th.tokens(t, 14000 + 2600 * n, 700 + 120 * n, cached, 400 + 60 * n, rates, n)
+
+        def finish(t, rnd):
+            text = REPORTS[('t1_env', rnd, 'C')]
+            th.finish(t, text)
+            put(os.path.join(unit, 'r%d' % rnd, 'C.md'), text, t + 0.3)     # `-o` writes the last message verbatim: the board matches it by sha1
+
+        t = t0 + 0.2
+        th.turn(t, CODEX_TURNS[1] % {'unit': tu})
+        th.say(t + 3, 'Reading the topic brief, then running the loader tests against both naming schemes.')
+        th.command(t + 5, 'sed -n 1,60p %s/brief.md' % tu, '# T1 Env override naming ...')
+        tokens(t + 20, 1, 9000)
+        th.command(t + 60, 'python -m pytest tests/config -q -k "flat or nested"', '12 passed in 0.9s', secs=0.9)
+        tokens(t + 90, 2, 21000)
+        finish(m(106.5), 1)
+        t2 = self.codex_calls[2][2] + 1.2                    # round 2: `codex exec resume` continues the same rollout
+        th.turn(t2, CODEX_TURNS[2] % {'unit': tu})
+        th.command(t2 + 3, 'cat r1/A.md', REPORTS[('t1_env', 1, 'A')], read='r1/A.md', cwd=unit)
+        th.command(t2 + 8, 'cat r1/B.md', REPORTS[('t1_env', 1, 'B')], read='r1/B.md', cwd=unit)
+        tokens(t2 + 30, 3, 30000)
+        th.say(t2 + 40, 'No new objections; checking the alias is never written back.')
+        th.command(t2 + 120, 'pytest tests/config/test_env_override.py -q', '3 passed in 0.4s', secs=0.4)
+        tokens(t2 + 400, 4, 52000)
+        finish(m(88.4), 2)
+        th.save()
         put(os.path.join(self.codex, 'session_index.jsonl'), dump({'id': tid, 'thread_name': 'T1 round 1 cross-check', 'updated_at': iso(m(88.4))}) + '\n', m(88.4))
 
     # ---------- the plain conversation ----------
@@ -1144,50 +1163,28 @@ class BusySynth(Synth):
         # handbacks of the Codex turns that finished are made from their rollouts by the board; the T3 round-1 report is matched by sha1
 
     def codex_rollout(self, tid, t0, turns):
-        """One Codex rollout: session_meta, then per turn task_started / user / turn_context / commands / tokens, and either task_complete or an open call."""
-        rows, total = [], dict.fromkeys(('input_tokens', 'cached_input_tokens', 'cache_write_input_tokens', 'output_tokens', 'reasoning_output_tokens', 'total_tokens'), 0)
-        resets = self.now + 3.0 * 86400
-        rows.append((t0, dump({'timestamp': iso(t0), 'type': 'session_meta', 'payload': {
-            'id': tid, 'timestamp': iso(t0), 'cwd': self.work, 'originator': 'codex_exec', 'cli_version': '0.157.0', 'source': 'exec', 'model_provider': 'openai'}})))
-
-        def add(t, typ, payload):
-            rows.append((t, dump({'timestamp': iso(t), 'type': typ, 'payload': payload})))
-
-        for turn in turns:
-            t = turn['start']
-            add(t, 'event_msg', {'type': 'task_started', 'model_context_window': 258400})
-            add(t + 0.2, 'response_item', {'type': 'message', 'role': 'user', 'content': [{'type': 'input_text', 'text': turn['prompt']}]})
-            add(t + 0.4, 'turn_context', {'cwd': self.work, 'model': CODEX_MODEL, 'effort': 'high'})
-            for dt, cmd, read, out in turn['cmds']:
-                cid = 'call_' + hx(tid, cmd, str(t + dt), n=16)
-                add(t + dt, 'response_item', {'type': 'function_call', 'name': 'exec_command', 'arguments': dump({'cmd': cmd}), 'call_id': cid})
-                if read:
-                    add(t + dt + 0.4, 'event_msg', {'type': 'item_completed', 'item': {'type': 'CommandExecution', 'cwd': 'file://' + self.unit['t3_retry'],
-                                                                                    'parsed_cmd': [{'type': 'read', 'path': read}]}})
-                add(t + dt + 0.8, 'response_item', {'type': 'function_call_output', 'call_id': cid, 'output': out})
-            for dt, n, cached in turn['tokens']:
-                u = {'input_tokens': 22000 + 3800 * n, 'cached_input_tokens': cached, 'cache_write_input_tokens': 0, 'output_tokens': 1100 + 180 * n, 'reasoning_output_tokens': 600 + 90 * n}
-                u['total_tokens'] = u['input_tokens'] + u['output_tokens']
-                for key in total:
-                    total[key] += u[key]
-                add(t + dt, 'token_usage_record', {'response_id': 'resp_' + hx(tid, str(n), n=12), 'usage': u, 'thread_token_usage': dict(total)})
-                add(t + dt + 0.01, 'event_msg', {'type': 'token_count', 'info': {'total_token_usage': dict(total), 'model_context_window': 258400},
-                                                 'rate_limits': {'limit_id': 'codex', 'primary': {'used_percent': self.CODEX_USED, 'window_minutes': 10080, 'resets_at': int(resets)},
-                                                                 'secondary': None, 'credits': {'has_credits': False, 'unlimited': False, 'balance': None},
-                                                                 'plan_type': 'pro', 'rate_limit_reached_type': None}})
-            if turn.get('done'):
-                td, text = turn['done']
-                add(td, 'event_msg', {'type': 'task_complete', 'last_agent_message': text})
-                if turn.get('out'):
-                    put(turn['out'], text, td + 0.3)                  # `-o` writes the last message verbatim: the board matches it by sha1
-            else:
-                tp, cmd = turn['pending']                              # an open call: the turn is still running
-                add(tp, 'response_item', {'type': 'function_call', 'name': 'exec_command', 'arguments': dump({'cmd': cmd}), 'call_id': 'call_' + hx(tid, 'open', n=16)})
+        """One Codex rollout: session_meta, then per turn task_started / turn context / user / commands / tokens, and either task_complete or a call that has not returned."""
         lt = time.localtime(t0)
         path = os.path.join(self.codex, 'sessions', '%04d' % lt.tm_year, '%02d' % lt.tm_mon, '%02d' % lt.tm_mday,
                             'rollout-%s-%s.jsonl' % (time.strftime('%Y-%m-%dT%H-%M-%S', lt), tid))
-        rows.sort(key=lambda r: r[0])
-        put(path, ''.join(r[1] + '\n' for r in rows), rows[-1][0])
+        th = CxThread(path, tid, self.work, t0)
+        rates = rate_limits(self.CODEX_USED, self.now + 3.0 * 86400)
+        for turn in turns:
+            t = turn['start']
+            th.turn(t, turn['prompt'])
+            for dt, cmd, read, out in turn['cmds']:
+                th.command(t + dt, cmd, out, read=read, cwd=self.unit['t3_retry'] if read else None)
+            for dt, n, cached in turn['tokens']:
+                th.tokens(t + dt, 22000 + 3800 * n, 1100 + 180 * n, cached, 600 + 90 * n, rates, n)
+            if turn.get('done'):
+                td, text = turn['done']
+                th.finish(td, text)
+                if turn.get('out'):
+                    put(turn['out'], text, td + 0.3)                  # `-o` writes the last message verbatim: the board matches it by sha1
+            else:
+                tp, cmd = turn['pending']                              # a call that has not returned: the turn is still running
+                th.running(tp, cmd)
+        th.save()
         self.codex_files.append(path)
 
 
@@ -1235,7 +1232,7 @@ def prepare(home):
     os.makedirs(home, exist_ok=True)
 
 
-def build(home, now=None, busy=False, links=False, stopped=False):
+def build(home, now=None, busy=False, links=False, stopped=False, codex_orch=False):
     """Write the synthetic HOME under `home` (a new or previously generated folder). busy=True writes the large scene instead of the small one.
     Returns what tests and screenshots need."""
     home = os.path.realpath(home)
@@ -1254,6 +1251,8 @@ def build(home, now=None, busy=False, links=False, stopped=False):
         info['links'] = add_link_scene(info)
     if stopped:
         info['stopped'] = add_stopped_scene(info)
+    if codex_orch:
+        info['codex_orch'] = add_codex_orch_scene(info)
     return info
 
 
@@ -1307,6 +1306,150 @@ def add_link_scene(info):
                                                                    'stop_reason': 'end_turn', 'content': [{'type': 'text', 'text': answer}], 'usage': Synth.usage(2)})
         put(os.path.join(proj, cid + '.jsonl'), dump(first) + '\n' + dump(reply) + '\n', t + 5)
     return {'live': (c5, work, t0 + 205)}
+
+
+CX_ORCH_ID = 'synth-codex-orch'
+CX_ORCH_CLAUDE = {'helper': 'c0de0001-0000-4000-8000-000000000001', 'reviewer': 'c0de0002-0000-4000-8000-000000000002'}      # the two `claude -p` runs of the Codex orchestrator
+CX_ORCH_SITE = 'acme-ledger'
+CX_ORCH_BRIEF = """# Ledger rounding review
+
+Common brief for the participants of the round. Each one writes its own report; the orchestrator writes the final text.
+
+**A — Rounding rules**
+**B — Currency handling**
+
+Reports are written to `r1/<id>.md`. The final text goes to `CLOSING.md`.
+"""
+
+
+def add_codex_orch_scene(info):
+    """--codex-orch: a Codex orchestrator (a TUI thread, `codex-tui`, source "cli") of the repository work/acme-ledger and the team around it, written in the shapes of the
+    records of Codex 0.160 (tools/scenarios/cx_record.py writes them):
+      native sub-agents   /root/s1 (finished: it handed its answer back, its parent wrote `completed` and then its message) and /root/s2 (still working); the first message of each
+                          is a forwarding notice beside ciphertext, so what they were asked cannot be read
+      guardian            an approval-review thread with three model calls (no card; its tokens are the page's approval-review tokens)
+      `claude -p` runs    a helper started by a foreground call (still running: no record of its command yet; with --live it has a process whose environment names the
+                          Codex thread and the root, as a Codex shell leaves it) and participant A of the debate (started with `setsid nohup ... &`, finished, wrote r1/A.md)
+      `codex exec` run    participant B of the debate (`setsid nohup ... &`, `-o talk/r1/B.md`, finished)
+      debate              work/acme-ledger/talk: a brief, r1/A.md and r1/B.md; no final text yet
+    All of it ends a few minutes before now; the sub-agent /root/s2 and the helper are working. With --live a fake `codex` process holds the root's rollout open and a fake
+    `claude` process is the helper; without it they read as ended. Returns what start_live needs ({'root', 'live', 'codex_files', ...})."""
+    home, now, claude, codex = info['home'], info['now'], info['claude'], info['codex']
+    work = os.path.join(home, 'work', CX_ORCH_SITE)
+    m = lambda x: now - x * 60                                      # x minutes ago
+    cid = CX_ORCH_ID
+    os.makedirs(os.path.join(work, '.git'), exist_ok=True)
+    put(os.path.join(work, '.git', 'HEAD'), 'ref: refs/heads/main\n')
+    put(os.path.join(work, 'talk', 'brief.md'), CX_ORCH_BRIEF, m(40))
+    ids = {r: cx_record.tid_of(cid, r) for r in ('root', 's1', 's2', 'guardian', 'reviewer_b')}
+    turn = {r: 'turn-' + hx(cid, r, n=16) for r in ids}
+    day = lambda t: '%04d/%02d/%02d' % time.localtime(t)[:3]
+
+    def path_of(tid, t):
+        lt = time.localtime(t)
+        d = os.path.join(codex, 'sessions', *day(t).split('/'))
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, 'rollout-%s-%s.jsonl' % (time.strftime('%Y-%m-%dT%H-%M-%S', lt), tid))
+
+    def rollout(role, t, **kw):
+        return cx_record.Rollout(path_of(ids[role], t), ids[role], work, cid, **kw)
+
+    task = ('Audit the ledger package. Have one helper list the open ledger TODOs, start two reviewers for the debate in talk/ (A with claude -p, B with codex exec), '
+            'and keep me posted.')
+    root = rollout('root', m(52), origin='codex-tui')
+    root.meta(m(52))
+    root.task_started(m(52) + 0.5, turn['root'])
+    root.turn_context(m(52) + 0.6, turn['root'])
+    root.user(m(52) + 1.0, task, turn['root'])
+    root.say(m(51.5), 'Starting with two native helpers.', turn['root'])
+    paths = {'root': root.path}
+
+    def sub(role, task_name, nick, at):
+        parent_started = m(52)
+        root.spawn(at, 'call_' + hx(cid, role, n=16), turn['root'], task_name, ids[role], '/root/' + task_name)
+        r = rollout(role, at + 0.06, kind='sub', origin='codex-tui', parent=ids['root'], agent_path='/root/' + task_name, nick=nick, depth=1, root_id=ids['root'])
+        r.fork(at + 0.06, root, turn['root'], task, parent_started)
+        r.task_started(at + 0.07, turn[role])
+        r.turn_context(at + 0.1, turn[role])
+        r.agent_message(at + 0.2, '/root', '/root/' + task_name, 'Message from /root: your task is in the attached content.', cipher=True, turn=turn[role])
+        r.usage(at + 20, turn[role], 14000, 600, 9000)
+        paths[role] = r.path
+        return r
+
+    s1 = sub('s1', 's1', 'Atlas', m(50))
+    s1.shell(m(49), 'cd %s && ls' % work, work, 'call_' + hx(cid, 's1ls', n=16), turn['s1'], end=m(49) + 0.3, out_at=m(49) + 0.35)
+    s1.usage(m(44), turn['s1'], 16000, 900, 11000)
+    s1.agent_message(m(42), '/root/s1', '/root', 'Progress: the rounding rules are in two modules.', msg_id='msg-s1-mid', turn=turn['root'])
+    root.agent_message(m(42) + 0.01, '/root/s1', '/root', 'Progress: the rounding rules are in two modules.', msg_id='msg-s1-mid', turn=turn['root'])
+    answer = 'The rounding rules live in two modules; both round half to even.'
+    s1.agent_message(m(41) - 0.1, '/root/s1', '/root', answer, msg_id='msg-s1-end', turn=turn['root'])
+    s1.say(m(41) - 0.05, answer, turn['s1'], final=True)
+    s1.complete(m(41), turn['s1'], answer)
+    root.sub_completed(m(41) + 0.005, turn['root'], turn['s1'], ids['s1'], '/root/s1')                  # `completed` first, the message after it
+    root.agent_message(m(41) + 0.01, '/root/s1', '/root', answer, msg_id='msg-s1-end', turn=turn['root'])
+    s2 = sub('s2', 's2', 'Birch', m(49))
+    s2.shell(m(8), 'cd %s && ls tests' % work, work, 'call_' + hx(cid, 's2ls', n=16), turn['s2'], end=m(8) + 0.3, out_at=m(8) + 0.35)
+    s2.usage(m(8), turn['s2'], 18000, 700, 12000)
+    g = rollout('guardian', m(45), kind='guardian', origin='codex-tui', parent=ids['root'], root_id=ids['root'])
+    g.meta(m(45))
+    g.task_started(m(45) + 0.5, turn['guardian'])
+    for i in range(3):
+        g.usage(m(45) + 1 + i, turn['guardian'], 900 + 10 * i, 40)
+    g.complete(m(45) + 5, turn['guardian'], 'approved')
+    paths['guardian'] = g.path
+
+    # the debate: A with `claude -p`, B with `codex exec`, both started with `setsid nohup ... &` (the call ends at once, so its record is there at once)
+    a_text = 'You are participant A of the debate in talk/. Review the rounding rules of the ledger package and write your report to %s/talk/r1/A.md.' % work
+    b_text = 'You are participant B of the debate in talk/. Review the currency handling of the ledger package and report in plain words.'
+    a_cmd = 'cd %s && setsid nohup claude -p --model %s "%s" > /dev/null 2>&1 < /dev/null &' % (work, CLAUDE_MODELS['sonnet'], a_text)
+    b_cmd = 'cd %s && setsid nohup codex exec -m %s -o %s/talk/r1/B.md "%s" > /dev/null 2>&1 < /dev/null &' % (work, CODEX_MODEL, work, b_text)
+    helper_text = 'List the open ledger TODOs in five bullets.'
+    h_cmd = 'cd %s && claude -p --model %s "%s"' % (work, CLAUDE_MODELS['sonnet'], helper_text)
+    ta, tb, th = m(35), m(34.8), m(2.2)
+    root.shell(ta, a_cmd, work, 'call_' + hx(cid, 'a', n=16), turn['root'], end=ta + 0.4, out_at=ta + 0.45)
+    root.shell(tb, b_cmd, work, 'call_' + hx(cid, 'b', n=16), turn['root'], end=tb + 0.4, out_at=tb + 0.45)
+    root.shell(th, h_cmd, work, 'call_' + hx(cid, 'h', n=16), turn['root'], end=None, out_at=None)          # a foreground call that has not returned: no record of it yet
+    root.wait_agent(m(30), m(29.5), 'call_' + hx(cid, 'wait', n=16), turn['root'], [ids['s1']])
+    root.usage(m(20), turn['root'], 30000, 1500, 20000)
+    root.usage(m(3), turn['root'], 36000, 1800, 25000)
+    root.say(m(2.5), 'Waiting for the helper.', turn['root'])
+    # B: a `codex exec` thread (a root of its own, source "exec")
+    b = rollout('reviewer_b', tb + 2.4, origin='codex_exec')
+    b.meta(tb + 2.4)
+    b.task_started(tb + 2.6, turn['reviewer_b'])
+    b.turn_context(tb + 2.7, turn['reviewer_b'])
+    b.user(tb + 3.0, b_text, turn['reviewer_b'])
+    b.shell(tb + 20, 'sed -n 1,40p talk/brief.md', work, 'call_' + hx(cid, 'b-brief', n=16), turn['reviewer_b'], end=tb + 20.3, out_at=tb + 20.35, text=CX_ORCH_BRIEF.splitlines()[0],
+            parsed=[{'type': 'read', 'cmd': 'sed -n 1,40p talk/brief.md', 'name': 'brief.md', 'path': 'talk/brief.md'}])
+    b.usage(m(31), turn['reviewer_b'], 20000, 800, 14000)
+    b_report = 'Currency handling: amounts are kept in minor units; two call sites still divide by 100 as floats.\n'
+    b.say(m(27) - 0.5, b_report, turn['reviewer_b'], final=True)
+    b.complete(m(27), turn['reviewer_b'], b_report)
+    put(os.path.join(work, 'talk', 'r1', 'B.md'), b_report, m(27) + 0.3)
+    paths['reviewer_b'] = b.path
+    for r in (root, s1, s2, g, b):
+        r.save()
+    # the Claude records: participant A (finished, wrote its report) and the helper (still working)
+    proj = os.path.join(claude, 'projects', re.sub(r'[^A-Za-z0-9]', '-', work))
+    a_sid, h_sid = CX_ORCH_CLAUDE['reviewer'], CX_ORCH_CLAUDE['helper']
+    syn = Synth(home, now)
+    a_log, h_log = Jsonl(os.path.join(proj, a_sid + '.jsonl')), Jsonl(os.path.join(proj, h_sid + '.jsonl'))
+    a_report = 'Rounding rules: both modules round half to even; the tests cover the ties only for positive amounts.\n'
+    a_log.add(ta + 2.4, {'type': 'user', 'timestamp': iso(ta + 2.4), 'cwd': work, 'sessionId': a_sid, 'entrypoint': 'sdk-cli', 'message': {'role': 'user', 'content': a_text}})
+    a_use = 'toolu_' + hx(cid, 'a-write', n=24)
+    syn.assistant(a_log, ta + 40, 1, 'cx-a-write', work, a_sid, CLAUDE_MODELS['sonnet'], [{'type': 'tool_use', 'id': a_use, 'name': 'Write', 'input': {'file_path': os.path.join(work, 'talk', 'r1', 'A.md'), 'content': a_report}}], stop='tool_use')
+    syn.result(a_log, ta + 40.5, work, a_sid, a_use, 'written')
+    syn.assistant(a_log, ta + 60, 2, 'cx-a-end', work, a_sid, CLAUDE_MODELS['sonnet'], [{'type': 'text', 'text': 'The report is written.'}], stop='end_turn')
+    put(os.path.join(work, 'talk', 'r1', 'A.md'), a_report, ta + 40.4)
+    h_log.add(th + 2.4, {'type': 'user', 'timestamp': iso(th + 2.4), 'cwd': work, 'sessionId': h_sid, 'entrypoint': 'sdk-cli', 'message': {'role': 'user', 'content': helper_text}})
+    h_use = 'toolu_' + hx(cid, 'h-grep', n=24)
+    syn.assistant(h_log, th + 20, 3, 'cx-h-grep', work, h_sid, CLAUDE_MODELS['sonnet'],
+                      [{'type': 'tool_use', 'id': h_use, 'name': 'Bash', 'input': {'command': 'grep -rn TODO ledger', 'description': 'Find the open TODOs'}}], stop='tool_use')
+    a_log.save()
+    h_log.save()
+    env = {'CODEX_THREAD_ID': ids['root'], 'CODEX_SESSION_ID': ids['root'], 'CODEX_VERSION': '0.160.0', 'CODEX_CI': '1'}      # what a Codex shell leaves in the environment of what it starts
+    return {'root': ids['root'], 'ids': ids, 'paths': paths, 'claude': dict(CX_ORCH_CLAUDE), 'work': work, 'texts': {'a': a_text, 'b': b_text, 'helper': helper_text},
+            'live': [(h_sid, work, th + 2.4, env)], 'codex_files': [paths['root']]}
 
 
 STOPPED_KIDS = {name: 'c0b5700%d-0000-4000-8000-00000000000%d' % (i, i) for i, name in enumerate(('exited', 'timelimit', 'crash', 'grand', 'great'), 1)}
@@ -1505,6 +1648,7 @@ def start_live(info):
     if not sleep:
         raise SystemExit('no `sleep` on PATH')
     pids = []
+    orch_pid = None
     for sid, cwd, name in ((info['orch'], info['work'], 'config loader review' if not info.get('busy') else 'acme-robot v2 migration'), (info['solo'], info['solo_cwd'], 'demo notes')):
         p = subprocess.Popen(['claude', str(LIVE_SECONDS)], executable=sleep, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL, start_new_session=True)
@@ -1512,6 +1656,8 @@ def start_live(info):
             json.dumps({'pid': p.pid, 'sessionId': sid, 'cwd': cwd, 'startedAt': int(info['now'] * 1000), 'kind': 'interactive', 'name': name,
                         'synthHome': True}))        # --stop removes only files that carry this
         pids.append(p.pid)
+        if sid == info['orch']:
+            orch_pid = p.pid
     if info.get('links'):                          # --links: the child that is still running (the board cannot link it: no_matching_call)
         sid, cwd, started = info['links']['live']
         p = subprocess.Popen(['claude', str(LIVE_SECONDS)], executable=sleep, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -1521,19 +1667,33 @@ def start_live(info):
                         'synthHome': True}))
         pids.append(p.pid)
     for sid, cwd, started in (info.get('stopped') or {}).get('live', []):         # --stopped: the run that is still working
-        p = subprocess.Popen(['claude', str(LIVE_SECONDS)], executable=sleep, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
+        # a shell of a Claude session leaves the session's id and its process number in the environment of what it starts: this run was started from the orchestrator's
+        p = subprocess.Popen(['claude', str(LIVE_SECONDS)], executable=sleep, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
+                             env=dict(PATH=os.environ.get('PATH', ''), CLAUDE_CODE_SESSION_ID=info['orch'], CLAUDE_PID=str(orch_pid)))
         put(os.path.join(info['claude'], 'sessions', '%d.json' % p.pid),
             json.dumps({'pid': p.pid, 'sessionId': sid, 'cwd': cwd, 'startedAt': int(started * 1000), 'kind': 'sdk-cli', 'entrypoint': 'sdk-cli', 'name': 'helper', 'synthHome': True}))
         pids.append(p.pid)
+    fake_codex = []                                # the fake `codex` processes of a scene (each holds a rollout open); they are listed in LIVE_FILE
     if info.get('busy'):
-        procs = []
         for path in info['codex_files']:
             with open(path, 'rb') as rollout:
                 p = subprocess.Popen(['codex', str(LIVE_SECONDS)], executable=sleep, stdin=rollout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-            procs.append({'pid': p.pid, 'cmd': 'codex %d' % LIVE_SECONDS})
+            fake_codex.append({'pid': p.pid, 'cmd': 'codex %d' % LIVE_SECONDS})
             pids.append(p.pid)
-        put(os.path.join(info['home'], LIVE_FILE), json.dumps({'synthHome': True, 'procs': procs}))
+    co = info.get('codex_orch')
+    if co:                                         # --codex-orch: a fake `codex` process holds the root's rollout; a fake `claude` process is the helper, with the environment a Codex shell leaves
+        with open(co['paths']['root'], 'rb') as rollout:
+            p = subprocess.Popen(['codex', str(LIVE_SECONDS)], executable=sleep, stdin=rollout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        fake_codex.append({'pid': p.pid, 'cmd': 'codex %d' % LIVE_SECONDS})
+        pids.append(p.pid)
+        for sid, cwd, started, env in co['live']:
+            p = subprocess.Popen(['claude', str(LIVE_SECONDS)], executable=sleep, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True, env=dict(env, PATH=os.environ.get('PATH', '')))
+            put(os.path.join(info['claude'], 'sessions', '%d.json' % p.pid),
+                json.dumps({'pid': p.pid, 'sessionId': sid, 'cwd': cwd, 'startedAt': int(started * 1000), 'kind': 'sdk-cli', 'entrypoint': 'sdk-cli', 'name': 'helper', 'synthHome': True}))
+            pids.append(p.pid)
+    if info.get('busy') or co:
+        put(os.path.join(info['home'], LIVE_FILE), json.dumps({'synthHome': True, 'procs': fake_codex}))
     return pids
 
 
@@ -1594,6 +1754,7 @@ def main():
     ap.add_argument('--busy', action='store_true', help='the large scene instead of the small one: acme-robot, 8 topics (6 settled, 2 running), 33 agents; for screenshots')
     ap.add_argument('--links', action='store_true', help='add five `claude -p` children next to the orchestrator\'s Bash calls: two the board can only guess (rule time), three it could not link (unlinked); with --live one is still running')
     ap.add_argument('--stopped', action='store_true', help='add work that stopped and nests: a usage limit (the orchestrator waits for the reset), API errors, runs cut off, a paused debate cell, a grandchild; use with --live')
+    ap.add_argument('--codex-orch', action='store_true', help='add a Codex orchestrator (a TUI thread of work/acme-ledger): two native sub-agents, a guardian thread, two `claude -p` runs and a `codex exec` run started from its shell, a small debate in talk/; use with --live')
     ap.add_argument('--stop', action='store_true', help='only stop the fake processes of that folder (a folder this tool made; never your real HOME)')
     args = ap.parse_args()
     home = os.path.realpath(args.folder)
@@ -1601,7 +1762,7 @@ def main():
         check_ours(home)
         stop_live(home)
         return
-    info = build(home, busy=args.busy, links=args.links, stopped=args.stopped)
+    info = build(home, busy=args.busy, links=args.links, stopped=args.stopped, codex_orch=args.codex_orch)
     print('synthetic HOME: %s%s' % (home, ' (busy scene)' if args.busy else ''))
     if args.busy:
         print('  Claude sessions: orchestration %s (31 sub-agents + 2 Codex), plain conversation %s' % (info['orch'][:8], info['solo'][:8]))
@@ -1613,6 +1774,8 @@ def main():
         print('  link scene:      2 children linked by a guess (rule time), 3 not linked (ambiguous, ended_before_seen, no_matching_call with --live)')
     if args.stopped:
         print('  stopped scene:   the orchestrator waits on a usage limit (--live), 3 more sub-agents (one limit, one 529, one working), 5 `claude -p` runs (exited, time limit, crashed, grandchild, great-grandchild), debate cell paused')
+    if args.codex_orch:
+        print('  codex scene:     Codex orchestrator %s (2 native sub-agents, 1 guardian, 2 `claude -p` runs, 1 `codex exec` run) in %s, debate folder talk/' % (info['codex_orch']['root'][:8], info['codex_orch']['work']))
     print('run the board on it (port 8811 is just an example):')
     print('  env -u CLAUDE_CONFIG_DIR -u CODEX_HOME HOME=%s python3 server.py --port 8811' % home)
     if args.live:

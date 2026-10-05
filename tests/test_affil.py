@@ -1244,6 +1244,71 @@ class PickedCalls(CliFixture):
         self.assertEqual(o['calls_certain'], [True, True])
         self.assertEqual(len(o['by']), 2)
 
+    # ---- a run whose tree a remembered line settled: its call is the one its words are in, or none (never one counted from another child's launch) ----
+    BRIEF = 'Implement the gamma part: ' + TEXT
+
+    def remembered(self, child, rule='env'):
+        d = os.path.join(os.path.realpath(self.tmp.name), 'cache')
+        os.makedirs(d, mode=0o700, exist_ok=True)
+        os.chmod(d, 0o700)
+        path = os.path.join(d, 'links.json')
+        with open(path, 'w') as fh:
+            json.dump({'version': lineage.CACHE_VERSION, 'links': [{'child': child, 'parent': self.PARENT, 'kind': 'cli', 'rule': rule, 'seen': time.time() - 100, 'started': T0 + 2}]}, fh)
+        os.chmod(path, 0o600)
+        self.links.lineage.enable_cache(path)
+
+    def three_calls(self, second):
+        """A session with three calls: the first resumes two children (their words are in files nobody saw), the second is `second`, the third is later."""
+        self.parent(bash_line(T0 - 3, 'cd /w && claude -p --resume "$(cat /tmp/sid_a)" "$(cat /tmp/up_a.md)" & claude -p --resume "$(cat /tmp/sid_b)" "$(cat /tmp/up_b.md)" & wait', tid='toolu_1', desc='resume two'),
+                    result_line(T0 + 2, 'toolu_1'), bash_line(T0 - 1, second, tid='toolu_2', desc='start the new one'), result_line(T0 + 30, 'toolu_2'),
+                    bash_line(T0 + 100, 'cd /w && ls', tid='toolu_3', desc='later'), result_line(T0 + 101, 'toolu_3'))
+        self.write(KID, child_lines(T0 + 2, text=self.BRIEF))
+
+    def scan_at(self):
+        with mock.patch('time.time', lambda: T0 + 600):
+            self.scan()
+        return self.links.cli_owners[KID]
+
+    def test_a_child_that_only_a_remembered_line_links_has_the_call_its_words_are_in(self):
+        self.three_calls('cd /w && claude -p --model m "%s"' % self.BRIEF)
+        self.remembered(KID)
+        o = self.scan_at()
+        self.assertEqual((o['rule'], o['calls'], o['call'], o['bash_desc']), ('file', ['toolu_2'], 'toolu_2', 'start the new one'))
+
+    def test_a_run_a_remembered_line_placed_gets_the_call_of_its_words_and_that_is_certain_for_a_long_instruction(self):
+        """R1: each field has its own rank. The line settles the tree (rank 2); the call is picked inside that tree by the words of the run, and a long instruction is firm."""
+        self.three_calls('cd /w && claude -p --model m "%s"' % self.BRIEF)
+        self.remembered(KID)
+        o = self.scan_at()
+        d = self.links.decisions[KID]
+        self.assertEqual((o['rule'], o['call'], o['bash_desc']), ('file', 'toolu_2', 'start the new one'))
+        self.assertEqual((d.rank, d.relation.certain), (2, {'tree': True, 'node': True, 'call': True}))
+
+    def test_a_run_a_remembered_line_placed_gets_the_call_of_a_short_instruction_as_a_guess(self):
+        """A short instruction (rank 4) still picks the call among the calls of the tree, and the call is no more than a guess: the tree stays certain."""
+        self.parent(bash_line(T0 - 3, 'cd /w && ls', tid='toolu_1', desc='look'), result_line(T0 - 2, 'toolu_1'),
+                    bash_line(T0 - 1, 'cd /w && claude -p --model m "go"', tid='toolu_2', desc='start it'), result_line(T0 + 30, 'toolu_2'))
+        self.write(KID, child_lines(T0 + 2, text='go'))
+        self.remembered(KID)
+        o = self.scan_at()
+        d = self.links.decisions[KID]
+        self.assertEqual((o['rule'], o['call'], o['bash_desc']), ('file', 'toolu_2', 'start it'))
+        self.assertEqual((d.rank, d.relation.certain['tree'], d.relation.certain['call']), (2, True, False))
+
+    def test_a_child_that_only_a_remembered_line_links_gets_no_call_from_the_launches_of_another(self):
+        """The words of the second call are in a file, so nothing in the records names its call; the first call's launches have room for one more child: counting would hand it that call."""
+        self.three_calls('cd /w && claude -p --model m "$(cat /tmp/brief.md)"')
+        self.remembered(KID)
+        o = self.scan_at()
+        self.assertEqual((o['rule'], o['certain']), ('file', True))
+        self.assertEqual((o['calls'], o['call'], o['bash_desc']), ([None], None, ''))
+
+    def test_the_same_for_a_remembered_process_link(self):
+        self.three_calls('cd /w && claude -p --model m "$(cat /tmp/brief.md)"')
+        self.remembered(KID, rule='proc')
+        o = self.scan_at()
+        self.assertEqual((o['rule'], o['calls']), ('file', [None]))
+
     def test_a_resumed_slash_command_run_far_into_the_record_is_a_run_start(self):
         """A slash command's line has the turn position and no `promptSource`; it opens a run of unknown words even after the first lines of the record."""
         kid = '55555555-5555-4555-8555-555555555555'
@@ -1285,11 +1350,11 @@ class LinkCacheVersion2(unittest.TestCase):
             with open(cache) as fh:
                 text = fh.read()
             d = json.loads(text)
-            self.assertEqual(d['version'], 5)
+            self.assertEqual(d['version'], 6)
             rows = [r for r in d['links'] if r['kind'] == 'cli']
             self.assertTrue(rows)
             for r in rows:
-                self.assertLessEqual(set(r), {'child', 'parent', 'kind', 'rule', 'seen', 'started', 'node'})
+                self.assertLessEqual(set(r), {'child', 'parent', 'kind', 'rule', 'seen', 'started', 'node', 'parent_kind'})
                 self.assertIn(r['rule'], ('proc', 'env', 'out', 'content'))
             # nothing of the instruction, a path or the environment is in the file
             self.assertNotIn(TEXT[:20], text)
@@ -1310,7 +1375,7 @@ class LinkCacheVersion2(unittest.TestCase):
                     {'child': D, 'parent': A, 'kind': 'cli', 'rule': 'out', 'seen': now, 'started': now}]
             extra = [{'child': C, 'parent': A, 'kind': 'cli', 'rule': 'content', 'seen': now, 'started': now, 'node': SUB1},
                      {'child': KID, 'parent': A, 'kind': 'cli', 'rule': 'time', 'seen': now, 'started': now}]
-            for version, want in ((1, [B, D]), (2, [B, D]), (3, [B, D]), (4, [B, D]), (5, [B, D, C])):
+            for version, want in ((1, [B, D]), (2, [B, D]), (3, [B, D]), (4, [B, D]), (5, [B, D]), (6, [B, D, C])):
                 with open(p, 'w') as fh:
                     json.dump({'version': version, 'links': rows + extra}, fh)
                 os.chmod(p, 0o600)
@@ -1320,7 +1385,7 @@ class LinkCacheVersion2(unittest.TestCase):
                 self.assertEqual(info, {'version': version})
             self.assertEqual(got[2].get('node'), SUB1)
             with open(p, 'w') as fh:
-                json.dump({'version': 6, 'links': rows}, fh)
+                json.dump({'version': 7, 'links': rows}, fh)
             os.chmod(p, 0o600)
             info = {}
             self.assertEqual(lineage.read_cache(p, now=now, info=info), [])
@@ -1922,6 +1987,106 @@ class LaunchKindsInRecords(CliFixture):
         self.assertEqual(link.cx_link([], [stranger]), {})
 
 
+class CodexOwnersAndPins(unittest.TestCase):
+    """Hand-made facts: a Codex thread is an owner like a session; its environment says the node (exactly); a thread that may have run something unknown is a competitor."""
+    ROOT, SUBX = 'aaaaaaaa-0000-4000-8000-000000000001', 'aaaaaaaa-0000-4000-8000-000000000002'
+
+    def codex_owner(self, node=None, calls=(), text='', blind=lambda lo, hi: False, cwd='/w', root=None):
+        n = fp.normalize(text)
+        o = affil.Owner(root or self.ROOT, node, T0 - 5000, T0 + 5000, pool=lambda lo, hi: (n, True), text_of=lambda c: n, provider='codex', cwd=cwd, blind_at=blind)
+        for c in calls:
+            o.add(c)
+        return o
+
+    def test_a_codex_thread_owns_a_content_match_like_a_session(self):
+        r = self.ROOT
+        o = self.codex_owner(None, [call(r, None, T0, launches=[launch(None)])], text=TEXT)
+        d = affil.decide(child(), [o])
+        self.assertEqual((d.tree, d.node, d.rule, d.rank, d.certain), (r, None, 'content', 3, True))
+        s = self.codex_owner(self.SUBX, [call(r, self.SUBX, T0, launches=[launch(None)])], text=TEXT)
+        d = affil.decide(child(), [self.codex_owner(None, text='nothing'), s])
+        self.assertEqual((d.tree, d.node, d.relation.certain['node']), (r, self.SUBX, True))
+
+    def test_a_claude_and_a_codex_owner_with_the_same_words_tie(self):
+        r = self.ROOT
+        d = affil.decide(child(), [owner(A, None, [call(A, None, T0, launches=[launch(None)])], text=TEXT), self.codex_owner(None, [call(r, None, T0, launches=[launch(None)])], text=TEXT)])
+        self.assertIsNone(d.tree)
+        self.assertEqual(sorted(d.held_trees), sorted([A, r]))
+
+    def test_a_codex_environment_names_the_node_and_that_is_certain(self):
+        r = self.ROOT
+        owners = [self.codex_owner(None, text='x'), self.codex_owner(self.SUBX, text='x')]
+        d = affil.decide(child(), owners, pins=[{'kind': 'env', 'tree': r, 'ts': T0 + 2, 'node': self.SUBX, 'exact': True}])
+        self.assertEqual((d.tree, d.node, d.rule, d.rank), (r, self.SUBX, 'env', 2))
+        self.assertEqual((d.relation.certain['tree'], d.relation.certain['node']), (True, True))
+        self.assertNotIn('node_unresolved', [c for c, _ in d.diags])
+
+    def test_a_codex_environment_of_the_root_says_no_node_though_a_sub_agent_is_alive(self):
+        r = self.ROOT
+        owners = [self.codex_owner(None, text='x'), self.codex_owner(self.SUBX, text='x')]
+        d = affil.decide(child(), owners, pins=[{'kind': 'env', 'tree': r, 'ts': T0 + 2, 'node': None, 'exact': True}])
+        self.assertEqual((d.tree, d.node, d.relation.certain['node']), (r, None, True))
+        self.assertNotIn('node_unresolved', [c for c, _ in d.diags])
+
+    def test_a_claude_environment_still_says_the_tree_only(self):
+        owners = [owner(A, None, [], text='x'), owner(A, SUB1, [], text='x')]
+        d = affil.decide(child(), owners, pins=[{'kind': 'env', 'tree': A, 'ts': T0 + 2, 'node': None, 'exact': False}])
+        self.assertEqual((d.node, d.relation.certain['node']), (None, False))
+        self.assertIn('node_unresolved', [c for c, _ in d.diags])
+
+    def test_the_call_of_a_content_match_at_the_same_node_is_kept_next_to_an_environment(self):
+        r = self.ROOT
+        c = call(r, self.SUBX, T0, launches=[launch(None)])
+        o = self.codex_owner(self.SUBX, [c], text=TEXT)
+        d = affil.decide(child(), [self.codex_owner(None, text='x'), o], pins=[{'kind': 'env', 'tree': r, 'ts': None, 'node': self.SUBX, 'exact': True}])
+        self.assertEqual((d.tree, d.node, d.call), (r, self.SUBX, c))
+        self.assertTrue(d.relation.certain['call'])
+
+    def test_an_environment_node_beats_the_node_the_text_names(self):
+        r = self.ROOT
+        o = self.codex_owner(self.SUBX, [call(r, self.SUBX, T0, launches=[launch(None)])], text=TEXT)
+        d = affil.decide(child(), [self.codex_owner(None, text='x'), o], pins=[{'kind': 'env', 'tree': r, 'ts': None, 'node': None, 'exact': True}])
+        self.assertEqual((d.tree, d.node), (r, None))
+
+    def test_a_blind_owner_in_the_childs_folder_makes_another_owners_match_a_guess(self):
+        blind = self.codex_owner(None, text='', blind=lambda lo, hi: True, cwd='/w')
+        mine = owner(A, None, [call(A, None, T0, launches=[launch(None)])], text=TEXT)
+        d = affil.decide(child(), [mine, blind])
+        self.assertEqual((d.tree, d.rule, d.rank, d.certain), (A, 'content_short', 4, False))
+        self.assertIn('fingerprint_incomplete', [c for c, _ in d.diags])
+
+    def test_the_blind_test_asks_for_the_start_of_the_run_only(self):
+        asked = []
+        blind = self.codex_owner(None, text='', blind=lambda lo, hi: asked.append((lo, hi)) or False)
+        affil.decide(child(t0=T0 + 2), [owner(A, None, [call(A, None, T0, launches=[launch(None)])], text=TEXT), blind])
+        self.assertEqual(asked, [(T0 + 2 - affil.RUN_GRACE, T0 + 2 + affil.RUN_SLACK_BEFORE)])
+
+    def test_an_owner_that_is_blind_in_another_folder_is_no_competitor(self):
+        for cwd, certain in (('/w', False), ('/', False), ('/w/deeper', True), ('/elsewhere', True), (None, False)):
+            blind = self.codex_owner(None, text='', blind=lambda lo, hi: True, cwd=cwd)
+            d = affil.decide(child(cwd='/w'), [owner(A, None, [call(A, None, T0, launches=[launch(None)])], text=TEXT), blind])
+            self.assertEqual((d.tree, d.certain), (A, certain), cwd)
+
+    def test_a_blind_owner_does_not_touch_the_output_file_or_the_environment(self):
+        blind = self.codex_owner(None, text='', blind=lambda lo, hi: True)
+        wc, wr = writer_call(A, None, T0 - 1, '/o/out.json')
+        d = affil.decide(child(), [owner(A, None, [wc], text='x'), blind], out=Out({KID: ['/o/out.json']}, {'/o/out.json': [(wc, wr)]}))
+        self.assertEqual((d.tree, d.rule, d.certain), (A, 'out', True))
+        d = affil.decide(child(), [owner(A, None, [call(A, None, T0, launches=[launch(None)])], text=TEXT), blind], pins=[{'kind': 'env', 'tree': A, 'ts': None}])
+        self.assertEqual((d.tree, d.rule, d.certain), (A, 'env', True))
+
+    def test_a_blind_owner_that_wins_itself_is_no_competitor_to_itself(self):
+        r = self.ROOT
+        o = self.codex_owner(None, [call(r, None, T0, launches=[launch(None)])], text=TEXT, blind=lambda lo, hi: True)
+        d = affil.decide(child(), [o])
+        self.assertEqual((d.tree, d.rule, d.certain), (r, 'content', True))
+
+    def test_the_child_s_own_thread_is_never_the_competitor(self):
+        blind = self.codex_owner(None, text='', blind=lambda lo, hi: True, root=KID)
+        d = affil.decide(child(), [owner(A, None, [call(A, None, T0, launches=[launch(None)])], text=TEXT), blind])
+        self.assertEqual((d.tree, d.certain), (A, True))
+
+
 class ScriptByVariablePath(CliFixture):
     """`R=/x/runs; $R/run.sh a b`: the script is a file the command runs where the command itself says what `$R` is (the run of a script by a path that starts with a variable)."""
     SECOND = 'and now the second part of the work: check the amber basin and report what you find in plain words, please.'
@@ -1962,6 +2127,32 @@ class ScriptByVariablePath(CliFixture):
         self.assertEqual(o['calls'], ['toolu_1', 'toolu_2'])
         self.assertEqual(o['by'], [(self.PARENT, None), (self.PARENT, None)])
         self.assertTrue(all(o['calls_certain']))
+
+
+class AuthorsAreNoRivals(unittest.TestCase):
+    """An owner that only wrote the words (it ran nothing that could start a session) makes no tie with one that ran a launch."""
+
+    def test_the_one_that_ran_a_launch_wins_over_an_author_with_the_same_words(self):
+        author = owner(A, None, [call(A, None, T0, launching=False)], text=TEXT)
+        launcher = owner(B, None, [call(B, None, T0, launches=[launch(None)])], text=TEXT)
+        d = affil.decide(child(), [author, launcher])
+        self.assertEqual((d.tree, d.rule, d.certain), (B, 'content', True))
+        self.assertEqual(sorted(x for x, _ in d.diags if x == 'content_author_differs'), ['content_author_differs'])        # the author is still said
+
+    def test_two_launchers_still_tie_and_an_author_alone_still_links_nothing(self):
+        both = [owner(A, None, [call(A, None, T0, launches=[launch(None)])], text=TEXT), owner(B, None, [call(B, None, T0, launches=[launch(None)])], text=TEXT)]
+        d = affil.decide(child(), both + [owner(C, None, [call(C, None, T0, launching=False)], text=TEXT)])
+        self.assertIsNone(d.tree)
+        self.assertEqual(sorted(d.held_trees), sorted([A, B]))
+        d = affil.decide(child(), [owner(A, None, [call(A, None, T0, launching=False)], text=TEXT)])
+        self.assertIsNone(d.tree)
+
+    def test_an_author_that_stands_out_is_not_pushed_out_by_a_launcher_that_holds_part_of_the_words(self):
+        """The launcher assembles the instruction from pieces (a quarter of it in its command) and the author wrote all of it: the author's words stand out, so nothing links on content."""
+        part = TEXT[:len(TEXT) // 4]
+        d = affil.decide(child(), [owner(A, None, [call(A, None, T0, launching=False)], text=TEXT), owner(B, None, [call(B, None, T0, launches=[launch(None)])], text=part)])
+        self.assertNotEqual(d.rule, 'content')                                                  # (the launch that fits by time and folder is a guess, as it was)
+        self.assertFalse(d.certain)
 
 
 class WordsThatOnlyTravel(CliFixture):
@@ -2068,12 +2259,15 @@ class WordsThatOnlyTravel(CliFixture):
         self.assertIsNone(self.run_scan())
         self.assertNotIn(KID, self.links.lineage.saved)
 
-    def test_the_content_link_of_a_version_4_file_does_not_come_back_either(self):
-        """Version 5: a python file that only mentions the tool (a relay that types it into a terminal) is no longer a launch, so what a version 4 file remembers of the kind is read again."""
-        self.write(self.RELAY, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}})])
-        self.cache(4)
-        self.assertIsNone(self.run_scan())
-        self.assertNotIn(KID, self.links.lineage.saved)
+    def test_the_content_link_of_a_version_4_or_5_file_does_not_come_back_either(self):
+        """Version 6: a python file that only mentions the tool (a relay that types it into a terminal) is no longer a launch, so what an older file remembers of the kind is read again."""
+        for version in (4, 5):
+            with self.subTest(version):
+                self.setUp()
+                self.write(self.RELAY, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}})])
+                self.cache(version)
+                self.assertIsNone(self.run_scan())
+                self.assertNotIn(KID, self.links.lineage.saved)
 
     def test_the_other_rules_of_an_older_file_are_kept(self):
         self.write(self.RELAY, [dump({'type': 'user', 'timestamp': iso(T0 - 100), 'cwd': '/w', 'message': {'role': 'user', 'content': 'pass it on'}})])

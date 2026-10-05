@@ -15,7 +15,9 @@ Rules that the code below keeps:
     report write that succeeded (the tag alone seats nobody, and neither does a bare mention of the report the tag names, or a path that could not be resolved). A reader,
     a quotation (of a path or of a marker), a negation ("no need to write r1/B.md") and a failed write are not a seat. A marker or a tag seats in one debate, never in
     several. Two live agents at the same rank hold the seat (`seat_tie_held`); a later agent takes over from one that is already over, but only with a claim at least
-    as strong as the one it takes over from. What an instruction only shows is not told: a code fence, a Markdown block quote, an earlier instruction that is said not to be
+    as strong as the one it takes over from. Over means: its last record is not later than the start of the later one and it is not working (a run that was cut off
+    counts: the same script run again with the same instruction takes the seat; if the cut-off run is resumed and writes its report after the new one began, the two
+    overlap and hold it as any two live agents do), and an agent whose process cannot be seen is not over. What an instruction only shows is not told: a code fence, a Markdown block quote, an earlier instruction that is said not to be
     carried out, and the write words of a text that forbids writing anything are quoted (`dead_spans`), for a path, a marker and a guide alike; a write that succeeded stays a
     seat whatever the instruction quotes.
   - The spelling of a round folder (r01, round1) and of a file (A.md, a.md, A_flow.md) is kept as written; physically different files are never merged. The output file of
@@ -1487,9 +1489,12 @@ def assign(agents, cat, statuses=None, extra_units=(), tops_of=None):
 
 
 def _over_before(g, status, f):
-    """Whether agent g was already over when agent f started (so f takes the seat over rather than competing for it). A cut-off run may be resumed, and one whose
-    process cannot be seen may still be working: neither is over."""
-    return status is not None and status not in OPEN and status != 'interrupted' and (g.last or g.start or 0) <= (f.start or 0)
+    """Whether agent g was already over when agent f started (so f takes the seat over rather than competing for it): its last record is not later than f's start and
+    it is not working. A run that was cut off (`interrupted`: a usage limit, an error, an early exit) is over for this, however it may be resumed: a new run of the same
+    script started after its last record takes the seat (the claim of the new one is no weaker than the old one's, see `_settle`). If the cut-off run is resumed later
+    and works after f has started, g's last record is later than f's start and the two overlap: the seat is held, as it is for any two agents at work at once; what it
+    writes after that is a claim like any other write. One whose process cannot be seen (`unknown`) may still be working: it is not over."""
+    return status is not None and status not in OPEN and (g.last or g.start or 0) <= (f.start or 0)
 
 
 def _folder_of(c, units):

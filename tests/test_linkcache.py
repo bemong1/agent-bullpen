@@ -121,7 +121,7 @@ class CacheFile(Fixture):
         links.lineage.scan({P, C, D, E}, self.index.get)                                   # the first scan writes it again
         with open(self.cache) as f:
             d = json.load(f)
-        self.assertEqual(d['version'], 5)
+        self.assertEqual(d['version'], 6)
         self.assertEqual(sorted(r['child'] for r in d['links']), sorted([D, E]))
         again = server.LinkIndex()
         again.lineage.enable_cache(self.cache)
@@ -137,6 +137,11 @@ class CacheFile(Fixture):
         links = server.LinkIndex()
         links.lineage.enable_cache(self.cache)
         self.assertEqual(sorted(links.lineage.saved), [D])
+        for version in (4, 5):                                                                       # a version 4 or 5 file: its `content` links may rest on a python file that only mentions the tool
+            put_cache(self.cache, [row(C, P, rule='content'), row(D, P, rule='out')], version=version)
+            links = server.LinkIndex()
+            links.lineage.enable_cache(self.cache)
+            self.assertEqual(sorted(links.lineage.saved), [D], version)
 
     def test_broken_and_untrusted_files_are_ignored_silently(self):
         for text in ('{not json', '[]', '"x"', '', '{"version": 2, "links": []}', '{"version": 1, "links": "x"}', '{"version": 1}'):
@@ -176,12 +181,12 @@ class CacheFile(Fixture):
         put_cache(self.cache, [good] + bad + odd)
         got = lineage.read_cache(self.cache)
         self.assertEqual([(r['child'], r['parent'], r['started']) for r in got], [(cid(0), P, T0), (cid(13), P, None)])
-        self.assertTrue(all(set(r) == {'child', 'parent', 'kind', 'rule', 'seen', 'started'} for r in got))
+        self.assertTrue(all(set(r) == {'child', 'parent', 'kind', 'rule', 'seen', 'started', 'parent_kind'} for r in got))
 
     def test_limits_are_the_approved_ones(self):
         self.assertEqual((lineage.CACHE_MAX, lineage.CACHE_DAYS, link.UNLINKED_MAX), (MAX_PAIRS, MAX_DAYS, MAX_UNLINKED))
         self.assertEqual(lineage.CACHE_RULES, ('proc', 'env', 'out', 'content'))       # version 2 adds the links that rest on an output file or a long instruction
-        self.assertEqual((lineage.CACHE_VERSION, lineage.CONTENT_FROM), (5, 5))        # version 5: the `content` links of an older file are not read
+        self.assertEqual((lineage.CACHE_VERSION, lineage.CONTENT_FROM), (6, 6))        # the `content` links of an older file are not read (3: relays, 4: plain arguments, 6: python files); 5 adds `parent_kind`
 
     def test_size_and_age_limits_on_read(self):
         many = [row(child='%08d-0000-4000-8000-000000000000' % i, seen=NOW - 1000 - i) for i in range(MAX_PAIRS + 50)]
@@ -207,13 +212,14 @@ class CacheFile(Fixture):
         self.assertEqual(os.listdir(os.path.dirname(self.cache)), ['links.json'])  # no temporary file is left behind
         with open(self.cache) as f:
             d = json.load(f)
-        self.assertEqual(d['version'], 5)
+        self.assertEqual(d['version'], 6)
         by = {(r['kind'], r['child']): r for r in d['links']}
         self.assertEqual(set(by), {('cli', C), ('codex', TID)})
         self.assertEqual((by[('cli', C)]['parent'], by[('cli', C)]['rule'], by[('cli', C)]['started']), (P, 'env', T0 + 1))
         self.assertIsNone(by[('codex', TID)]['started'])
         for r in d['links']:
-            self.assertEqual(set(r), {'child', 'parent', 'kind', 'rule', 'seen', 'started'})
+            self.assertEqual(set(r), {'child', 'parent', 'kind', 'rule', 'seen', 'started', 'parent_kind'})
+            self.assertEqual(r['parent_kind'], 'claude')
             self.assertAlmostEqual(r['seen'], time.time(), delta=60)
 
     def test_only_ids_rules_and_times_are_written(self):
@@ -224,11 +230,11 @@ class CacheFile(Fixture):
         self.scan()
         with open(self.cache) as f:
             text = f.read()
-        for needle in SECRETS + ('/w', 'private-project-dir', 'SECRET-PROMPT-TEXT', self.t, 'claude', 'codex exec', 'HOME', 'api', 'token'):
+        for needle in SECRETS + ('/w', 'private-project-dir', 'SECRET-PROMPT-TEXT', self.t, 'claude -p', 'codex exec', 'HOME', 'api', 'token'):
             self.assertNotIn(needle, text, needle)
         strings = re.findall(r'"([^"]*)"', text)
         for sv in strings:
-            self.assertTrue(re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|version|links|child|parent|kind|rule|seen|started|cli|codex|proc|env', sv), sv)
+            self.assertTrue(re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}|version|links|child|parent|kind|rule|seen|started|parent_kind|claude|cli|codex|proc|env', sv), sv)
 
     def test_estimated_rules_are_not_written(self):
         """Links made by command parsing plus time (the "time" rule) and details filled in from the call are not stored."""

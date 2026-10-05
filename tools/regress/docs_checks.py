@@ -84,5 +84,13 @@ check('docs/configuration.md start output: the Codex line is "%s"' % line['en'],
 conf = read('docs/configuration.md')
 check('docs/configuration.md: model weeks and extra usage come from .claude.json with their own recorded time', re.search(r'extra usage[^.\n]*`\.claude\.json`', conf) and 'own' in conf[conf.index('The plan tier'):conf.index('The plan tier') + 500], conf[conf.index('The plan tier'):conf.index('The plan tier') + 400])
 
+# ---- the link record file: the version the docs name is the one the code writes and reads
+lin = read('board/lineage.py')
+now, first, reads = (re.search(pat, lin, re.M) for pat in (r'^CACHE_VERSION = (\d+)', r'^CONTENT_FROM = (\d+)', r'^CACHE_READ_VERSIONS = \(([\d, ]+)\)'))
+check('docs/configuration.md: the link record file is "now %s", reads versions 1 to %s and drops `content` links older than version %s' % (now.group(1), now.group(1), first.group(1)),
+      'a version number (now %s)' % now.group(1) in conf and 'every version it has written (1 to %s)' % now.group(1) in conf and 'older than version %s is not read' % first.group(1) in conf
+      and [int(x) for x in reads.group(1).split(',')] == list(range(1, int(now.group(1)) + 1)), [now.group(1), first.group(1), reads.group(1)])
+check('docs/development.md: links.json is "format version %s"' % now.group(1), 'format version %s' % now.group(1) in read('docs/development.md'), '')
+
 print('ALL PASS' if not fails else 'FAILED %d' % fails)
 sys.exit(1 if fails else 0)

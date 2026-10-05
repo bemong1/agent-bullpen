@@ -27,10 +27,11 @@ class DocsScene(unittest.TestCase):
         cls.home = cls.info['home']
         cls.pids, cls.procs = start_live(cls.info)
         cls.board = Board(cls.home, cls.info['orch'])
-        end = time.time() + 30                                  # the first seconds after the start link the `claude -p` runs by a guess (rule time): wait for the sure link
+        end = time.time() + 30                                  # the first seconds after the start show the `claude -p` runs a live process or an environment places, without the call that started them (the sub-agents' records are read after the first screen): wait for it
         while True:
             cls.state = cls.board.get('/api/state')[1]
-            if synth_home.STOPPED_KIDS['grand'] in {a['id'] for a in cls.state['agents']} or time.time() > end:
+            grand = {a['id']: a for a in cls.state['agents']}.get(synth_home.STOPPED_KIDS['grand'])
+            if (grand and grand['title'] != 'claude -p') or time.time() > end:
                 break
             time.sleep(0.5)
         cls.unknown = synth_home_codex_unknown(cls.home)         # no /proc (macOS): the Codex seat of T3 cannot be told from a fake process

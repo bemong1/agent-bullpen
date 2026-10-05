@@ -9,7 +9,7 @@ import re
 from . import runstate as RS
 from .util import as_text, norm_key, parse_ts, short_path, strip_reminders, trunc
 from .tokens import TokenMeter
-from .codex_parse import CX_CALL_ID_RE, codex_call, codex_say_text, codex_user_text, cx_usage_add
+from .codex_parse import CX_CALL_ID_RE, codex_call, codex_say_text, codex_user_text, cx_decode, cx_usage_add
 from .codex_index import CODEX
 
 
@@ -130,6 +130,12 @@ def shell_writes(cmd, cwd):
 
 
 class Agent:
+    def describe(self, description):
+        """Sets the description; the short role marker at its head (T1-A, A, opus-1) is the tag, the rest the title."""
+        self.description = description
+        m = re.match(r'^(T\d+-[A-Z]|[A-Z]|[a-z]+-\d+)\s+(.*)$', description)
+        self.tag, self.title = (m.group(1), m.group(2)) if m else ('', description)
+
     def __init__(self, agent_id, meta):
         self.id = agent_id
         self.description = meta.get('description') or agent_id
@@ -139,11 +145,11 @@ class Agent:
         # a sub-agent started by a sub-agent (a grandchild): meta carries the parent agent id and the depth. Its completion notice is left in the parent agent's record, not in the main record
         self.parent_agent = meta.get('parentAgentId') if isinstance(meta.get('parentAgentId'), str) else None
         self.depth = meta.get('spawnDepth')
+        self.host = None                                 # a sub-agent that a `claude -p` child of the page started: the session id of that child (the page of the top orchestrator shows it under the child)
+        self.relay = None                                # a descendant Claude of a page: what its record tells the page's Codex linker (Bash calls, results, TaskStop, notices of background jobs)
         self.child_notes = []                            # completion notices, left in this agent's own record, for the agents it started {ts, task, status, summary, usage}
         self.child_results = []                          # results that this agent's Agent tool calls got back (completions, not ones still being waited for) {ts, tool_use_id, agent_id, status}
-        # the short role marker at the head of the description (T1-A, A, opus-1) is used as the tag
-        m = re.match(r'^(T\d+-[A-Z]|[A-Z]|[a-z]+-\d+)\s+(.*)$', self.description)
-        self.tag, self.title = (m.group(1), m.group(2)) if m else ('', self.description)
+        self.describe(self.description)
         self.model = ''
         self.effort = ''
         self.spawn_prompt = None
@@ -240,12 +246,16 @@ class Agent:
                         self.reads[os.path.normpath(inp['file_path'])] = ts
                         self.read_log.append((ts, os.path.normpath(inp['file_path'])))
                     elif name == 'Bash' and isinstance(inp.get('command'), str):
+                        if self.relay is not None:
+                            self.relay.bash(d, ts, b)
                         paths = shell_writes(inp['command'], d.get('cwd') if isinstance(d.get('cwd'), str) and d.get('cwd') else self.cwd)
                         if paths:
                             w = {'ts': ts, 'paths': paths, 'id': b.get('id')}
                             self.shell_writes.append(w)
                             if b.get('id'):
                                 self._by_call[b['id']] = w
+                    if name == 'TaskStop' and self.relay is not None:
+                        self.relay.stop(inp.get('task_id') or '', ts)
                     if name == 'SendMessage':
                         msg = inp.get('message')
                         m = {'ts': ts, 'to': str(inp.get('to', '')), 'summary': inp.get('summary') or '', 'id': b.get('id'),
@@ -261,6 +271,8 @@ class Agent:
                 self.tokens.model((a.get('identity') or {}).get('modelId'))
             elif a.get('type') == 'queued_command' and a.get('commandMode') == 'task-notification':
                 self._child_note(parse_ts(a.get('timestamp')) or ts, as_text(a.get('prompt')), a.get('usage'))
+                if self.relay is not None:
+                    self.relay.notice(as_text(a.get('prompt')), parse_ts(a.get('timestamp')) or ts)
         elif typ == 'user':
             self._touch(ts)
             c = (d.get('message') or {}).get('content')
@@ -273,6 +285,8 @@ class Agent:
                     if not isinstance(b, dict):
                         continue
                     if b.get('type') == 'tool_result':
+                        if self.relay is not None:
+                            self.relay.result(b.get('tool_use_id'), d, ts)
                         called = self.pending.pop(b.get('tool_use_id'), None)
                         if called and called['name'] == 'Agent':
                             self._child_result(ts, b, d.get('toolUseResult'))
@@ -328,7 +342,14 @@ class Agent:
             self.spawn_ts = self.spawn_ts or ts
             return
         text = strip_reminders(text)
-        if not text or text.startswith('<task-notification>'):
+        if text.startswith('<task-notification>'):
+            if self.relay is not None:
+                self.relay.notice(text, ts)
+            if self.origin == 'cli':                     # a `claude -p` child is a session of its own: the notices of the agents it started are in its record as user lines
+                u = re.search(r'<subagent_tokens>(\d+)</subagent_tokens>.*?<tool_uses>(\d+)</tool_uses>.*?<duration_ms>(\d+)</duration_ms>', text, re.S)
+                self._child_note(ts, text, {'totalTokens': int(u.group(1)), 'toolUses': int(u.group(2)), 'durationMs': int(u.group(3))} if u else None)
+            return
+        if not text:
             return
         if text.startswith(COORD_PREFIX):
             text = text[len(COORD_PREFIX):].strip()
@@ -407,11 +428,48 @@ def cx_reprice(meter, nomodel, model):
 
 
 def cx_sync_guardians(meter, parent_id):
-    """Puts the cumulative tokens of guardian (approval review) child threads into the parent total (the subset tokens.guardian). Activity is not read."""
+    """Puts the cumulative tokens of guardian (approval review) child threads into the parent total (the subset tokens.guardian). Activity is not read.
+    A native sub-agent is a child thread too, but its tokens are its own card's (CodexAgent counts them): only `kind == 'guardian'` comes in here."""
     for g in CODEX.children(parent_id):
-        if g['thread_total']:
+        if g.get('kind') == 'guardian' and g['thread_total']:
             meter.add_codex('guardian:' + g['id'], g['thread_total'], g['model'] or 'codex-auto-review',
                             ctx=False, guardian=True, calls=g['calls'])
+
+
+class ForkSkip:
+    """The front of a native sub-agent's rollout is its parent's history, copied when it was spawned: the lines whose ordinal is at most `prefix_ord` (a line with no ordinal
+    counts by its place in the file: the meta line is 0, the next 1 ...). None of it is the sub-agent's own turn, activity, tool call, instruction or tokens, so the reader leaves
+    it out before anything is fed. Read from the start of the file, the first line behind it ends the copied part for good. A read that starts inside the file (`partial`, the tail
+    of a big rollout) may still hold some of it, and nothing says where it began: each line is told by its own ordinal, and a line with none is not known to be the thread's
+    own, so it is left out too. `prefix_ord` None: a thread that is no sub-agent has no copy."""
+
+    def __init__(self, prefix_ord=None, partial=False):
+        self.prefix = prefix_ord or 0
+        self.partial = bool(partial) and prefix_ord is not None
+        self.sub = prefix_ord is not None
+        self.restart()
+
+    def restart(self):
+        """The rollout is read again from its start."""
+        self.line = 0
+        self.over = not self.sub or (not self.partial and not self.prefix)
+
+
+def cx_rows(lines, fork=None):
+    """The decoded rollout lines of one read (cx_decode), without the lines `fork` (a ForkSkip) says are the parent's copy. A line that cannot be decoded is no row, and
+    still has its place in the count."""
+    for raw in lines:
+        r = cx_decode(raw)
+        if fork is not None and fork.partial:
+            if r and (r['ord'] is None or r['ord'] <= fork.prefix):
+                continue
+        elif fork is not None and not fork.over:
+            n, fork.line = fork.line, fork.line + 1
+            if (r['ord'] if r and r['ord'] is not None else n) <= fork.prefix:
+                continue
+            fork.over = True
+        if r:
+            yield r
 
 
 class CodexAgent(Agent):
@@ -419,8 +477,13 @@ class CodexAgent(Agent):
 
     def __init__(self, e, link):
         Agent.__init__(self, e['id'], {})
-        self.provider, self.origin = 'codex', 'exec'
+        self.kind = e.get('kind') or 'root'
+        self.provider, self.origin = 'codex', 'subagent' if self.kind == 'sub' else 'exec'      # a native sub-agent thread of Codex, or a `codex exec` thread started from a shell
         self.tag = self.title = self.description = ''
+        self.agent_path, self.nick = e.get('agent_path'), e.get('nick')
+        self.fork = ForkSkip(e.get('prefix_ord') if self.kind == 'sub' else None)      # the parent's copied history at the front of a sub-agent's rollout is none of its own (set again once `partial` is known)
+        self.cuts = []             # sub-agent: the times its parent wrote `SubAgentActivity interrupted` for it
+        self.runtime = None        # sub-agent: (id, rollout path) of the root thread, the process it lives in has that rollout open
         self.report_tag = ''       # report name (r<N>/<name>.md). If none, tag = the model name (sol6.1, sol6.1-2)
         self.meta_ts = e['meta_ts']
         self.link = link

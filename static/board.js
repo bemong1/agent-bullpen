@@ -127,7 +127,7 @@ function askText(qs) {
   });
   return lines.join('\n').trim();
 }
-const evText = e => Array.isArray(e.questions) ? askText(e.questions) : e.text;
+const evText = e => Array.isArray(e.questions) ? askText(e.questions) : e.text_i18n && I18N.has(e.text_i18n.key) ? t(e.text_i18n.key, i18nParams(e.text_i18n.params)) : e.text;       // a body the server wrote (not the agent) comes with its key
 const nameIds = s => String(s || '').replace(/\ba[0-9a-f]{16}\b/g, id => S && S.names[id] ? S.names[id] : id);
 async function api(path, opt) {
   const sep = path.includes('?') ? '&' : '?';
@@ -736,7 +736,7 @@ function linkText(D, a) {                    // A Codex agent or a `claude -p` r
   if (!isCx(D) && !isCx(a) && a.origin !== 'cli') return '';
   const l = D.link || a.link, lk = a.link || l, sk = D.partial && D.partial.skipped_bytes, cls = linkClass(lk);
   const rule = l ? linkRule(ruleWhy(l.rule, lk)) : '';
-  return (l ? `<span title="${esc(linkTip(lk))}">${t('board.link.line', { rule: esc(rule) })}${cls ? ' · ' + t('board.link.class.' + cls) : ''}${l.bash_ts ? ' · Bash ' + hm(l.bash_ts) : ''}${l.dt != null ? ' · ' + t('board.link.dt', { n: (+l.dt).toFixed(1) }) : ''}</span>` : '')
+  return (l ? `<span title="${esc(linkTip(lk))}">${t('board.link.line', { rule: esc(rule) })}${cls ? ' · ' + t('board.link.class.' + cls) : ''}${l.bash_ts ? ' · ' + (l.parent_kind === 'codex' ? 'exec' : 'Bash') + ' ' + hm(l.bash_ts) : ''}${l.dt != null ? ' · ' + t('board.link.dt', { n: (+l.dt).toFixed(1) }) : ''}</span>` : '')
     + (sk ? `<span>${t('board.link.partial', { size: bytes(sk) })}</span>` : '');
 }
 // Where an agent hangs (launched by …) and how many runs its record holds with who handed over the last one
@@ -907,7 +907,7 @@ async function openEventModal(e, title) {       // The full text of one event in
   let text = evText(e);
   showModal(title, I18N.date(e.ts, 'dateTime'), md(text));
   const g = gens.modal;                             // The number showModal raised: if another modal opens or this one closes meanwhile, the response is dropped
-  if (!Array.isArray(e.questions) && (e.full_len || 0) > text.length) {            // A cut-off text is fetched in full and drawn again (a question comes as structure, never cut)
+  if (!Array.isArray(e.questions) && !e.text_i18n && (e.full_len || 0) > text.length) {            // A cut-off text is fetched in full and drawn again (a question comes as structure, never cut)
     try { text = (await api('/api/event?idx=' + e.idx)).text; if (isLatest('modal', g)) $('#mBody').innerHTML = md(text); } catch {}
   }
 }
@@ -977,7 +977,7 @@ function atalkHtml(items, o) {
       html += `<div class="xr" data-hl="${hl}">${t('board.atalk.xread', { reader: subjectSpan(rd, `<span class="xn" data-agent="${esc(to)}">${esc(rd)}</span>`), author: `<span class="xn" data-agent="${esc(from)}">${esc(agentName(from))}</span>`, title: esc(e.title) })}${tm2}</div>`;
       return;
     }
-    const text = e.text || (e.kind === 'spawn' ? evTitle(e) : '');
+    const text = evText(e) || (e.kind === 'spawn' ? evTitle(e) : '');
     html += `<div class="msg ${atalkSide(e)}" data-idx="${e.idx}" data-hl="${hl}" title="${t('board.msg.openTitle')}"><div class="mh">${who(from)}<span class="faint">→</span>${who(to)}` +
       `<span class="tagk">${esc(atalkKind(e.kind))}</span>${tm2}</div>` +
       (o.full ? `<div class="mt full md">${md(text)}</div>` : text ? `<div class="mt">${esc(plain(text))}</div>` : '') + '</div>';

@@ -545,11 +545,36 @@ class Seats(Tree):
         jd = self.run_assign([a, b], {'a': 'unknown', 'b': 'running'})                           # nothing says a ended: no handover on no evidence, the seat is held
         self.assertEqual((jd.assignments, self.codes(jd)), ([], ['seat_tie_held', 'seat_tie_held']))
 
-    def test_a_cut_off_run_is_not_over(self):
+    def test_a_cut_off_run_whose_last_record_is_before_the_new_one_gives_the_seat_over(self):
         text = 'write `%s`' % self.r(1, 'B')
-        a, b = self.agent('a', text, start=100.0, last=150.0), self.agent('b', text, start=200.0)
-        jd = self.run_assign([a, b], {'a': 'interrupted', 'b': 'running'})                       # it may be resumed: the seat is held rather than given away
+        a, b = self.agent('a', text, start=100.0, last=150.0), self.agent('b', text, start=200.0)      # the same script run again with the same instruction: a new session
+        for reason in ('interrupted', 'done', 'failed'):
+            jd = self.run_assign([a, b], {'a': reason, 'b': 'running'})
+            self.assertEqual(jd.slots, {(self.unit, 1, 'B'): ['a', 'b']}, reason)
+            self.assertEqual([(x.agent, x.start, x.end) for x in jd.assignments], [('a', 100.0, 200.0), ('b', 200.0, None)], reason)    # the earlier period is closed
+            self.assertEqual(jd.diag, [], reason)
+
+    def test_a_cut_off_run_that_works_after_the_new_one_started_holds_the_seat_with_it(self):
+        text = 'write `%s`' % self.r(1, 'B')
+        a, b = self.agent('a', text, start=100.0, last=250.0), self.agent('b', text, start=200.0)      # a was resumed and is still at work when b starts: they overlap
+        jd = self.run_assign([a, b], {'a': 'interrupted', 'b': 'running'})
         self.assertEqual((jd.assignments, self.codes(jd)), ([], ['seat_tie_held', 'seat_tie_held']))
+        for working in ('running', 'stalled', 'unknown'):                                            # a run that is working, or whose process cannot be seen, is never over
+            quiet = self.agent('a', text, start=100.0, last=150.0)
+            self.assertEqual(self.codes(self.run_assign([quiet, b], {'a': working, 'b': 'running'})), ['seat_tie_held', 'seat_tie_held'], working)
+
+    def test_a_cut_off_run_that_is_resumed_and_writes_its_report_gets_the_seat_back_from_a_weaker_claim(self):
+        path = self.r(1, 'B')
+        told = self.agent('a', 'Write your result to `%s`.' % path, start=100.0, last=300.0, writes=[(path, True)])    # resumed after b began, and wrote
+        other = self.agent('b', 'the result is `%s`' % path, key='b', start=200.0)                    # b only mentions the file (a weaker claim)
+        jd = self.run_assign([told, other], {'a': 'done', 'b': 'running'})
+        self.assertEqual(jd.slots, {(self.unit, 1, 'B'): ['a']})
+        self.assertEqual([(x.agent, x.end) for x in jd.assignments], [('a', None)])
+        # ... and a first period that a takeover closed does not come back by itself: once the new run is the later one with a claim as strong, it keeps the seat
+        again = self.agent('a', 'write `%s`' % path, start=100.0, last=150.0)
+        new = self.agent('b', 'write `%s`' % path, start=200.0, writes=[(path, True)])
+        jd = self.run_assign([again, new], {'a': 'interrupted', 'b': 'done'})
+        self.assertEqual([(x.agent, x.end) for x in jd.assignments], [('a', 200.0), ('b', None)])
 
     def test_the_stronger_claim_wins_between_agents_that_work_at_once(self):
         path = self.r(1, 'B')

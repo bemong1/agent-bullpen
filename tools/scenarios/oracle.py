@@ -110,13 +110,75 @@ Choices the truth makes beyond the ranks:
  33. What an agent only saves is no change of the work (rule 28 counts the files of the work): the output of a command in a log (`scratch=log`) and the files it keeps in a
      folder for scratch work outside the repository (`scratch=tmp`), whoever of the participants does it. Parallel implementers whose instruction names no path and who write no
      code (`code=implied`) are indistinguishable from reviewers in the records: the truth is that there is no room, and the room the board shows is accepted (a known false room, left as it is).
+
+The Codex orchestrator (`cxo`: a page whose top is a Codex thread, or a Claude session with a Codex run below it). Words: the *top* is the orchestrator whose page is read,
+the *launcher* of a run is the thread (or session) whose shell call started it, the *tree* of a run is the session or root thread of its launcher (`owner_of(id).parent`), the
+*node* is the sub-agent inside that tree whose own shell made the call (None: the orchestrator itself, or not known), the *page* is the top of the chain of trees
+(`page_of`), the *screen parent* is the agent a card hangs under on the page of the top (None: the orchestrator). Evidence, strongest first, and what each says:
+ 35. The records of a native sub-agent (its own meta, naming its parent, and the `SubAgentActivity started` the parent wrote for it) are certain for tree, node and call. A
+     sub-agent below the top's own sub-agent has that sub-agent as its parent (tree); the page is still the top.
+ 36. The environment of a started process names the thread whose shell ran the call (`CODEX_THREAD_ID`) and the root of its tree (`CODEX_SESSION_ID`): certain, for the tree
+     and, when that thread is a native sub-agent, for the node as well (the one place where an environment names a node). It exists only while the process runs, and only when
+     no `env -i` or the like cleared it.
+ 37. The process lineage (the child is still a descendant of the Codex process that holds the top's rollout) is certain for the tree and says nothing of the node. A `setsid`
+     call re-parents the child: no lineage.
+ 38. The `CommandExecution` record of the launching thread (written when the process of the command ends: at once for a `&` call, at the end of the child for a foreground
+     call, never for a command that outlived its turn) holds the command text and its folder: with the instruction as a literal argument of a `claude -p` / `codex exec` at
+     the command position, it is certain for tree and node (the thread whose record it is), also when another thread of the same tree has a turn that is still going and a command
+     the board cannot read yet: the node is the sub-agent whose record shows the launch. A command that only quotes such a command (`tmux send-keys`, `echo`) is no launch.
+ 39. Both providers' names in one environment (a Claude session started a Codex run whose shell started the child): the run that is the nearest agent decides; when the
+     lineage is cut, the known owner chain does (the Codex run belongs to the Claude session, so it is the direct parent); the top Claude session is never the parent of the
+     grandchild. Nothing is read from which names a provider is known to clear.
+ 40. A session that only relays the instruction (a `tmux send-keys -l '<instruction>'`, or the same inside `python3 -c`) started nothing: no link to the run, whatever the
+     run's own evidence is, and none to the sessions it relays through. Two orchestrators of one folder (one Claude, one Codex) that say the same words and start a child
+     each: the environment or the lineage of the child names its own, and so does a valid output file (`twin_out`: the command redirects the child's output to a file that
+     holds its session id, the run is over): they rank above the words; only when none of them exists do the words tie and the child is held. A script that runs `codex exec` with no orchestrator behind it links nothing.
+ 40a. A command the board cannot read yet is a competitor it cannot rule out: when a Codex thread of the same folder has a command whose record has not come (an exec cell that
+     returned "Script running" and whose `CommandExecution` is not there), a Claude session's launch that matches the child by its words (or by time) is still the
+     answer, but only a guess; the environment, a valid output file or the sub-agent's meta stay certain. Two providers' names in one environment are told apart only
+     along an owner chain whose every edge is proven: a chain with one edge that is a guess holds the child (`evidence_conflict`) and the middle run keeps its guess.
+ 40b. A record that comes late (a command that ran for minutes: its `CommandExecution` is written when it ends, 135 s after the child started) links the child in the end, even
+     when the board had looked before it came and found nothing.
+ 39a. On macOS `ps` does not say which file a process holds open, so a Codex process cannot be told from any other program by what it has open. A grandchild that carries both
+     providers' names (Claude > codex exec > claude -p) is then not given to the top Claude session as if the environment proved it: it belongs to the codex exec run (the owner chain
+     says so, the Codex names say so) or is held; the one answer that is wrong is the top Claude session as its certain parent.
+ 40c. What only passes the words on starts nothing, however it is written: a script that types them into a window (`tmux send-keys -t w "claude -p \"$1\"" Enter`), the same
+     through `xargs -I{} tmux send-keys ...`, `ssh h echo '...'`, `kubectl exec pod -- tmux send-keys ...`, or the words as an argument of a program that is no launcher
+     (`curl --data claude -p --data "<instruction>" https://...`). What starts a run is a launch as before: `tmux new-session -d 'claude -p "..."'`, `xargs -I{} claude -p "{}"`.
+ 40d. An environment names the thread that ran the call only while that thread's turn is going on: the names a tmux server keeps from a Codex thread that has been over for hours are
+     stale. A child that carries them and was started by another session (`tmux new-window -t w 'claude -p "..."'`) belongs to that session, by its words; never to the old thread.
+ 40e. A Codex thread with a command whose record has not come may be the one that started a child whose words match a Claude call that is still running, when the child's environment
+     names nobody: the Claude link is not certain (a guess, or held).
+ 40f. A Python file that only types the words into a window (`subprocess.run(["tmux", "send-keys", "-t", "w", "claude -p \"%s\"" % sys.argv[1], "Enter"])`, run as
+     `python3 relay.py "<instruction>"`) starts nothing, the same as the shell script of 40c; a Python file that really runs `subprocess.run(["claude", "-p", ...])` is a launch.
+ 40g. A name in the environment that nobody can check is no proof: the id of a Codex thread the index does not have (a new thread not listed yet, or none), and a Claude session whose
+     names a tmux server kept and that had no running call when the child started. The first leaves a Claude call with the same words uncertain (a guess, or held: the child may
+     be the unknown thread's); the second is never the parent, the Codex thread whose record shows the launch is.
+ 40h. The names of a Codex thread also say nothing for a turn other than the one that is going on: a thread that started a tmux server in an earlier turn and now only runs
+     `ls` did not start a child that another session started through that server; the session whose call carries the words is its parent.
+ 41. A `&` call of a Codex shell takes the child down with the call: no record of the run exists, so there is no card, and the launch that has none behind it is an
+     `orphan_launch`.
+ 42. A native sub-agent's state is its own record's (a turn started and not ended: working; `task_complete`: done) as long as its parent's process is there; an
+     `interrupted` the parent wrote after the sub-agent finished changes nothing, one that came while it worked makes it interrupted; a sub-agent whose parent's process is gone
+     with its turn open has ended. The front part of a sub-agent's rollout (the parent's meta, first turn and first user message, up to `subagent_history_start_ordinal`) is
+     the parent's, not the sub-agent's. The first message from the parent's path is a plain forwarding notice (it names the path) beside the instruction itself, which is
+     ciphertext: the instruction is not known, nothing reads the notice as one, and the card's name is the end of the sub-agent's path.
+ 42a. In the parent's record the end of a sub-agent is `SubAgentActivity completed` first and its message to the parent after it: that first message after `completed` is the
+     handback; a report in the middle of the work is a message between agents (`agent_msg`); the same message in the sub-agent's record and in the parent's is one event.
+ 43. A guardian (approval review) thread is no team member: no card. Its tokens are the page's approval-review tokens, and only its: a native sub-agent's are its own card's.
+ 44. A rerun: when the same script is run again with the same command text (the first runs stopped with no report, the brief was fixed, the second runs are new sessions with
+     the same instruction and the same output file, which now names the new `claude -p` run only), the second run is the child of the second command (its call, its start
+     and its title are that command's) and holds the seat of its participant: the period of the seat of the first run is closed (no `seat_tie_held`). The first run's call is the
+     first command or none, never the second; its seat is gone. The output file proves nothing for the first run (it was overwritten). A first run that was closed with
+     `cost-state` and no end of turn, or whose record was cut off, is over either way (`stop`): it does not keep the seat.
 """
 
 import collections
 import os
 
-from .axes import (ABOVE_DOC, COMMON_DOCS, EDIT_DIR, FILE_WAYS, FLAW_VERSION, RESUMABLE, ROUND_DIR, SEAT_LETTERS, WAY, aux_file_exists, launcher_writes, room_coders, room_folder,
-                   room_guide, room_out, room_stem, room_title, room_tree)
+from .axes import (ABOVE_DOC, COMMON_DOCS, EDIT_DIR, FILE_WAYS, FLAW_VERSION, RESUMABLE, ROUND_DIR, SEAT_LETTERS, WAY, CXO_OWN_LAUNCHES, CXO_RELAYS, CXO_TWINS, aux_file_exists, cxo_alive, cxo_hop, cxo_proof,
+                   launcher_writes, room_coders,
+                   room_folder, room_guide, room_out, room_stem, room_title, room_tree)
 
 
 class Truth:
@@ -170,7 +232,8 @@ AFF_CODES = frozenset(('evidence_conflict', 'content_author_differs', 'content_o
 STA_CODES = frozenset(('limit_group', 'not_resumed', 'silent_live', 'torn_lines', 'multi_process', 'format_drift', 'parse_errors', 'stray_notice', 'proc_unknown',
                        'cache_error', 'orphan_launch'))
 DEB_CODES = frozenset(('path_unresolved', 'path_ambiguous', 'alias_collision', 'seat_tie_held', 'debate_in_misc', 'declaration_missing', 'listing_capped', 'orphan_launch'))
-BUNDLE_CODES = {'aff': AFF_CODES, 'sta': STA_CODES, 'deb': DEB_CODES, 'room': DEB_CODES}
+CXO_CODES = frozenset(('orphan_launch', 'format_drift', 'evidence_conflict'))      # a `&` launch that left nothing; a drift that the shapes of this bundle (all valid) never call for; a hold between two providers' names
+BUNDLE_CODES = {'aff': AFF_CODES, 'sta': STA_CODES, 'deb': DEB_CODES, 'room': DEB_CODES, 'cxo': CXO_CODES, 'rer': DEB_CODES}
 
 
 def diag_scope(case):
@@ -748,6 +811,175 @@ def cpl_truth(case):
     return T
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# Codex orchestrator
+# ---------------------------------------------------------------------------------------------------------------------
+CXO_GUARD_CALLS = 3                  # the token records of the guardian thread of the scene
+CXO_SEAT = {'cl': 'A', 'cx': 'B'}    # the debate letter of a participant (`topic=talk`): the `claude -p` run is A, the `codex exec` run B
+
+
+def cxo_sub_state(substate):
+    """(status of the sub-agent, status of its parent sub-agent when it has one) for a native sub-agent after `substate` (rule 42)."""
+    own = {'running': 'running', 'done': 'done', 'int_mid': 'interrupted', 'int_after': 'done', 'parent_gone': 'ended'}[substate]
+    return own, ('running' if substate == 'running' else ('ended' if substate == 'parent_gone' else 'done'))
+
+
+def cxo_sub_events(substate):
+    """The kinds of event the page shows about a native sub-agent: it was spawned, it reported in the middle of its work (a message between agents), and a sub-agent that
+    finished handed its last message back (rules 42, 42a)."""
+    return {'spawn', 'agent_msg', 'handback'} if substate in ('done', 'int_after') else {'spawn', 'agent_msg'}
+
+
+def cxo_truth(case):
+    v = case.v
+    T = Truth()
+    T.set('orch', guardian_calls=CXO_GUARD_CALLS if v['guard'] == 'one' else 0)
+    if v['guard'] == 'one':
+        T.set('guardian', listed='none')                            # rule 43
+    if v['subj'] == 'cx_sub':
+        return _cxo_sub_truth(v, T)
+    if v['chain'] == 'one' and v['how'] == 'bg':
+        T.expect('orphan_launch', 'orch', n=1)                       # rule 41: the call is there, the child is not
+        return T
+    if v['lure'] in CXO_OWN_LAUNCHES or v['env'] == 'stale':
+        # a Claude session starts the child itself (a wrapper that is a launch; the stale names of an old Codex thread come with the tmux server): its words are the proof (rule 38 / 40d)
+        T.set('child', tree='@orchc', node=None, rule_class='certain', page='@orchc', listed='none')
+        T.deny('child', 'tree', '@top')
+        return T
+    if v['lure'] == 'pin_unknown':
+        # the child has the names of a thread the index does not know and a Claude call with the same words is running: that call may be a guess, never the proof (rule 40g)
+        T.deny('child', 'rule_class', 'certain')
+        return T
+    if v['lure'] == 'pin_stale_claude':
+        # a Codex thread's command record shows the launch; the names of the Claude session are what a tmux server kept, and that session had no call running (rule 40g)
+        T.set('child', tree='@top', node=None, rule_class='certain', page='@top', listed='yes', parent=None, status='running')
+        T.deny('child', 'tree', '@orchc')
+        T.expect('evidence_conflict', 'child')                           # the names are dropped because they are stale, and the board says there was a conflict
+        return T
+    if v['lure'] == 'gap' and v['env'] == 'none':
+        # the child is the Codex thread's (started by `tmux new-window`, no names in its environment) and its command has no record yet; a Claude call with the same words is still
+        # running. The board cannot know whose it is: the Claude link may be a guess or held, never certain (rule 40e)
+        T.deny('child', 'rule_class', 'certain')
+        return T
+    if v['lure'] == 'gap':
+        # the child is a Claude session's (its call carries the words) and the page's Codex thread has a command nobody can read yet: the words are a guess now
+        T.set('child', tree='@orchc', node=None, rule_class='guess', page='@orchc', listed='none')
+        T.deny('child', 'tree', '@top')
+        return T
+    hop = cxo_hop(v)
+    certain_hop = cxo_proof(hop)
+    if v['chain'] == 'cl>cx>cl' and v['os'] != 'linux':
+        # rule 39a: the process table cannot say which of its processes is a Codex agent, so the names of both providers prove nothing about the top Claude session
+        T.set('mid', tree='@top', node=None, rule_class='certain', page='@top', listed='yes', parent=None)
+        T.set('child', tree='@mid', rule_class='certain')
+        T.accept('child', 'tree', None)                                  # held is as honest as the codex exec run
+        T.accept('child', 'rule_class', 'none')
+        T.deny('child', 'tree', '@top')
+        return T
+    if v['chain'] == 'cl>cx>cl' and v['edge'] == 'guess':
+        T.set('mid', tree='@top', node=None, rule_class='guess', page='@top', listed='yes', parent=None)      # the run's link to the Claude session is a guess (time and folder)
+        T.set('child', tree=None, rule_class='none', page='@child', listed='none')
+        T.deny('child', 'tree', '@top')
+        T.deny('child', 'tree', '@mid')
+        T.expect('evidence_conflict', 'child')                       # rule 40a: held
+        return T
+    if v['chain'] == 'one':
+        _cxo_first_hop(v, T, 'child', hop)
+        if v['lure'] in CXO_RELAYS:
+            T.deny('child', 'tree', '@relayer')                     # rule 40
+        if v['lure'] in CXO_TWINS:
+            T.deny('child', 'tree', '@orchc')
+        if v['lure'] == 'user_script':
+            T.deny('child', 'tree', '@top')
+            T.allow('orphan_launch', 'orch')                          # the orchestrator's own `codex exec` of the folder, run just before, has no thread behind it: whether it counts is not asked
+        if v['topic'] == 'talk' and certain_hop:
+            _cxo_seat(v, T)
+        return T
+    # a chain: the first hop is a plain foreground call with the names of its provider in the environment (certain); the last hop varies
+    first = {'env': True, 'proc': True, 'content': True}
+    if v['chain'] == 'cx>cl>sub':
+        _cxo_first_hop(v, T, 'mid', first)
+        T.set('child', listed='yes', parent='@mid')                 # the sub-agent of a `claude -p` run hangs under that run on the page of the top (C14)
+        return T
+    _cxo_first_hop(v, T, 'mid', first)
+    # the run below the middle one: its launcher is the middle run, a root thread (no node)
+    if certain_hop:
+        T.set('child', tree='@mid', node=None, rule_class='certain', page='@top', listed='yes', parent='@mid', status='running' if cxo_alive(v) else 'done')
+    else:
+        T.set('child', tree=None, rule_class='none', page='@child', listed='none')
+    T.deny('child', 'tree', '@top')                                 # rule 39: never the top (the names of both providers are in the environment)
+    return T
+
+
+def _cxo_first_hop(v, T, role, hop):
+    """The truth of a run started by a shell call of the top's thread or of a native sub-agent of it (`host`): `role` is the run (a `child`, or the `mid` of a chain)."""
+    on_sub = v['host'] == 'sub'
+    if not cxo_proof(hop):
+        T.set(role, tree=None, rule_class='none', page='@' + role, listed='none')       # nothing says who started it: it stands alone, on a page of its own
+        T.deny(role, 'tree', '@top')
+        return
+    node = '@host' if on_sub and (hop['env'] or hop['out'] or hop['content']) else None       # rule 36 / 38: the environment and the record name the sub-agent; the lineage names the tree only
+    T.set(role, tree='@top', node=node, rule_class='certain', page='@top', listed='yes')
+    if not on_sub:
+        T.set(role, parent=None)
+    elif node:
+        T.set(role, parent='@host')                                              # the card hangs under the sub-agent that started it; unknown node: not asked
+    if role == 'child':
+        T.set(role, status='running' if cxo_alive(v) else 'done')
+
+
+def _cxo_seat(v, T):
+    """The child is a participant of the debate folder `talk` (rule 17-19): the folder is listed, the child sits at its letter of round 1, its cell follows its life."""
+    seat = CXO_SEAT[v['subj']]
+    T.set('listing', units=frozenset(['talk']))
+    T.set('child', unit='talk', round=1, seat=seat, role='writer', placements=place('talk', 1, seat, 'r1'), cell=cell_state('running' if cxo_alive(v) else 'normal_end', v['look'] == 'ended'))
+
+
+def _cxo_sub_truth(v, T):
+    on_sub = v['host'] == 'sub'
+    own, host = cxo_sub_state(v['substate'])
+    sub_tree = '@host' if on_sub else '@top'                       # rule 35
+    T.set('child', tree=sub_tree, node=None, rule_class='certain', page='@top', listed='yes', parent='@host' if on_sub else None, status=own,
+          events=frozenset(cxo_sub_events(v['substate'])), label='ss' if on_sub else 's1', first_user=None)
+    T.deny('child', 'spawn_text', '@root_text')                    # rule 42: the front part is the parent's, the notice is no instruction
+    T.deny('child', 'spawn_text', '@notice')
+    if on_sub:
+        T.set('host', tree='@top', node=None, rule_class='certain', page='@top', listed='yes', parent=None, status=host, label='s1')
+    return T
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# a rerun
+# ---------------------------------------------------------------------------------------------------------------------
+RER_UNIT = 'docs/rev'
+RER_SEAT = {'a': 'A', 'b': 'B'}
+RER_SECOND = {'a': 330.0, 'b': 331.0}                  # when the second commands were called (offsets of the case)
+RER_TITLE = {'a': '@title'}                            # the description of the second command of the `claude -p` participant (a codex exec thread has no title of its own to ask for)
+
+
+def rer_truth(case):
+    """A rerun (rule 44): the same script is run again with the same command text; the first runs stopped without a report, the second runs (new sessions, the same
+    instruction, the same output file, which now names the new `claude -p` run only) wrote theirs.
+      - a second run is the child of the second command: its call is that command, its start and its title are the command's;
+      - it holds the seat of its participant (A, B): the first run's period of the seat closed when the second run took it over, and the seat is not held (`seat_tie_held`);
+      - a first run has no seat now; its call is the first command, or none (the output file proves nothing for it any more: it was overwritten), never the second one.
+    The orchestrator's tree is the tree of all four."""
+    v = case.v
+    T = Truth()
+    T.set('listing', units=frozenset([RER_UNIT]))
+    for x in ('a', 'b'):
+        if x not in v['parts']:
+            continue
+        T.set(x + '2', tree='@orch', call='@call_%s2' % x, start=('T', RER_SECOND[x]), seat=RER_SEAT[x], unit=RER_UNIT, round=1, role='writer',
+              placements=place(RER_UNIT, 1, RER_SEAT[x], 'r1'), cell='done')
+        if x in RER_TITLE:
+            T.set(x + '2', title=RER_TITLE[x])
+        T.set(x + '1', tree='@orch', call='@call_%s1' % x, seat=None, placements=frozenset())
+        T.accept(x + '1', 'call', None)                                      # held is as honest as the first command
+    T.allow('orphan_launch', 'orch')
+    return T
+
+
 class Case_like:
     """Just enough of a Case (a `.v`) for the truth functions."""
 
@@ -765,4 +997,8 @@ def truth(case):
         return deb_truth(case)
     if case.bundle == 'room':
         return room_truth(case)
+    if case.bundle == 'cxo':
+        return cxo_truth(case)
+    if case.bundle == 'rer':
+        return rer_truth(case)
     return cpl_truth(case)

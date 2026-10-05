@@ -26,7 +26,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import compat  # noqa: E402,F401  (puts the repo root first on sys.path)
 
-from tools.scenarios import axes, build, observe, oracle, run  # noqa: E402
+from tools.scenarios import axes, build, cx_record, observe, oracle, run, scene_cxo  # noqa: E402
 from tools.scenarios.axes import AXES, BUNDLES, Case, WAY  # noqa: E402
 from tools.scenarios.observe import MISSING  # noqa: E402
 
@@ -34,6 +34,130 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # A guard against the generator growing without notice, not a speed test: about 15 s on a developer machine, roughly twice that on a
 # shared CI runner. AGENT_BULLPEN_SCENARIO_BUDGET overrides it for a slower machine.
 BUDGET_SEC = float(os.environ.get('AGENT_BULLPEN_SCENARIO_BUDGET') or 60.0)
+
+
+class CodexRecordShapes(unittest.TestCase):
+    """The Codex rollout writer (tools/scenarios/cx_record.py) writes the shapes the real 0.153-0.160 records have (checked against real records; nothing real is stored here)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix='scen-cx-')
+        cid = 'case'
+        cls.cid = cid
+        top_id, sub_id, g_id = (cx_record.tid_of(cid, r) for r in ('top', 'sub', 'guard'))
+        cls.top = top = cx_record.Rollout(cx_record.rollout_path(cls.root, top_id, 1790000000), top_id, '/w/repo', cid, origin='codex-tui')
+        top.meta(1790000000)
+        top.task_started(1790000000.5, 'turn-top')
+        top.user(1790000001, 'Do the work.', 'turn-top')
+        top.shell(1790000002, 'echo hi', '/w/repo', 'call-1', 'turn-top', end=1790000003, out_at=1790000003.05, pid=77)
+        top.shell(1790000004, 'sleep 99', '/w/repo', 'call-2', 'turn-top', end=None, out_at=1790000005, running=True)
+        top.spawn(1790000010, 'call-spawn', 'turn-top', 's1', sub_id, '/root/s1')
+        top.spawn(1790000011, 'call-bad', 'turn-top', 'S 1', sub_id, '/root/s1', ok=False)
+        cls.sub = sub = cx_record.Rollout(cx_record.rollout_path(cls.root, sub_id, 1790000010.06), sub_id, '/w/repo', cid, kind='sub', parent=top_id, agent_path='/root/s1', nick='Atlas',
+                                          depth=1, root_id=top_id)
+        sub.fork(1790000010.06, top, 'turn-top', 'Do the work.', 1790000000)
+        sub.task_started(1790000010.07, 'turn-sub')
+        sub.agent_message(1790000010.2, '/root', '/root/s1', 'Message from /root: your task is in the attached content.', cipher=True, turn='turn-sub')
+        sub.usage(1790000012, 'turn-sub', 100, 10)
+        sub.complete(1790000020, 'turn-sub', 'Done.')
+        top.sub_completed(1790000020.005, 'turn-top', 'turn-sub', sub_id, '/root/s1')
+        top.agent_message(1790000020.01, '/root/s1', '/root', 'Done.', msg_id='m1', turn='turn-top')
+        top.interrupt(1790000030, 'call-int', 'turn-top', sub_id, '/root/s1')
+        cls.guard = g = cx_record.Rollout(cx_record.rollout_path(cls.root, g_id, 1790000005), g_id, '/w/repo', cid, kind='guardian', parent=top_id, root_id=top_id)
+        g.meta(1790000005)
+        for r in (top, sub, g):
+            r.save()
+        cls.lines = {k: _read_lines(r.path) for k, r in (('top', top), ('sub', sub), ('guard', g))}
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def items(self, which, kind):
+        return [d['payload']['item'] for d in self.lines[which] if d['type'] == 'event_msg' and d['payload'].get('type') == 'item_completed' and d['payload']['item']['type'] == kind]
+
+    def test_every_line_has_the_key_order_and_ordinal_of_the_real_ones(self):
+        from board import codex_parse
+        for which, rows in self.lines.items():
+            for i, d in enumerate(rows):
+                self.assertEqual(list(d)[:3], ['timestamp', 'ordinal', 'type'], (which, i))
+                self.assertEqual(d['ordinal'], i)
+        for which in ('top', 'sub'):
+            with open({'top': self.top, 'sub': self.sub}[which].path, 'rb') as f:
+                for raw in f:
+                    self.assertTrue(codex_parse.CX_HEAD_RE.match(raw), raw[:80])      # the board reads lines by their head
+
+    def test_roots_have_a_string_source_and_a_sub_agent_names_its_parent_in_three_places(self):
+        m = self.lines['top'][0]['payload']
+        self.assertEqual((m['source'], m['thread_source'], m['originator']), ('cli', 'user', 'codex-tui'))
+        self.assertNotIn('parent_thread_id', m)
+        s = self.lines['sub'][0]['payload']
+        spawn = s['source']['subagent']['thread_spawn']
+        self.assertEqual((spawn['parent_thread_id'], spawn['depth'], spawn['agent_path']), (self.top.tid, 1, '/root/s1'))
+        self.assertEqual((s['parent_thread_id'], s['thread_source'], s['agent_path'], s['agent_nickname']), (self.top.tid, 'subagent', '/root/s1', 'Atlas'))
+        self.assertEqual(s['session_id'], self.top.tid)                                       # the session is the root's, the id the sub-agent's own
+        self.assertEqual(s['id'], self.sub.tid)
+        g = self.lines['guard'][0]['payload']
+        self.assertEqual((g['source'], g['thread_source'], g['parent_thread_id']), ({'subagent': {'other': 'guardian'}}, 'guardian_review', self.top.tid))
+
+    def test_a_sub_agents_rollout_starts_with_the_front_part_of_its_parent(self):
+        rows = self.lines['sub']
+        n = rows[0]['payload']['subagent_history_start_ordinal']
+        self.assertEqual(n, cx_record.FORK_LINES)
+        front, own = rows[1:n + 1], rows[n + 1:]
+        self.assertEqual([d['ordinal'] for d in front], list(range(1, n + 1)))
+        self.assertEqual(len({d['timestamp'] for d in front + rows[:1]}), 1)                  # every line of it is stamped with the moment of the spawn
+        self.assertEqual(front[0]['type'], 'session_meta')
+        self.assertEqual(front[0]['payload']['id'], self.top.tid)                             # the parent's own meta, not a second meta of the sub-agent
+        self.assertEqual(front[1]['payload']['type'], 'task_started')
+        self.assertEqual(front[1]['payload']['turn_id'], 'turn-top')
+        users = [d for d in front if d['type'] == 'response_item' and d['payload'].get('role') == 'user']
+        self.assertEqual([d['payload']['content'][0]['text'] for d in users], ['Do the work.'])
+        self.assertTrue(users[0]['metadata']['inherited_user_message'])
+        self.assertFalse([d for d in front if 'token' in d['type'] or d['payload'].get('type') == 'token_count'])       # no token count in it
+        self.assertEqual((own[0]['ordinal'], own[0]['payload']['type'], own[0]['payload']['turn_id']), (n + 1, 'task_started', 'turn-sub'))
+        self.assertFalse([d for d in own if d['type'] == 'response_item' and d['payload'].get('role') == 'user'])    # nothing of the sub-agent's own says `user`
+
+    def test_the_first_message_from_the_parent_is_a_notice_beside_ciphertext(self):
+        msgs = [d['payload'] for d in self.lines['sub'] if d['type'] == 'response_item' and d['payload'].get('type') == 'agent_message']
+        first = msgs[0]
+        self.assertEqual((first['author'], first['recipient']), ('/root', '/root/s1'))
+        self.assertEqual([p['type'] for p in first['content']], ['input_text', 'encrypted_content'])
+        self.assertLess(len(first['content'][0]['text']), 80)
+        self.assertIn('/root', first['content'][0]['text'])
+        self.assertTrue(first['content'][1]['encrypted_content'].startswith('gAAAAA'))
+
+    def test_a_command_is_told_once_when_its_process_ends(self):
+        done = self.items('top', 'CommandExecution')
+        self.assertEqual(len(done), 1)                                                       # `sleep 99` is still running: no such line yet
+        c = done[0]
+        self.assertEqual(c['command'], ['/bin/bash', '-lc', 'echo hi'])
+        self.assertEqual((c['cwd'], c['process_id'], c['status'], c['exit_code']), ('file:///w/repo', '77', 'completed', 0))
+        self.assertEqual(set(c['duration']), {'secs', 'nanos'})
+        calls = [d['payload'] for d in self.lines['top'] if d['type'] == 'response_item' and d['payload'].get('type') == 'custom_tool_call']
+        self.assertEqual([x['name'] for x in calls], ['exec', 'exec'])
+        self.assertIn('tools.exec_command(', calls[0]['input'])                              # the JavaScript, which nothing may read as the command
+        outs = [d['payload']['output'][0]['text'] for d in self.lines['top'] if d['type'] == 'response_item' and d['payload'].get('type') == 'custom_tool_call_output']
+        self.assertEqual(outs, ['Script completed', 'Script running with cell ID 7'])
+
+    def test_sub_agent_activity_follows_the_spawn_call_and_the_end_of_the_sub_agent(self):
+        acts = self.items('top', 'SubAgentActivity')
+        self.assertEqual([(a['kind'], a['agent_path']) for a in acts], [('started', '/root/s1'), ('completed', '/root/s1'), ('interrupted', '/root/s1')])     # the failed spawn has none
+        self.assertEqual(acts[0]['id'], 'call-spawn')                                        # the id of the call
+        self.assertEqual(acts[1]['id'], 'subagent-completed-turn-sub')
+        self.assertEqual(acts[2]['id'], 'call-int')
+        calls = [d['payload'] for d in self.lines['top'] if d['type'] == 'response_item' and d['payload'].get('type') == 'function_call' and d['payload']['name'] == 'spawn_agent']
+        self.assertEqual({c['namespace'] for c in calls}, {'collaboration'})
+        self.assertEqual(json.loads(calls[0]['arguments']), {'task_name': 's1', 'message': cx_record.CIPHER})
+        order = [(d['type'], d['payload'].get('type'), (d['payload'].get('item') or {}).get('kind')) for d in self.lines['top']]
+        done = order.index(('event_msg', 'item_completed', 'completed'))
+        self.assertEqual(order[done + 1][:2], ('response_item', 'agent_message'))               # `completed` first, the sub-agent's message after it
+
+    def test_ids_are_made_from_the_case_and_the_role(self):
+        self.assertEqual(cx_record.tid_of('a', 'top'), cx_record.tid_of('a', 'top'))
+        self.assertNotEqual(cx_record.tid_of('a', 'top'), cx_record.tid_of('a', 'sub'))
+        self.assertNotEqual(cx_record.tid_of('a', 'top'), cx_record.tid_of('b', 'top'))
+        self.assertRegex(cx_record.tid_of('a', 'top'), r'^019a[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-8[0-9a-f]{3}-[0-9a-f]{12}$')
 
 
 class OracleIsIndependent(unittest.TestCase):
@@ -241,7 +365,7 @@ class Selection(unittest.TestCase):
     def test_every_pair_of_values_inside_a_bundle_is_covered_or_impossible(self):
         import itertools
         import random
-        for bundle in ('aff', 'deb', 'sta', 'cpl', 'room'):
+        for bundle in ('aff', 'deb', 'sta', 'cpl', 'room', 'cxo'):
             names = run.PAIR_AXES[bundle]
             covered = set()
             for c in (c for c in self.cases if c.bundle == bundle and c.twin_of is None):
@@ -249,8 +373,8 @@ class Selection(unittest.TestCase):
                     covered.add((a, c.v[a], b, c.v[b]))
             rnd = random.Random(11)
             for a, b in itertools.combinations(names, 2):
-                for x in AXES[a]:
-                    for y in AXES[b]:
+                for x in run.pair_values(a):
+                    for y in run.pair_values(b):
                         if (a, x, b, y) in covered:
                             continue
                         # not covered: it must be impossible, i.e. the normaliser folds the pair away in every completion we try
@@ -1811,6 +1935,852 @@ def _when(stamp):
     """Seconds since the epoch of a record's ISO timestamp."""
     import calendar
     return calendar.timegm(time.strptime(stamp[:19], '%Y-%m-%dT%H:%M:%S')) + float('0' + stamp[19:-1])
+
+
+class CodexOrchestratorScenes(unittest.TestCase):
+    """The `cxo` bundle: the scenes are built as the axes say (the files and the process table hold exactly the evidence the oracle counts), and the oracle decides as its rules say."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix='scen-cxo-')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def build(self, **v):
+        c = axes.normalize(Case('cxo', v))
+        return c, build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+
+    def arrive(self, b):
+        """The records that come between the looks are written."""
+        for ph in b.phases:
+            if ph.hook:
+                ph.hook()
+
+    def commands(self, path):
+        return [d['payload']['item'] for d in _read_lines(path) if d['type'] == 'event_msg' and d['payload'].get('type') == 'item_completed'
+                and d['payload']['item']['type'] == 'CommandExecution']
+
+    def launcher_path(self, b):
+        return b.paths['host'] if b.case.v['host'] == 'sub' and 'host' in b.paths else b.paths['top']
+
+    def kid(self, b, phase=-1):
+        """The process of the child in the last look, or None."""
+        want = b.paths.get('child')
+        for p in b.phases[phase].procs:
+            if p['session'] and p['session']['sessionId'] == b.ids.get('child') or (want and want in p['fds'] and p['argv'][:2] == ['codex', 'exec']):
+                return p
+        return None
+
+    def test_the_id_names_only_the_axes_that_are_off_the_baseline_among_the_late_ones(self):
+        c = Case('cxo', {})
+        self.assertEqual(c.id, 'cxo:top=cx_tui;chain=one;subj=cl;host=main;env=codex;how=fg;look=live')
+        self.assertEqual(Case('cxo', {'lure': 'relay'}).id, c.id + ';lure=relay')
+        self.assertEqual(Case('cxo', {'rec': 'late', 'edge': 'guess'}).id, c.id + ';rec=late;edge=guess')
+        for cid in (c.id, Case('cxo', {'chain': 'cl>cx>cl', 'top': 'claude'}).id):
+            self.assertEqual(Case.from_id(cid).id, cid)
+
+    def test_the_chain_names_the_top_and_the_subject_and_impossible_combinations_fold(self):
+        n = lambda **v: axes.normalize(Case('cxo', v)).v                         # noqa: E731
+        self.assertEqual((n(chain='cl>cx>cl')['top'], n(chain='cl>cx>cl')['subj']), ('claude', 'cl'))
+        self.assertEqual(n(chain='cx>cl>sub', top='claude')['top'], 'cx_tui')
+        self.assertEqual(n(chain='cx>cl>sub')['subj'], 'cl_sub')
+        self.assertEqual(n(chain='cx>cx')['subj'], 'cx')
+        self.assertEqual(n(env='both')['env'], 'codex')                         # both providers' names only below a Claude session
+        self.assertEqual(n(chain='cl>cx>cl', env='both')['env'], 'both')
+        self.assertEqual(n(how='bg', look='ended')['look'], 'live')              # a child that died with the call leaves nothing to look at later
+        self.assertEqual(n(rec='lost')['rec'], 'end')                           # a foreground call that is still running has no record yet anyway
+        self.assertEqual(n(rec='late', env='codex')['rec'], 'end')              # a late record matters only where nothing else linked the child before it
+        self.assertEqual(n(rec='late', env='none', look='ended')['rec'], 'late')
+        self.assertEqual(n(subj='cx_sub', substate='parent_gone')['look'], 'ended')
+        self.assertEqual(n(subj='cx_sub', substate='done', how='detach', env='none')['how'], 'fg')
+        self.assertEqual(n(lure='user_script')['env'], 'none')
+        self.assertEqual(n(lure='relay', top='cx_exec')['top'], 'cx_tui')       # the instruction goes into a terminal
+        self.assertEqual(n(lure='gap')['look'], 'ended')
+        self.assertEqual(n(top='claude')['guard'], 'none')
+        self.assertEqual(n(edge='guess')['edge'], 'sure')
+
+    def test_the_command_of_the_call_is_in_the_launchers_record_exactly_when_the_axes_say(self):
+        n = 0
+        for c in (c for c in run.select() if c.bundle == 'cxo' and c.v['subj'] in ('cl', 'cx') and c.v['chain'] == 'one' and c.v['lure'] in ('none', 'twin_orch', 'twin_out') + axes.CXO_RELAYS and c.v['env'] != 'stale'):
+            _, b = self.build(**c.v)
+            self.arrive(b)
+            v = c.v
+            cmds = [x for x in self.commands(self.launcher_path(b)) if b.ids['child_text'] in x['command'][2]]
+            self.assertEqual(len(cmds), 1 if axes.cxo_record(v) or v['how'] == 'bg' and v['rec'] == 'end' else 0, c.id)
+            for x in cmds:
+                self.assertEqual(x['command'][:2], ['/bin/bash', '-lc'], c.id)
+                self.assertEqual(len(x['command']), 3, c.id)
+                self.assertTrue(x['cwd'].startswith('file://'), c.id)
+                self.assertIsInstance(x['process_id'], str, c.id)
+                self.assertIn('claude -p' if v['subj'] == 'cl' else 'codex exec', x['command'][2], c.id)
+                self.assertEqual(x['command'][2].endswith(' &'), v['how'] != 'fg', c.id)
+                self.assertEqual('setsid' in x['command'][2], v['how'] == 'detach', c.id)
+            n += 1
+        self.assertGreater(n, 60)
+
+    def test_a_foreground_call_that_is_still_running_has_no_record_and_an_ampersand_call_has_one_at_once(self):
+        _, b = self.build(how='fg', look='live')
+        calls = [d for d in _read_lines(b.paths['top']) if d['type'] == 'response_item' and d['payload'].get('type') == 'custom_tool_call']
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(self.commands(b.paths['top']), [])
+        outs = [d for d in _read_lines(b.paths['top']) if d['payload'].get('type') == 'custom_tool_call_output']
+        self.assertEqual(outs, [])                                                # the cell has not returned: the child is running
+        _, b = self.build(how='detach', look='live')
+        (x,) = self.commands(b.paths['top'])
+        self.assertLess(x['duration']['secs'], 1)
+        self.assertTrue(self.kid(b))                                               # the child is alive and there is a record already
+
+    def test_the_environment_and_the_lineage_of_the_child_are_what_the_axes_say(self):
+        for how, env in itertools.product(('fg', 'detach'), ('codex', 'none')):
+            _, b = self.build(how=how, env=env, look='live')
+            k = self.kid(b)
+            self.assertEqual(('CODEX_THREAD_ID' in (k['env'] or {}), 'CODEX_SESSION_ID' in (k['env'] or {})), (env == 'codex',) * 2, (how, env))
+            if env == 'codex':
+                self.assertEqual((k['env']['CODEX_THREAD_ID'], k['env']['CODEX_SESSION_ID']), (b.ids['top'], b.ids['top']))
+            self.assertEqual(k['ppid'] == 1, how == 'detach')                    # `setsid` re-parents it
+            self.assertNotIn('CLAUDE_CODE_SESSION_ID', k['env'] or {})
+        _, b = self.build(how='fg', env='codex', host='sub', look='live')
+        k = self.kid(b)
+        self.assertEqual((k['env']['CODEX_THREAD_ID'], k['env']['CODEX_SESSION_ID']), (b.ids['host'], b.ids['top']))      # the sub-agent's shell: its own id, the root's session
+        _, b = self.build(look='ended')
+        self.assertIsNone(self.kid(b))
+
+    def test_both_providers_names_are_in_the_grandchild_only_below_a_claude_session(self):
+        _, b = self.build(chain='cl>cx>cl', env='both', how='detach', look='live')
+        k = self.kid(b)
+        self.assertEqual(k['env']['CLAUDE_CODE_SESSION_ID'], b.ids['top'])
+        self.assertEqual((k['env']['CODEX_THREAD_ID'], k['env']['CODEX_SESSION_ID']), (b.ids['mid'], b.ids['mid']))   # the codex exec run is a root of its own
+        self.assertEqual(k['ppid'], 1)
+        _, b = self.build(chain='cl>cx>cl', env='codex', how='fg', look='live')
+        self.assertNotIn('CLAUDE_CODE_SESSION_ID', self.kid(b)['env'])
+        m = [p for p in b.phases[0].procs if p['argv'][:2] == ['codex', 'exec']]
+        self.assertEqual([p['env']['CLAUDE_CODE_SESSION_ID'] for p in m], [b.ids['top']])      # the codex exec run itself was started by the Claude session
+
+    def test_an_ampersand_call_leaves_no_run_and_no_record_of_one(self):
+        for subj in ('cl', 'cx'):
+            _, b = self.build(subj=subj, how='bg')
+            self.assertNotIn('child', b.paths, subj)
+            (x,) = self.commands(b.paths['top'])
+            self.assertIn('nohup', x['command'][2])
+            self.assertNotIn('setsid', x['command'][2])
+            self.assertEqual([p for p in b.phases[0].procs if p['argv'][:1] in (['claude'],) or p['argv'][:2] == ['codex', 'exec']], [])
+
+    def test_a_relay_is_a_call_of_another_session_that_only_types_the_command(self):
+        for lure in ('relay', 'relay_py'):
+            c, b = self.build(lure=lure, look='ended', how='detach')
+            R = [d for d in _read_lines(b.paths['relayer']) if d['type'] == 'assistant']
+            cmd = R[0]['message']['content'][0]['input']['command']
+            self.assertIn('send-keys', cmd)
+            self.assertTrue(cmd.startswith('tmux') if lure == 'relay' else cmd.startswith('python3 -c'))
+            self.assertIn(b.ids['child_text'], cmd)                                   # the whole command line, with the child's words, is in it
+            self.assertIn('claude -p', cmd)
+            user = [d for d in _read_lines(b.paths['top']) if d['type'] == 'response_item' and d['payload'].get('role') == 'user']
+            self.assertIn(b.ids['child_text'], user[0]['payload']['content'][0]['text'])        # the terminal got the same words
+            self.assertLess(user[0]['timestamp'], iso_of(b.T(0)))                                # the words reach the terminal before the call that carries them out
+            relay_t, child_t = (d['timestamp'] for d in (R[0], _read_lines(b.paths['child'])[0]))
+            self.assertLess(relay_t, child_t)
+            self.assertLess(abs(build_time(child_t) - build_time(relay_t)), 10)        # the call is close enough to the child to be taken for its launch by a reader that does not know better
+            self.assertTrue(os.path.dirname(b.paths['relayer']) == os.path.dirname(b.paths['child']))      # the same repository: the folder refutes nothing
+
+    def test_two_orchestrators_of_one_folder_start_a_child_each_with_the_same_words(self):
+        _, b = self.build(lure='twin_orch', look='ended')
+        child, twin = (_read_lines(b.paths[r])[0]['message']['content'] for r in ('child', 'twin'))
+        self.assertEqual(child, twin)
+        C = [d for d in _read_lines(b.paths['orchc']) if d['type'] == 'assistant']
+        self.assertIn(child, C[0]['message']['content'][0]['input']['command'])
+        _, b = self.build(lure='twin_orch', look='live', how='fg', env='codex')
+        kids = [p for p in b.phases[0].procs if p['argv'][:2] == ['claude', '-p']]
+        self.assertEqual(len(kids), 2)
+        self.assertEqual({'CODEX_THREAD_ID' in (p['env'] or {}) for p in kids}, {True, False})      # one names Codex, one names the Claude session
+
+    def test_an_output_file_that_names_the_child_decides_between_two_launches_with_the_same_words(self):
+        for how in ('fg', 'detach'):
+            c, b = self.build(lure='twin_out', look='ended', how=how, env='none')
+            (x,) = [x for x in self.commands(b.paths['top']) if b.ids['child_text'] in x['command'][2]]
+            out = os.path.join(b.scratch, 'out_x.json')
+            self.assertIn('--output-format json', x['command'][2])
+            self.assertIn('> %s' % out, x['command'][2])
+            with open(out) as f:
+                self.assertEqual(json.load(f)['session_id'], b.ids['child'])                # the file holds the session id of the child that was started by this call
+            with open(os.path.join(b.scratch, 'out_c.json')) as f:
+                self.assertEqual(json.load(f)['session_id'], b.ids['twin'])                 # and the other launch's file the id of its own
+            t = oracle.truth(c).subjects['child']
+            self.assertEqual((t['tree'], t['rule_class']), ('@top', 'certain'), how)       # it ranks above the words, so nothing is held
+        c, b = self.build(lure='twin_out', look='live', how='detach', env='none')
+        with open(os.path.join(b.scratch, 'out_x.json')) as f:
+            self.assertEqual(f.read(), '')                                                  # the run is not over: the file is empty
+        self.assertEqual(oracle.truth(c).subjects['child']['tree'], None)                   # nothing names the child but the words, which tie
+        self.assertEqual(self.truth(lure='twin_out', look='live', how='detach', env='codex').subjects['child']['tree'], '@top')    # the environment
+
+    def test_a_script_runs_codex_exec_with_no_orchestrator_behind_it(self):
+        _, b = self.build(lure='user_script', look='live')
+        k = self.kid(b)
+        self.assertEqual(k['env'], {})
+        self.assertNotIn(k['ppid'], (300, 301))
+        calls = [x['command'][2] for x in self.commands(b.paths['top'])]
+        self.assertTrue(all(b.ids['child_text'] not in c for c in calls))        # no call of the orchestrator carries the words of that thread
+        self.assertEqual(len(calls), 1)                                          # but it did run another `codex exec` in the same folder just before
+        self.assertIn('codex exec', calls[0])
+
+    def test_a_command_nobody_can_read_yet_is_an_exec_cell_that_returned_running(self):
+        _, b = self.build(lure='gap')
+        rows = _read_lines(b.paths['top'])
+        outs = [d['payload']['output'][0]['text'] for d in rows if d['payload'].get('type') == 'custom_tool_call_output']
+        self.assertEqual(outs, ['Script running with cell ID 7'])
+        self.assertEqual(self.commands(b.paths['top']), [])
+        self.assertFalse([d for d in rows if d['payload'].get('type') == 'task_complete'])      # and its turn is still open
+        C = [d for d in _read_lines(b.paths['orchc']) if d['type'] == 'assistant']
+        self.assertIn(b.ids['child_text'], C[0]['message']['content'][0]['input']['command'])
+
+    def test_the_middle_run_is_linked_by_a_guess_when_the_call_reads_its_words_from_a_file(self):
+        _, b = self.build(chain='cl>cx>cl', env='both', how='detach', look='live', edge='guess')
+        O = [d for d in _read_lines(b.paths['top']) if d['type'] == 'assistant']
+        launch = [x['message']['content'][0]['input']['command'] for x in O if 'codex exec' in x['message']['content'][0]['input'].get('command', '')]
+        self.assertEqual(len(launch), 1)
+        self.assertIn('$(cat', launch[0])
+        self.assertNotIn(b.ids['mid_text'], launch[0])
+        written = [x for x in O if x['message']['content'][0]['name'] == 'Write']
+        self.assertEqual(written, [])                                              # no record shows the file being written
+        with open(re.search(r'\$\(cat ([^)]+)\)', launch[0]).group(1)) as f:
+            self.assertEqual(f.read(), b.ids['mid_text'])
+        self.assertEqual([p for p in b.phases[0].procs if p['argv'][:2] == ['codex', 'exec']], [])      # the middle run is gone: only the child lives, below init
+        _, b = self.build(chain='cl>cx>cl', env='both', how='detach', look='live')
+        launch = [x['message']['content'][0]['input']['command'] for x in [d for d in _read_lines(b.paths['top']) if d['type'] == 'assistant']
+                  if 'codex exec' in x['message']['content'][0]['input'].get('command', '')]
+        self.assertIn(b.ids['mid_text'], launch[0])
+
+    def test_a_record_that_comes_late_is_written_between_the_two_looks(self):
+        c, b = self.build(rec='late', env='none', look='ended')
+        self.assertEqual(len(b.phases), 2)
+        self.assertEqual([p['argv'][:2] for p in b.phases[0].procs], [['codex', '-m']])      # the first look: the child runs where the board cannot see it
+        child_path = b.paths['child']
+        self.assertEqual(self.commands(b.paths['top']), [])
+        self.assertFalse(_cost_state(child_path))                                  # the child is not over in the first look's files
+        self.assertGreater(b.phases[1].now - b.phases[0].now, 120)
+        self.arrive(b)
+        (x,) = self.commands(b.paths['top'])
+        self.assertIn(b.ids['child_text'], x['command'][2])
+        self.assertGreater(x['duration']['secs'], 100)                           # a run of two minutes: the record is written at its end
+        self.assertTrue(_cost_state(child_path))
+        self.assertEqual(len(b.phases[0].procs), 1)
+
+    def test_a_native_sub_agent_has_the_front_part_of_its_parent_and_its_own_turn(self):
+        c, b = self.build(subj='cx_sub', substate='done')
+        rows = _read_lines(b.paths['child'])
+        n = rows[0]['payload']['subagent_history_start_ordinal']
+        self.assertEqual(rows[0]['payload']['source']['subagent']['thread_spawn']['parent_thread_id'], b.ids['top'])
+        users = [d for d in rows[1:n + 1] if d['type'] == 'response_item' and d['payload'].get('role') == 'user']
+        self.assertEqual([u['payload']['content'][0]['text'] for u in users], [b.ids['root_text']])      # the parent's instruction is in the front part, not the sub-agent's
+        own = rows[n + 1:]
+        self.assertFalse([d for d in own if d['type'] == 'response_item' and d['payload'].get('role') == 'user'])
+        first = next(d['payload'] for d in own if d['payload'].get('type') == 'agent_message')
+        self.assertEqual([p['type'] for p in first['content']], ['input_text', 'encrypted_content'])
+        self.assertEqual(first['content'][0]['text'], b.ids['notice'])
+        self.assertNotIn(b.ids['root_text'], first['content'][0]['text'])
+        self.assertEqual(c.v['top'], 'cx_tui')
+        # a sub-agent of a sub-agent: the front part carries the first sub-agent's view, and its parent is the first sub-agent
+        c, b = self.build(subj='cx_sub', host='sub', substate='done')
+        rows = _read_lines(b.paths['child'])
+        self.assertEqual(rows[0]['payload']['parent_thread_id'], b.ids['host'])
+        self.assertEqual(rows[0]['payload']['source']['subagent']['thread_spawn']['depth'], 2)
+        self.assertEqual(rows[0]['payload']['agent_path'], '/root/s1/ss')
+        self.assertEqual(rows[0]['payload']['session_id'], b.ids['top'])
+
+    def test_how_a_sub_agent_ends_is_what_the_substate_says(self):
+        def ends(**v):
+            c, b = self.build(subj='cx_sub', **v)
+            parent = _read_lines(b.paths['host'] if c.v['host'] == 'sub' else b.paths['top'])
+            sub = _read_lines(b.paths['child'])
+            acts = [(d['payload']['item']['kind']) for d in parent if d['type'] == 'event_msg' and d['payload'].get('type') == 'item_completed'
+                    and d['payload']['item']['type'] == 'SubAgentActivity']
+            own = [d['payload'].get('type') for d in sub if d['type'] == 'event_msg']
+            return acts, own, b
+        acts, own, b = ends(substate='running')
+        self.assertEqual((acts, 'task_complete' in own, 'turn_aborted' in own), (['started'], False, False))
+        self.assertEqual([p['argv'][0] for p in b.phases[0].procs], ['codex'])
+        acts, own, _ = ends(substate='done')
+        self.assertEqual((acts, 'task_complete' in own), (['started', 'completed'], True))
+        acts, own, _ = ends(substate='int_after')
+        self.assertEqual((acts, 'task_complete' in own), (['started', 'completed', 'interrupted'], True))      # the interrupt comes after it finished
+        acts, own, _ = ends(substate='int_mid')
+        self.assertEqual((acts, 'task_complete' in own, 'turn_aborted' in own), (['started', 'interrupted'], False, True))
+        acts, own, b = ends(substate='parent_gone')
+        self.assertEqual((acts, 'task_complete' in own), (['started'], False))
+        self.assertEqual(b.phases[0].procs, [])                                  # its parent's process is gone, its own turn still open
+
+    def test_the_parent_records_completed_first_and_the_message_after_it_and_a_report_in_the_middle_is_a_message_too(self):
+        _, b = self.build(subj='cx_sub', substate='done')
+        rows = _read_lines(b.paths['top'])
+        kinds = [(d['payload'].get('item') or {}).get('kind') if d['type'] == 'event_msg' else d['payload'].get('type') for d in rows if d['type'] in ('event_msg', 'response_item')]
+        i = kinds.index('completed')
+        self.assertEqual(kinds[i + 1], 'agent_message')
+        msgs = [d['payload'] for d in rows if d['payload'].get('type') == 'agent_message']
+        self.assertEqual(len(msgs), 2)                                           # the report of the middle of the work, and the last message
+        self.assertTrue(all(m['author'] == '/root/s1' and m['recipient'] == '/root' for m in msgs))
+        sub_msgs = [d['payload'] for d in _read_lines(b.paths['child']) if d['payload'].get('type') == 'agent_message']
+        self.assertEqual({m['id'] for m in sub_msgs[1:]}, {m['id'] for m in msgs})  # the same messages are in the sub-agent's rollout, with the same ids
+        self.assertTrue(all(m['internal_chat_message_metadata_passthrough']['turn_id'] for m in msgs))
+
+    def test_a_guardian_is_a_thread_beside_the_team_with_calls_of_its_own(self):
+        _, b = self.build(subj='cx_sub', guard='one', substate='done')
+        g = _read_lines(b.paths.get('guardian') or [p for p in glob_rollouts(b) if b.ids['guardian'] in p][0])
+        self.assertEqual(g[0]['payload']['source'], {'subagent': {'other': 'guardian'}})
+        self.assertEqual(g[0]['payload']['thread_source'], 'guardian_review')
+        self.assertEqual(sum(1 for d in g if d['type'] == 'token_usage_record'), oracle.CXO_GUARD_CALLS)
+        sub = _read_lines(b.paths['child'])
+        self.assertGreater(sum(1 for d in sub if d['type'] == 'token_usage_record'), 0)      # the sub-agent has calls too: they are not the guardian's
+
+    def test_a_participant_of_a_debate_folder_is_told_its_file_or_writes_it_with_the_launch(self):
+        _, b = self.build(topic='talk', subj='cl', look='ended')
+        self.assertTrue(os.path.isfile(os.path.join(b.work, 'repo', 'talk', 'brief.md')))
+        self.assertIn(os.path.join(b.work, 'repo', 'talk', 'r1', 'A.md'), _read_lines(b.paths['child'])[0]['message']['content'])
+        self.assertTrue(os.path.isfile(os.path.join(b.work, 'repo', 'talk', 'r1', 'A.md')))
+        _, b = self.build(topic='talk', subj='cx', look='ended')
+        (x,) = self.commands(b.paths['top'])
+        self.assertIn(' -o %s' % os.path.join(b.work, 'repo', 'talk', 'r1', 'B.md'), x['command'][2])
+        self.assertTrue(os.path.isfile(os.path.join(b.work, 'repo', 'talk', 'r1', 'B.md')))
+        _, b = self.build(topic='talk', subj='cl', look='live')
+        self.assertFalse(os.path.exists(os.path.join(b.work, 'repo', 'talk', 'r1')))
+
+    def test_a_claude_sub_agent_of_a_claude_run_below_a_codex_page(self):
+        _, b = self.build(chain='cx>cl>sub', look='live')
+        meta = glob_files(os.path.dirname(b.paths['mid']), 'agent-*.meta.json')
+        self.assertEqual(len(meta), 1)
+        self.assertTrue(b.ids['child'].startswith('a') and len(b.ids['child']) == 17)
+        mid = _read_lines(b.paths['mid'])
+        self.assertTrue([d for d in mid if d['type'] == 'assistant' and d['message']['content'][-1].get('name') == 'Agent'])
+
+    def test_a_call_that_ends_with_ampersand_leaves_no_run_in_any_chain(self):
+        for chain in ('one', 'cl>cx>cl', 'cx>cl>sub', 'cx>cx'):
+            v = axes.normalize(Case('cxo', dict(chain=chain, how='bg', look='live'))).v
+            if chain == 'one':
+                self.assertEqual((v['how'], v['look']), ('bg', 'live'), chain)       # no child is made: an orphan launch
+            else:
+                self.assertNotEqual(v['how'], 'bg', chain)                           # the Codex shell's `&` call takes the child down with the call: there is nothing to put in a chain
+        _, b = self.build(chain='cl>cx>cl', env='codex', how='bg', look='live')
+        self.assertEqual(self.truth(chain='cl>cx>cl', env='codex', how='bg', look='live').subjects['child']['status'], 'running')   # the case that is left is the detached one
+        self.assertIsNotNone(self.kid(b))
+        for c in run.select():
+            if c.bundle == 'cxo' and c.v['chain'] != 'one':
+                self.assertNotEqual(c.v['how'], 'bg', c.id)
+
+    def test_the_new_values_fold_to_what_can_be(self):
+        n = lambda **v: axes.normalize(Case('cxo', v)).v                         # noqa: E731
+        s = n(env='stale', how='fg', look='ended', host='sub', top='cx_exec')
+        self.assertEqual((s['env'], s['how'], s['look'], s['host'], s['subj'], s['chain']), ('stale', 'detach', 'live', 'main', 'cl', 'one'))
+        self.assertEqual(n(env='stale', chain='cx>cx')['env'], 'codex')           # the names of an old thread need a child another session started
+        self.assertEqual(n(env='stale', subj='cx')['env'], 'codex')
+        self.assertEqual(n(env='stale', lure='relay')['env'], 'codex')
+        self.assertEqual(n(os='mac')['os'], 'linux')                             # the process table of macOS matters where both providers' names are in a grandchild
+        self.assertEqual(n(os='mac_nops', chain='cl>cx>cl', env='both', look='live')['os'], 'mac')
+        self.assertEqual(n(os='mac', chain='cl>cx>cl', env='both', look='ended')['os'], 'linux')
+        self.assertEqual(n(os='mac', chain='cl>cx>cl', env='codex', look='live')['os'], 'linux')
+        g = n(lure='gap', env='none', look='ended', how='fg', rec='lost')
+        self.assertEqual((g['look'], g['how'], g['env']), ('live', 'detach', 'none'))         # a child that is still running, started by `tmux new-window`
+        g = n(lure='gap', env='both', look='live')
+        self.assertEqual((g['look'], g['how'], g['env']), ('ended', 'fg', 'codex'))           # the older gap case
+        self.assertEqual((n(lure='launch_tmux')['env'], n(lure='launch_tmux')['how']), ('none', 'detach'))
+        self.assertEqual((n(lure='launch_xargs')['env'], n(lure='launch_xargs')['how']), ('codex', 'fg'))
+        for lure in axes.CXO_RELAYS:
+            r = n(lure=lure, top='cx_exec', how='bg', subj='cx', host='sub')
+            self.assertEqual((r['top'], r['subj'], r['host'], r['how']), ('cx_tui', 'cl', 'main', 'detach'), lure)
+        self.assertEqual(n(chain='cx>cl>sub', env='stale')['env'], 'codex')
+        w = n(lure='stale_turn', env='none', how='fg', look='ended', host='sub', top='cx_exec')
+        self.assertEqual((w['env'], w['how'], w['look'], w['host'], w['top']), ('stale', 'detach', 'live', 'main', 'cx_exec'))
+        for lure, how in (('pin_unknown', 'fg'), ('pin_stale_claude', 'detach')):
+            p = n(lure=lure, env='codex', how='bg', look='ended', host='sub')
+            self.assertEqual((p['env'], p['how'], p['look'], p['host'], p['subj']), ('none', how, 'live', 'main', 'cl'), lure)
+        self.assertEqual((n(lure='launch_pyfile')['env'], n(lure='launch_pyfile')['how']), ('codex', 'fg'))
+        for c in run.select():
+            if c.bundle == 'cxo' and c.core and c.twin_of is None:
+                self.assertNotEqual(c.v['env'], 'stale')                              # a value that came later is not in the pairwise cover: the older cover is as it was
+        self.assertEqual(run.pair_values('env'), ['codex', 'both', 'none'])
+
+    def test_every_way_of_passing_the_words_on_is_a_call_of_a_session_that_starts_nothing(self):
+        for lure in ('relay_pyfile', 'relay_script', 'relay_xargs', 'relay_ssh', 'relay_kube', 'relay_curl'):
+            c, b = self.build(lure=lure, look='ended', how='detach', env='none')
+            calls = [d['message']['content'][0]['input']['command'] for d in _read_lines(b.paths['relayer']) if d['type'] == 'assistant'
+                     and d['message']['content'][0]['name'] == 'Bash']
+            cmd = calls[-1]
+            self.assertIn(b.ids['child_text'], cmd, lure)                                 # the words are in the call, whole
+            self.assertNotIn('nohup', cmd)
+            self.assertNotIn('setsid', cmd)
+            if lure == 'relay_script':
+                self.assertTrue(cmd.startswith('bash %s "' % os.path.join(b.scratch, 'relay.sh')))
+                self.assertEqual(len(calls), 2)                                           # the script is written by an earlier call, so its body can be read
+                self.assertIn('cat > ', calls[0])
+                with open(os.path.join(b.scratch, 'relay.sh')) as f:
+                    body = f.read()
+                self.assertIn('tmux send-keys -t w "claude -p', body)
+                self.assertNotIn(b.ids['child_text'], body)                               # the script holds `$1`, not the words
+            elif lure == 'relay_pyfile':
+                self.assertTrue(cmd.startswith('python3 %s "' % os.path.join(b.scratch, 'relay.py')))
+                self.assertEqual(len(calls), 2)                                           # the file is written by an earlier call, so its source can be read
+                with open(os.path.join(b.scratch, 'relay.py')) as f:
+                    body = f.read()
+                self.assertIn('"send-keys"', body)
+                self.assertIn('sys.argv[1]', body)
+                self.assertNotIn(b.ids['child_text'], body)                               # the file holds the argument, not the words
+            elif lure == 'relay_xargs':
+                self.assertIn("xargs -I{} tmux send-keys -t {} 'claude -p \"%s\"' Enter" % b.ids['child_text'], cmd)
+            elif lure == 'relay_ssh':
+                self.assertTrue(cmd.startswith("ssh h echo 'claude -p \""))
+            elif lure == 'relay_kube':
+                self.assertTrue(cmd.startswith("kubectl exec pod -- tmux send-keys -t w 'claude -p \""))
+            else:
+                self.assertTrue(cmd.startswith('curl --data claude -p --data "'))
+                self.assertTrue(cmd.endswith('https://example.invalid'))
+            self.assertEqual(self.commands(b.paths['top'])[0]['command'][2].count('claude -p'), 1)    # the real launch is the Codex thread's own, after the words arrived
+            t = oracle.truth(c).subjects['child']
+            self.assertEqual(t['tree'], '@top', lure)
+            self.assertIn(('child', 'tree', '@relayer'), oracle.truth(c).forbid, lure)
+            self.assertEqual(oracle.truth(axes.normalize(Case('cxo', dict(lure=lure, look='ended', how='detach', env='none', rec='lost')))).subjects['child']['tree'], None)
+
+    def test_a_wrapper_that_is_a_launch_is_the_sessions_own_launch(self):
+        for lure, look in (('launch_tmux', 'ended'), ('launch_tmux', 'live'), ('launch_xargs', 'live'), ('launch_xargs', 'ended')):
+            c, b = self.build(lure=lure, look=look)
+            cmds = [d['message']['content'][0]['input']['command'] for d in _read_lines(b.paths['orchc']) if d['type'] == 'assistant']
+            self.assertEqual(len(cmds), 1, lure)
+            if lure == 'launch_tmux':
+                self.assertIn("tmux new-session -d -s w 'claude -p --model", cmds[0])
+            else:
+                self.assertIn('| xargs -I{} claude -p --model', cmds[0])
+                self.assertIn('"{}"', cmds[0])
+            cmd = cmds[0]
+            self.assertIn(b.ids['child_text'], cmd)
+            top = _read_lines(b.paths['top'])
+            self.assertTrue([d for d in top if d['payload'].get('type') == 'task_complete'])      # the Codex thread of the page is quiet: no command of it is still to come
+            t = oracle.truth(c).subjects['child']
+            self.assertEqual((t['tree'], t['rule_class'], t['page'], t['listed']), ('@orchc', 'certain', '@orchc', 'none'))
+            self.assertIn(('child', 'tree', '@top'), oracle.truth(c).forbid)
+            k = self.kid(b) if look == 'live' else None
+            if look == 'live':
+                self.assertEqual('CLAUDE_CODE_SESSION_ID' in k['env'], lure == 'launch_xargs')      # the tmux server's child has no names, the xargs child has the session's
+
+    def test_stale_names_come_from_a_codex_thread_whose_turn_ended_hours_before_the_child(self):
+        c, b = self.build(env='stale')
+        k = self.kid(b)
+        self.assertEqual((k['env']['CODEX_THREAD_ID'], k['env']['CODEX_SESSION_ID']), (b.ids['top'], b.ids['top']))
+        self.assertEqual(k['ppid'], 1)                                                    # the tmux server's child
+        top = _read_lines(b.paths['top'])
+        done = [d for d in top if d['payload'].get('type') == 'task_complete']
+        self.assertEqual(len(done), 1)
+        self.assertGreater(b.T(0) - build_time(done[0]['timestamp']), 7000)                # the turn ended two hours before
+        cmds = [d['message']['content'][0]['input']['command'] for d in _read_lines(b.paths['orchc']) if d['type'] == 'assistant']
+        self.assertIn("tmux new-window -t w 'claude -p --model", cmds[0])
+        self.assertIn(b.ids['child_text'], cmds[0])
+        self.assertEqual(self.commands(b.paths['top']), [])                                # nothing of the old thread started the child
+        t = oracle.truth(c)
+        self.assertEqual((t.subjects['child']['tree'], t.subjects['child']['rule_class']), ('@orchc', 'certain'))
+        self.assertIn(('child', 'tree', '@top'), t.forbid)
+
+    def test_a_child_nobody_names_beside_a_codex_command_without_a_record_and_a_running_claude_call(self):
+        c, b = self.build(lure='gap', env='none')
+        self.assertEqual(c.v['look'], 'live')
+        rows = _read_lines(b.paths['top'])
+        outs = [d['payload']['output'][0]['text'] for d in rows if d['payload'].get('type') == 'custom_tool_call_output']
+        self.assertEqual(outs, ['Script running with cell ID 7'])
+        self.assertEqual(self.commands(b.paths['top']), [])                                # the command that started the child has no record yet
+        call = [d['payload']['input'] for d in rows if d['payload'].get('type') == 'custom_tool_call'][0]
+        self.assertIn('tmux new-window -t w', call)
+        self.assertIn(b.ids['child_text'].replace('"', '\\"'), call.replace('\\\\', '\\'))
+        k = self.kid(b)
+        self.assertEqual((k['env'], k['ppid']), ({}, 1))                                   # no names of Codex, none of Claude, nobody above it
+        claude = [d for d in _read_lines(b.paths['orchc']) if d['type'] == 'assistant']
+        self.assertIn(b.ids['child_text'], claude[0]['message']['content'][0]['input']['command'])
+        self.assertEqual(len([d for d in _read_lines(b.paths['orchc']) if d['type'] == 'user' and d.get('toolUseResult')]), 0)      # the Claude call is still running
+        t = oracle.truth(c)
+        self.assertEqual(t.subjects.get('child'), None)
+        self.assertEqual(t.forbid, [('child', 'rule_class', 'certain')])
+        older = oracle.truth(axes.normalize(Case('cxo', dict(lure='gap')))).subjects['child']
+        self.assertEqual((older['tree'], older['rule_class']), ('@orchc', 'guess'))        # the other gap case is as it was
+
+    def test_on_macos_the_process_table_cannot_tell_a_codex_process_and_the_top_claude_session_is_never_the_certain_parent(self):
+        c, b = self.build(chain='cl>cx>cl', env='both', how='fg', look='live', os='mac')
+        self.assertEqual(c.v['os'], 'mac')
+        k = self.kid(b)
+        self.assertEqual(k['env']['CLAUDE_CODE_SESSION_ID'], b.ids['top'])
+        self.assertEqual([p['fds'] for p in b.phases[0].procs if p['argv'][:2] == ['codex', 'exec']], [[b.paths['mid']]])      # the table has them; the observer's `ps` stand-in does not show them
+        t = oracle.truth(c)
+        self.assertEqual((t.subjects['child']['tree'], t.subjects['child']['rule_class']), ('@mid', 'certain'))
+        self.assertEqual(t.accepted[('child', 'tree')], {None})                           # held is as honest as the codex exec run
+        self.assertEqual(t.accepted[('child', 'rule_class')], {'none'})
+        self.assertIn(('child', 'tree', '@top'), t.forbid)
+        self.assertEqual(t.subjects['mid']['tree'], '@top')
+        lin = oracle.truth(axes.normalize(Case('cxo', dict(chain='cl>cx>cl', env='both', how='fg', look='live'))))
+        self.assertEqual(lin.accepted, {})                                                # on Linux the lineage settles it: no other answer is as good
+
+    def test_a_blind_thread_in_the_same_tree_does_not_take_the_node_of_a_launch_its_record_shows(self):
+        c, b = self.build(host='sub', env='none', how='detach', look='ended')
+        top = _read_lines(b.paths['top'])
+        self.assertFalse([d for d in top if d['payload'].get('type') == 'task_complete'])     # the root's turn is still going: a thread whose commands the board cannot know yet
+        launch = [x for x in self.commands(b.paths['host']) if b.ids['child_text'] in x['command'][2]]
+        self.assertEqual(len(launch), 1)                                                   # the sub-agent's own record shows the launch
+        t = oracle.truth(c).subjects['child']
+        self.assertEqual((t['tree'], t['node'], t['rule_class']), ('@top', '@host', 'certain'))      # decision K2: the node is certain
+
+    def test_a_python_file_that_only_types_the_words_is_a_relay_and_one_that_runs_claude_is_a_launch(self):
+        c, b = self.build(lure='relay_pyfile', look='ended', how='detach', env='none')
+        self.assertIn('relay_pyfile', axes.CXO_RELAYS)
+        with open(os.path.join(b.scratch, 'relay.py')) as f:
+            body = f.read()
+        self.assertIn('subprocess.run(["tmux", "send-keys", "-t", "w", "claude -p \\"%s\\"" % sys.argv[1], "Enter"])', body)
+        self.assertNotIn(b.ids['child_text'], body)                                       # the file holds `sys.argv[1]`, not the words
+        calls = [d['message']['content'][0]['input']['command'] for d in _read_lines(b.paths['relayer']) if d['type'] == 'assistant']
+        self.assertEqual(len(calls), 2)
+        self.assertIn('cat > ', calls[0])                                                 # an earlier call writes the file, so its body can be read
+        self.assertEqual(calls[1], 'python3 %s "%s"' % (os.path.join(b.scratch, 'relay.py'), b.ids['child_text']))
+        t = oracle.truth(c)
+        self.assertEqual(t.subjects['child']['tree'], '@top')
+        self.assertIn(('child', 'tree', '@relayer'), t.forbid)
+        c, b = self.build(lure='launch_pyfile', look='ended')
+        with open(os.path.join(b.scratch, 'launch.py')) as f:
+            body = f.read()
+        self.assertIn('subprocess.run(["claude", "-p", "--model", ', body)               # it really runs claude
+        self.assertTrue(b.ids['child_text'] in [d['message']['content'][0]['input']['command'] for d in _read_lines(b.paths['orchc']) if d['type'] == 'assistant'][-1])
+        t = oracle.truth(c).subjects['child']
+        self.assertEqual((t['tree'], t['rule_class']), ('@orchc', 'certain'))
+
+    def test_the_names_of_a_thread_the_index_does_not_have_leave_a_claude_call_with_the_same_words_uncertain(self):
+        c, b = self.build(lure='pin_unknown')
+        k = self.kid(b)
+        ghost = k['env']['CODEX_THREAD_ID']
+        self.assertEqual(k['env']['CODEX_SESSION_ID'], ghost)
+        self.assertEqual(k['ppid'], 1)
+        self.assertNotIn('CLAUDE_CODE_SESSION_ID', k['env'])                              # only the unknown thread's names, nobody above it
+        self.assertNotIn(ghost, ' '.join(glob_rollouts(b)))                               # no rollout of that thread
+        self.assertNotIn(ghost, (b.ids['top'], b.ids.get('mid'), b.ids.get('host')))
+        calls = [d for d in _read_lines(b.paths['orchc']) if d['type'] == 'assistant']
+        self.assertIn(b.ids['child_text'], calls[0]['message']['content'][0]['input']['command'])
+        self.assertEqual([d for d in _read_lines(b.paths['orchc']) if d.get('toolUseResult')], [])      # the Claude call is still running
+        self.assertTrue([d for d in _read_lines(b.paths['top']) if d['payload'].get('type') == 'task_complete'])      # no turn of the page's thread is open: nothing else to blame
+        t = oracle.truth(c)
+        self.assertEqual((t.subjects.get('child'), t.forbid), (None, [('child', 'rule_class', 'certain')]))
+
+    def test_the_names_a_tmux_server_kept_from_a_claude_session_do_not_make_it_the_parent(self):
+        c, b = self.build(lure='pin_stale_claude')
+        k = self.kid(b)
+        p = [q for q in b.phases[0].procs if q['session'] and q['session']['sessionId'] == b.ids['orchc']][0]
+        self.assertEqual((k['env']['CLAUDE_CODE_SESSION_ID'], k['env']['CLAUDE_PID']), (b.ids['orchc'], str(p['pid'])))     # the pin is valid: the process is alive and holds that session
+        self.assertEqual(k['ppid'], 1)
+        pr = [d for d in _read_lines(b.paths['orchc']) if d['type'] == 'assistant']
+        calls = [d for d in pr if d['message']['content'][0].get('name') == 'Bash']
+        self.assertEqual(len(calls), 1)
+        self.assertLess(build_time(calls[0]['timestamp']), b.T(0) - 7000)                    # its only call ended hours before the child started: nothing is running
+        self.assertEqual([x['command'][2] for x in self.commands(b.paths['top']) if "tmux new-window -t w 'claude -p" in x['command'][2]].__len__(), 1)    # the record of the Codex thread shows the launch
+        t = oracle.truth(c).subjects['child']
+        self.assertEqual((t['tree'], t['rule_class'], t['page']), ('@top', 'certain', '@top'))
+        self.assertIn(('child', 'tree', '@orchc'), oracle.truth(c).forbid)
+        self.assertIn(('evidence_conflict', 'child'), oracle.truth(c).diag)                # the stale names are dropped with a diagnostic
+
+    def test_the_names_of_a_codex_thread_from_an_earlier_turn_say_nothing_for_the_turn_that_is_going_on(self):
+        c, b = self.build(lure='stale_turn')
+        self.assertEqual(c.v['env'], 'stale')
+        rows = _read_lines(b.paths['top'])
+        starts = [d for d in rows if d['payload'].get('type') == 'task_started']
+        done = [d for d in rows if d['payload'].get('type') == 'task_complete']
+        self.assertEqual((len(starts), len(done)), (2, 1))                                 # the earlier turn is over, the one that is going on is open
+        cmds = self.commands(b.paths['top'])
+        self.assertEqual([x['command'][2] for x in cmds], ['tmux new-session -d -s w', 'ls', 'ls'])      # the server in the earlier turn, only `ls` now
+        calls = [d for d in rows if d['payload'].get('type') == 'custom_tool_call']
+        self.assertEqual(len(calls), len(cmds))                                            # every command has its record: no gap
+        # the commands of the turn that is going on are all over before the child starts: each call has its output and its CommandExecution, every one of them before t0
+        t0 = b.T(scene_cxo.CHILD_START)
+        outs = {d['payload']['call_id'] for d in rows if d['payload'].get('type') == 'custom_tool_call_output'}
+        self.assertEqual({d['payload']['call_id'] for d in calls}, outs)
+        for d in calls:
+            self.assertLess(build_time(d['timestamp']), t0 - 50, d['payload']['call_id'])
+        for d in rows:
+            if d['payload'].get('type') in ('custom_tool_call_output', 'item_completed'):
+                self.assertLess(build_time(d['timestamp']), t0 - 50)
+        self.assertEqual(len([d for d in rows if (d['payload'].get('item') or {}).get('type') == 'CommandExecution']), len(calls))
+        self.assertEqual([d for d in rows if d['payload'].get('type') == 'custom_tool_call_output' and 'running' in d['payload']['output'][0]['text']], [])      # nothing is still running
+        second = [x for x in cmds if x['command'][2] == 'ls']
+        self.assertTrue(all(build_time(d['timestamp']) > b.T(-300) for d in rows if d['payload'].get('item', {}).get('command', [None, None, ''])[2] == 'ls'))
+        self.assertEqual(len(second), 2)
+        k = self.kid(b)
+        self.assertEqual((k['env']['CODEX_THREAD_ID'], k['env']['CODEX_SESSION_ID']), (b.ids['top'], b.ids['top']))
+        t = oracle.truth(c).subjects['child']
+        self.assertEqual((t['tree'], t['rule_class']), ('@orchc', 'certain'))
+        self.assertIn(('child', 'tree', '@top'), oracle.truth(c).forbid)
+
+    def test_the_whole_selection_of_the_bundle_builds_and_each_case_has_its_scene(self):
+        n = 0
+        for c in (c for c in run.select() if c.bundle == 'cxo'):
+            _, b = self.build(**c.v)
+            self.assertTrue(b.main_path and os.path.isfile(b.main_path), c.id)
+            self.assertIn(b.meta['page'], ('claude', 'codex'), c.id)
+            self.assertEqual(b.meta['page'] == 'claude', c.v['top'] == 'claude', c.id)
+            self.assertTrue(b.phases, c.id)
+            n += 1
+        self.assertGreater(n, 200)
+
+    # ---- the oracle ----
+    def truth(self, **v):
+        return oracle.truth(axes.normalize(Case('cxo', v)))
+
+    def test_the_environment_and_the_lineage_decide_between_two_launches_with_the_same_words(self):
+        t = self.truth(lure='twin_orch', how='fg', look='live', env='none')              # the lineage names the Codex orchestrator
+        self.assertEqual((t.subjects['child']['tree'], t.subjects['child']['rule_class']), ('@top', 'certain'))
+        t = self.truth(lure='twin_orch', how='detach', look='live', env='codex')         # the environment does
+        self.assertEqual(t.subjects['child']['tree'], '@top')
+        for v in (dict(how='detach', look='live', env='none'), dict(how='fg', look='ended', env='codex'), dict(how='detach', look='ended', env='none')):
+            t = self.truth(lure='twin_orch', **v)                                        # only the words: a tie, held
+            self.assertEqual((t.subjects['child']['tree'], t.subjects['child']['rule_class']), (None, 'none'), v)
+            self.assertIn(('child', 'tree', '@top'), t.forbid)
+        self.assertIn(('child', 'tree', '@orchc'), self.truth(lure='twin_orch', look='ended').forbid)
+
+    def test_a_relay_and_a_script_link_nothing_to_the_session_or_the_script(self):
+        for lure in ('relay', 'relay_py'):
+            t = self.truth(lure=lure, how='detach', look='ended')
+            self.assertEqual(t.subjects['child']['tree'], '@top')                       # the record of the call is the proof; the relayer is never the parent
+            self.assertIn(('child', 'tree', '@relayer'), t.forbid)
+            t = self.truth(lure=lure, how='detach', look='ended', rec='lost')
+            self.assertEqual(t.subjects['child']['tree'], None)
+            self.assertIn(('child', 'tree', '@relayer'), t.forbid)
+        t = self.truth(lure='user_script', look='live')
+        self.assertEqual((t.subjects['child']['tree'], t.subjects['child']['page']), (None, '@child'))
+        self.assertIn(('orphan_launch', 'orch'), t.allowed)                          # the orchestrator's own `codex exec` of the same folder has no child behind it: not asked
+
+    def test_the_node_comes_from_the_environment_and_the_record_and_not_from_the_lineage(self):
+        v = dict(host='sub', how='fg', look='live')
+        self.assertEqual(self.truth(env='codex', **v).subjects['child']['node'], '@host')       # the one place an environment names a node
+        t = self.truth(env='none', **v).subjects['child']                                       # the lineage alone: the tree, certain, and no node
+        self.assertEqual((t['tree'], t['node'], t['rule_class']), ('@top', None, 'certain'))
+        self.assertNotIn('parent', t)
+        self.assertEqual(self.truth(env='none', host='sub', how='fg', look='ended').subjects['child']['node'], '@host')     # the record names it
+        self.assertEqual(self.truth(host='main').subjects['child']['node'], None)
+
+    def test_a_child_with_no_evidence_stands_alone_and_a_record_that_never_comes_is_none(self):
+        t = self.truth(how='detach', look='ended', env='none', rec='lost').subjects['child']
+        self.assertEqual((t['tree'], t['page'], t['listed']), (None, '@child', 'none'))
+        t = self.truth(how='detach', look='live', env='none', rec='lost').subjects['child']
+        self.assertEqual(t['tree'], None)                                              # setsid took it from the lineage, no environment, no record
+        t = self.truth(how='detach', look='live', env='codex', rec='lost').subjects['child']
+        self.assertEqual(t['tree'], '@top')
+        t = self.truth(how='fg', look='live', env='none').subjects['child']
+        self.assertEqual((t['tree'], t['status']), ('@top', 'running'))
+        t = self.truth(rec='late', env='none', look='ended').subjects['child']
+        self.assertEqual((t['tree'], t['status'], t['rule_class']), ('@top', 'done', 'certain'))      # in the end
+
+    def test_an_ampersand_call_is_an_orphan_launch_and_has_no_card(self):
+        t = self.truth(how='bg')
+        self.assertEqual(t.diag, [('orphan_launch', 'orch')])
+        self.assertEqual(t.diag_params[('orphan_launch', 'orch')], {'n': 1})
+        self.assertNotIn('child', t.subjects)
+
+    def test_both_providers_names_never_make_the_top_claude_session_the_parent_of_the_grandchild(self):
+        for env in ('codex', 'both', 'none'):
+            t = self.truth(chain='cl>cx>cl', env=env, how='fg', look='live')
+            self.assertEqual((t.subjects['child']['tree'], t.subjects['child']['parent']), ('@mid', '@mid'), env)
+            self.assertIn(('child', 'tree', '@top'), t.forbid, env)
+            self.assertEqual(t.subjects['mid']['tree'], '@top')
+        t = self.truth(chain='cl>cx>cl', env='both', how='detach', look='live', edge='guess')
+        self.assertEqual((t.subjects['child']['tree'], t.subjects['child']['listed']), (None, 'none'))
+        self.assertEqual(t.subjects['mid']['rule_class'], 'guess')
+        self.assertIn(('evidence_conflict', 'child'), t.diag)
+        self.assertEqual({r for _, r, _ in t.forbid}, {'tree'})
+
+    def test_a_guess_for_the_other_launcher_when_a_codex_thread_has_a_command_nobody_can_read(self):
+        t = self.truth(lure='gap').subjects['child']
+        self.assertEqual((t['tree'], t['rule_class'], t['listed'], t['page']), ('@orchc', 'guess', 'none', '@orchc'))
+
+    def test_the_state_of_a_sub_agent_follows_its_record_and_its_parents_process(self):
+        want = {'running': 'running', 'done': 'done', 'int_mid': 'interrupted', 'int_after': 'done', 'parent_gone': 'ended'}
+        for sc, st in want.items():
+            self.assertEqual(self.truth(subj='cx_sub', substate=sc).subjects['child']['status'], st, sc)
+        t = self.truth(subj='cx_sub', host='sub', substate='parent_gone').subjects
+        self.assertEqual((t['child']['status'], t['host']['status']), ('ended', 'ended'))
+        t = self.truth(subj='cx_sub', host='sub', substate='int_mid').subjects
+        self.assertEqual((t['child']['status'], t['host']['status']), ('interrupted', 'done'))
+
+    def test_a_sub_agents_instruction_is_not_known_and_its_card_is_named_by_the_end_of_its_path(self):
+        t = self.truth(subj='cx_sub', host='sub', substate='done')
+        self.assertEqual((t.subjects['child']['label'], t.subjects['host']['label']), ('ss', 's1'))
+        self.assertIsNone(t.subjects['child']['first_user'])
+        self.assertEqual({(f, v) for _, f, v in t.forbid}, {('spawn_text', '@root_text'), ('spawn_text', '@notice')})
+        self.assertEqual(t.subjects['child']['tree'], '@host')                         # a sub-agent below a sub-agent: its parent is that sub-agent; its page is the top
+        self.assertEqual((t.subjects['child']['page'], t.subjects['child']['parent']), ('@top', '@host'))
+        self.assertEqual(self.truth(subj='cx_sub', substate='done').subjects['child']['events'], {'spawn', 'agent_msg', 'handback'})
+        self.assertEqual(self.truth(subj='cx_sub', substate='int_mid').subjects['child']['events'], {'spawn', 'agent_msg'})
+
+    def test_the_guardian_has_no_card_and_only_its_own_calls_are_the_approval_review(self):
+        t = self.truth(guard='one', subj='cx_sub', substate='done')
+        self.assertEqual(t.subjects['guardian'], {'listed': 'none'})
+        self.assertEqual(t.subjects['orch']['guardian_calls'], oracle.CXO_GUARD_CALLS)
+        self.assertEqual(self.truth(subj='cx_sub').subjects['orch']['guardian_calls'], 0)      # a sub-agent's calls are its own card's
+
+    def test_the_debate_seat_of_a_participant_follows_its_life_and_needs_a_link(self):
+        t = self.truth(topic='talk', subj='cl', look='live').subjects['child']
+        self.assertEqual((t['unit'], t['round'], t['seat'], t['cell']), ('talk', 1, 'A', 'writing'))
+        t = self.truth(topic='talk', subj='cx', look='ended').subjects['child']
+        self.assertEqual((t['seat'], t['cell']), ('B', 'done'))
+        t = self.truth(topic='talk', subj='cl', how='detach', look='ended', env='none', rec='lost').subjects['child']
+        self.assertNotIn('seat', t)                                                     # a run nothing links has no place in the page's debates
+
+    def test_the_observer_reads_the_ownership_graph_when_the_board_has_one_and_the_older_tables_when_it_has_not(self):
+        links = types.SimpleNamespace(owner_of=lambda g: {'parent': 'T', 'node': 'N', 'kind': 'cli', 'rule': 'env', 'certain': True} if g == 'x' else None)
+        self.assertEqual(observe.owner_info(links, 'x'), {'tree': 'T', 'node': 'N', 'certain': True})
+        self.assertIsNone(observe.owner_info(links, 'y'))
+        links = types.SimpleNamespace(owner_of=lambda g: {'parent': 'T', 'node': None, 'kind': 'sub', 'rule': 'subagent', 'certain': False})
+        self.assertEqual(observe.owner_info(links, 'x'), {'tree': 'T', 'node': None, 'certain': False})
+        old = types.SimpleNamespace(cli_owners={'c': {'sid': 'S', 'rule': 'content', 'node': 'a1'}}, owners={'t': {'sid': 'S2', 'rule': 'time'}})
+        self.assertEqual(observe.owner_info(old, 'c'), {'tree': 'S', 'node': 'a1', 'certain': True})
+        got = observe.owner_info(old, 't')
+        self.assertEqual((got['tree'], got['node'], got['certain']), ('S2', MISSING, False))
+        self.assertIsNone(observe.owner_info(old, 'z'))
+
+    def test_the_screen_parent_is_a_claim_when_it_is_none(self):
+        self.assertEqual(run.grade('parent', None, None), 'pass')
+        self.assertEqual(run.grade('parent', None, MISSING), 'miss')                 # not emitting it is a miss: None says "under the orchestrator"
+        self.assertEqual(run.grade('parent', 'x', None), 'wrong')
+        self.assertEqual(run.grade('parent', None, 'x'), 'wrong')
+        self.assertEqual(run.grade('parent', 'x', MISSING), 'miss')
+
+
+def iso_of(t):
+    return build.iso(t)
+
+
+def build_time(stamp):
+    import calendar
+    return calendar.timegm(time.strptime(stamp[:19], '%Y-%m-%dT%H:%M:%S')) + float(stamp[19:-1] or 0)
+
+
+def _cost_state(path):
+    return [d for d in _read_lines(path) if d.get('type') == 'cost-state']
+
+
+def glob_rollouts(b):
+    out = []
+    for d, _, fs in os.walk(os.path.join(b.codex, 'sessions')):
+        out += [os.path.join(d, f) for f in fs if f.startswith('rollout-')]
+    return out
+
+
+def glob_files(folder, pattern):
+    import fnmatch
+    out = []
+    for d, _, fs in os.walk(folder):
+        out += [os.path.join(d, f) for f in fs if fnmatch.fnmatch(f, pattern)]
+    return out
+
+
+class RerunScenes(unittest.TestCase):
+    """The `rer` bundle: the same script is run again after the participants stopped, with the same command text; new sessions, the same instruction, the same output file."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix='scen-rer-')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def build(self, **v):
+        c = axes.normalize(Case('rer', v))
+        return c, build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+
+    def bash_calls(self, b):
+        return [d['message']['content'][-1] for d in _read_lines(b.paths['orch']) if d['type'] == 'assistant' and d['message']['content'][-1].get('name') == 'Bash']
+
+    def test_the_id_and_the_selection(self):
+        self.assertEqual(Case('rer', {}).id, 'rer:parts=ab;stop=cost')
+        ids = {c.id for c in run.select() if c.bundle == 'rer'}
+        self.assertEqual(ids, {'rer:parts=%s;stop=%s' % (p, s) for p in AXES['parts'] for s in AXES['stop']})
+        for cid in ids:
+            self.assertEqual(Case.from_id(cid).id, cid)
+
+    def test_the_same_command_text_starts_the_participants_twice_with_one_instruction(self):
+        c, b = self.build(parts='ab')
+        calls = self.bash_calls(b)
+        self.assertEqual(len(calls), 4)
+        cmds = [x['input']['command'] for x in calls]
+        self.assertEqual(cmds[0], cmds[2])                                                 # the same command text, called again after the brief was fixed
+        self.assertEqual(cmds[1], cmds[3])
+        self.assertTrue(cmds[0].endswith('$R/run_claude.sh mpd-A opus') and cmds[0].startswith('R='))
+        self.assertTrue(cmds[1].endswith('$R/run_codex.sh mpd-B sol'))
+        self.assertEqual([x['input']['description'] for x in calls], ['Start participant A', 'Start participant B', 'Start participant A again after the brief fix',
+                                                                       'Start participant B again after the brief fix'])
+        self.assertTrue(all(x['input'].get('run_in_background') for x in calls))
+        first, second = _read_lines(b.paths['a1'])[0], _read_lines(b.paths['a2'])[0]
+        self.assertEqual(first['message']['content'], second['message']['content'])        # the same instruction
+        self.assertNotEqual(first['sessionId'], second['sessionId'])                        # a new session
+        self.assertNotIn('forkedFrom', second)
+        self.assertNotIn('--resume', ' '.join(cmds))
+        t1 = [d['payload']['content'][0]['text'] for d in _read_lines(b.paths['b1']) if d['payload'].get('role') == 'user']
+        t2 = [d['payload']['content'][0]['text'] for d in _read_lines(b.paths['b2']) if d['payload'].get('role') == 'user']
+        self.assertEqual(t1, t2)
+        self.assertIn(os.path.join(b.work, 'repo', 'docs', 'rev', 'r1', 'A.md'), first['message']['content'])
+        self.assertNotEqual(b.ids['a1'], b.ids['a2'])
+        self.assertNotEqual(b.ids['b1'], b.ids['b2'])
+        self.assertEqual(len({b.ids['call_a1'], b.ids['call_a2'], b.ids['call_b1'], b.ids['call_b2']}), 4)
+
+    def test_the_orchestrator_wrote_the_scripts_and_the_instruction_files_and_the_output_file_names_the_new_run(self):
+        c, b = self.build(parts='ab')
+        writes = [d['message']['content'][-1]['input'] for d in _read_lines(b.paths['orch']) if d['type'] == 'assistant' and d['message']['content'][-1].get('name') == 'Write']
+        names = sorted(os.path.basename(w['file_path']) for w in writes)
+        self.assertEqual(names, ['mpd-A.txt', 'mpd-B.txt', 'run_claude.sh', 'run_codex.sh'])
+        script = next(w for w in writes if w['file_path'].endswith('run_claude.sh'))
+        self.assertIn('claude -p --model "$2" --output-format json "$(cat ', script['content'])
+        self.assertIn('/out/$1.json', script['content'])                                    # every run redirects its result to a file named after the participant
+        out = os.path.join(b.scratch, 'mpd', 'out', 'mpd-A.json')
+        with open(out) as f:
+            self.assertEqual(json.load(f)['session_id'], b.ids['a2'])                        # overwritten by the second run: the first run's id is gone
+        edits = [d for d in _read_lines(b.paths['orch']) if d['type'] == 'assistant' and d['message']['content'][-1].get('name') == 'Edit']
+        self.assertEqual(len(edits), 1)                                                     # the brief was fixed between the runs
+        t_edit = build_time(edits[0]['timestamp'])
+        calls = [build_time(d['timestamp']) for d in _read_lines(b.paths['orch']) if d['type'] == 'assistant' and d['message']['content'][-1].get('name') == 'Bash']
+        self.assertEqual([c_ < t_edit for c_ in calls], [True, True, False, False])
+        for x in ('A', 'B'):
+            self.assertTrue(os.path.isfile(os.path.join(b.work, 'repo', 'docs', 'rev', 'r1', x + '.md')))      # the second runs wrote their reports
+
+    def test_the_first_runs_stop_without_a_report_in_the_way_the_axis_says(self):
+        c, b = self.build(parts='ab', stop='cost')
+        self.assertEqual(len([d for d in _read_lines(b.paths['a1']) if d.get('type') == 'cost-state']), 1)
+        self.assertFalse([d for d in _read_lines(b.paths['a1']) if d.get('type') == 'assistant' and d['message'].get('stop_reason') == 'end_turn'])     # no end of turn
+        self.assertEqual([d['payload']['type'] for d in _read_lines(b.paths['b1']) if d['payload'].get('type') == 'turn_aborted'], ['turn_aborted'])
+        c, b = self.build(parts='ab', stop='cut')
+        self.assertEqual([d for d in _read_lines(b.paths['a1']) if d.get('type') == 'cost-state'], [])               # the record just stops
+        self.assertEqual([d for d in _read_lines(b.paths['b1']) if d['payload'].get('type') in ('turn_aborted', 'task_complete')], [])
+        for x in ('a1', 'b1'):
+            rows = _read_lines(b.paths[x])
+            self.assertLess(build_time(rows[-1]['timestamp']) - build_time(rows[0]['timestamp']), 130)              # about two minutes
+
+    def test_only_the_chosen_participants_are_run(self):
+        _, b = self.build(parts='a')
+        self.assertEqual({r for r in b.ids if r in ('a1', 'a2', 'b1', 'b2')}, {'a1', 'a2'})
+        self.assertEqual(len(self.bash_calls(b)), 2)
+        _, b = self.build(parts='b')
+        self.assertEqual({r for r in b.ids if r in ('a1', 'a2', 'b1', 'b2')}, {'b1', 'b2'})
+        self.assertEqual(len(self.bash_calls(b)), 2)
+
+    def test_the_truth_gives_the_seat_to_the_new_run_and_the_call_of_the_old_one_is_the_first_command(self):
+        for parts in AXES['parts']:
+            t = oracle.truth(axes.normalize(Case('rer', {'parts': parts})))
+            for x in ('a', 'b'):
+                if x not in parts:
+                    self.assertNotIn(x + '2', t.subjects)
+                    continue
+                new, old = t.subjects[x + '2'], t.subjects[x + '1']
+                self.assertEqual((new['call'], new['seat'], new['unit'], new['round'], new['cell']), ('@call_%s2' % x, x.upper(), 'docs/rev', 1, 'done'), (parts, x))
+                self.assertEqual(new['placements'], oracle.place('docs/rev', 1, x.upper(), 'r1'))
+                self.assertEqual((old['call'], old['seat'], old['placements']), ('@call_%s1' % x, None, frozenset()))
+                self.assertEqual(t.accepted[(x + '1', 'call')], {None})                       # none is as honest as the first command; the second command is wrong
+            self.assertEqual(t.diag, [])                                                       # no `seat_tie_held`
+        t = oracle.truth(axes.normalize(Case('rer', {})))
+        self.assertEqual(t.subjects['a2']['title'], '@title')
+        self.assertEqual(t.subjects['a2']['start'], ('T', 330.0))
+        self.assertEqual(t.subjects['b2']['start'], ('T', 331.0))
+        self.assertEqual(run.grade('call', '@x', '@y'), 'wrong')
+
+    def test_a_seat_that_is_held_is_a_diagnostic_the_truth_does_not_expect(self):
+        c = axes.normalize(Case('rer', {}))
+        t = oracle.truth(c)
+        self.assertIn('seat_tie_held', oracle.diag_scope(c))                                  # graded: an entry the truth does not expect is wrong
+        self.assertNotIn(('seat_tie_held', 'a1'), t.diag)
 
 
 class BundleScenes(unittest.TestCase):

@@ -237,6 +237,23 @@ def ancestors(pid, limit=64):
     return out
 
 
+def chain(pid, limit=64):
+    """([ancestors of pid, nearest first], complete): complete is True when the parents were followed up to the init process (nothing in the table was missing on the way: a process that
+    was started detached has init for its parent and is complete), False when a parent could not be read, the chain went round in a circle or was cut at `limit`."""
+    out, seen = [], {pid}
+    p = ppid(pid)
+    while True:
+        if p is None:
+            return out, False
+        if p <= 1:
+            return out, True
+        if p in seen or len(out) >= limit:
+            return out, False
+        out.append(p)
+        seen.add(p)
+        p = ppid(p)
+
+
 def starttime(pid):
     """starttime in /proc/<pid>/stat (clock ticks since boot, the 22nd value). The same as the value Claude Code writes to procStart in the session file.
     Without /proc (macOS) there is nothing to compare, so None."""
@@ -280,12 +297,19 @@ def argv(pid):
     return cmd.split() if cmd else None
 
 
-def pid_ns():
-    """Marker of this process's pid namespace (`pid:[4026531836]`). None if it cannot be read."""
+def pid_ns(pid=None):
+    """Marker of a process's pid namespace (`pid:[4026531836]`; this process's when no pid is given). None if it cannot be read (another user's process, none, no /proc)."""
+    if pid is not None and not _ok_pid(pid):
+        return None
     try:
-        return os.readlink('%s/self/ns/pid' % PROC)
+        return os.readlink('%s/%s/ns/pid' % (PROC, 'self' if pid is None else pid))
     except OSError:
         return None
+
+
+def is_codex_argv(argv_):
+    """Whether a command line (a list of bytes) is the codex executable itself: `codex`, `codex.js`, or that file opened as the first argument by a launcher such as node."""
+    return _is_codex_bin(argv_ or [])
 
 
 def _is_codex_bin(argv_):

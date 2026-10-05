@@ -16,6 +16,7 @@ is_event = lambda x: all(k in x for k in ('kind', 'from', 'to', 'title'))       
 API_SNAP_ALLOW = [
     ('event title_i18n / title_is_default / questions', lambda x, endpoint, path: is_event(x), ('title_i18n', 'title_is_default', 'questions')),
     ('notify event status', lambda x, endpoint, path: is_event(x) and x['kind'] == 'notify', ('status',)),     # agents[].status is an old field of another object
+    ('event text_i18n', lambda x, endpoint, path: is_event(x), ('text_i18n',)),                                  # a body the server wrote itself (the spawn of a Codex sub-agent: its instruction is ciphertext), with the key the page words it from
     ('alert title_i18n / text_i18n', lambda x, endpoint, path: all(k in x for k in ('level', 'title', 'id', 'ts')), ('title_i18n', 'text_i18n')),
     ('alert title_params (the grouped limit notice)', lambda x, endpoint, path: all(k in x for k in ('level', 'title', 'id', 'ts')), ('title_params',)),
     ('tokens model_costs', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'tokens' and 'models' in x, ('model_costs',)),
@@ -23,7 +24,7 @@ API_SNAP_ALLOW = [
     # /api/state: what each agent says about how it stopped and where it hangs, how sure its link is, the orchestrator waiting on a limit, the count of diagnostics
     ('agent reason / resets_at / node / by / parent / runs / work_units', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'agents[]' and 'tokens' in x and 'status' in x,
      ('reason', 'resets_at', 'node', 'by', 'parent', 'runs', 'work_units')),
-    ('agent link rule_class / incomplete / assumed / tree', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'link' and 'rule' in x and 'certain' in x, ('rule_class', 'incomplete', 'assumed', 'tree')),
+    ('agent link rule_class / incomplete / assumed / tree', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'link' and 'rule' in x and 'certain' in x, ('rule_class', 'incomplete', 'assumed', 'tree', 'parent_kind')),
     ('orch resets_at / auto (limit_wait)', lambda x, endpoint, path: path == '/orch' and 'state' in x and 'tokens' in x, ('resets_at', 'auto')),
     ('state diag', lambda x, endpoint, path: path == '' and 'orch' in x and 'agents' in x and 'session' in x, ('diag',)),
     # a topic that is a work room (people working together in a folder, no debate shape): which kind of room, and the instruction file it was recognised from

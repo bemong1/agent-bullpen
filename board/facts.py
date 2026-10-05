@@ -21,7 +21,9 @@ from typing import Any, Dict, List, Optional, Tuple
 # ---------------------------------------------------------------------------------------------------------------------
 # Enumerations (tuples, so a test can check membership and a table can iterate them in a fixed order)
 # ---------------------------------------------------------------------------------------------------------------------
-NODE_ID_RE = re.compile(r'a[0-9a-f]{16}')            # a sub-agent id; the main session has no node (None)
+NODE_ID_RE = re.compile(r'a[0-9a-f]{16}')            # a Claude sub-agent id; the main session has no node (None)
+CX_NODE_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')      # a Codex sub-agent: the thread id of the sub-agent
+ANY_NODE_RE = re.compile(NODE_ID_RE.pattern + '|' + CX_NODE_RE.pattern)      # the node of a relation of either provider (NODE_ID_RE alone stays Claude's: runstate and diag read it)
 
 RULE_CLASSES = ('certain', 'guess', 'none')
 RULES = ('subagent', 'out', 'env', 'proc', 'file', 'content', 'content_short', 'time', 'cache')

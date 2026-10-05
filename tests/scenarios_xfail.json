@@ -1,7 +1,14 @@
 {
 "version": 1,
 "about": "Red cells of tools/scenarios today: every one is expected to stay red until the board is fixed, and fails the test if it turns green or changes. cells[case][\"subject.field\"] = [result, what the truth wants, what the board shows, reason id]. Regenerate with python3 -m tools.scenarios.run --write-xfail.",
-"reasons": {},
+"reasons": {
+ "X-DEBATE": {
+  "module": "units/debates",
+  "text": "A still-running foreground `codex exec` sits in no debate yet: its CommandExecution (with `-o`) is written only when the process ends, so its report path is not known until then (the plan's limit: JS is not interpreted)."
+ }
+},
 "cells": {
+"cxo:top=cx_exec;chain=one;subj=cx;host=main;env=codex;how=fg;look=live;topic=talk": {"child.cell":["miss","writing",null,"X-DEBATE"],"child.placements":["miss",["talk|1|B|r1/B"],[],"X-DEBATE"],"child.role":["miss","writer","none","X-DEBATE"],"child.round":["miss",1,null,"X-DEBATE"],"child.seat":["miss","B",null,"X-DEBATE"],"child.unit":["miss","talk",null,"X-DEBATE"]},
+"cxo:top=cx_tui;chain=one;subj=cx;host=main;env=codex;how=fg;look=live;topic=talk": {"child.cell":["miss","writing",null,"X-DEBATE"],"child.placements":["miss",["talk|1|B|r1/B"],[],"X-DEBATE"],"child.role":["miss","writer","none","X-DEBATE"],"child.round":["miss",1,null,"X-DEBATE"],"child.seat":["miss","B",null,"X-DEBATE"],"child.unit":["miss","talk",null,"X-DEBATE"]}
 }
 }

@@ -281,14 +281,28 @@ class EnvLineage(Fixture):
     def test_codex_environment_beats_prompt_rule(self):
         prompt = 'Investigate the failing build and write a short report about what you found, thanks'
         self.parent(Q, [bash_line(T0, 'cd /w && codex exec -m x "%s"' % prompt, '/w', tid='toolu_c')])
-        self.parent()
+        self.parent(P, [bash_line(T0 - 1, 'cd /w && codex exec -m x "$(cat /tmp/p.md)"', '/w', tid='toolu_p')])      # P ran a `codex exec` too (its words are in a file nobody saw)
         path = self.rollout(user=prompt)
         self.assertEqual(self.scan().owners[TID]['sid'], Q)                      # for comparison
         self.proc.add(100, 1, ['claude'])
         self.session_file(100, P, entrypoint='cli')
         self.codex_proc(104, 1, path)
         set_env(self.proc, 104, P, 100)
-        self.assertEqual(self.scan().owners[TID]['sid'], P)
+        self.assertEqual(self.scan().owners[TID]['sid'], P)                      # the environment names the session that ran one: it decides
+
+    def test_codex_environment_of_a_session_that_ran_nothing_does_not_beat_a_launch_that_fits(self):
+        """The names of P are what a tmux server carried on from P's shell: P ran no `codex exec` (and its record is whole) while Q's call fits the thread's words, so they are not about it."""
+        prompt = 'Investigate the failing build and write a short report about what you found, thanks'
+        self.parent(Q, [bash_line(T0, 'cd /w && codex exec -m x "%s"' % prompt, '/w', tid='toolu_c')])
+        self.parent()
+        path = self.rollout(user=prompt)
+        self.proc.add(100, 1, ['claude'])
+        self.session_file(100, P, entrypoint='cli')
+        self.codex_proc(104, 1, path)
+        set_env(self.proc, 104, P, 100)
+        L = self.scan()
+        self.assertEqual((L.owners[TID]['sid'], L.owners[TID]['rule']), (Q, 'prompt'))
+        self.assertIn(('evidence_conflict', P), [(d['code'], d.get('other')) for d in L.diags if d['subject'] == TID])
 
     def test_secrets_are_never_kept_or_printed(self):
         self.detached()

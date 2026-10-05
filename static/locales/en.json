@@ -736,6 +736,7 @@
     "event.orch_ask.title": "Question",
     "event.user_answer.title": "Answer",
     "event.spawn_cli.title": "Claude Code run",
+    "event.encrypted.text": "The instruction is encrypted in the record, so it cannot be shown.",
     "event.notify.done": "Done",
     "event.notify.failed": "Failed",
     "event.notify.killed": "Stopped",

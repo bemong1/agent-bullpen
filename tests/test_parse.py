@@ -113,7 +113,7 @@ class CodexTool(unittest.TestCase):
         self.assertEqual(server.codex_tool(js)[0], 'apply_patch')
 
     def test_plain(self):
-        self.assertEqual(server.codex_tool('console.log(1)'), ('exec', 'console.log(1)'))
+        self.assertEqual(server.codex_tool('console.log(1)'), ('exec', ''))      # no tool and no literal: the name only, never a line of the JS
 
 
 class Tokens(unittest.TestCase):

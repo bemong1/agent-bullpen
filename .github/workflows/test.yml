@@ -75,6 +75,11 @@ jobs:
         env:
           REQUIRE_FIXTURES: '1'
         run: node tools/regress/state_checks.js static "$RUNNER_TEMP/fx/synth"
+      # The page of a Codex orchestrator (its sub-agents, the claude -p and codex exec runs it started, the encrypted spawn body), from the third fixture (synth_codex_*)
+      - name: Codex orchestrator page
+        env:
+          REQUIRE_FIXTURES: '1'
+        run: node tools/regress/codex_checks.js static "$RUNNER_TEMP/fx/synth"
       - name: Keep the snapshot when a check fails
         if: failure()
         uses: actions/upload-artifact@v4

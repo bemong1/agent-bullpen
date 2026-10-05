@@ -23,7 +23,7 @@ When one Claude Code session starts sub-agents, `claude -p` runs and Codex runs,
 - **Conversations**: you ↔ orchestrator, and agent ↔ agent.
 - **Alerts** for things that need you: a pending question, a stalled or failed agent, a usage limit (one alert for everything that waits on the same reset).
 - **Tokens and cost** per agent (API-price equivalent, not your bill), an activity timeline, and a plan / usage bar.
-- **Codex** next to Claude Code: `codex exec` runs that Claude launches join the team; Codex-only conversations are listed too.
+- **Codex** next to Claude Code: `codex exec` runs that Claude launches join the team, and a Codex session can be the orchestrator too: its native sub-agents and the `claude -p` and `codex exec` runs its shell starts are gathered under it; Codex-only conversations are listed as well.
 - Plain Claude sessions with no agents are listed as well.
 - **Diagnostics**: what the dashboard noticed but could not settle (a tie between two possible launchers, a path it could not work out, an unknown transcript format), in a list that never contains transcript text.
 
@@ -46,7 +46,7 @@ Every panel is explained in the [screen guide](docs/guide.md).
 | WSL2 | Experimental (runs as Linux, not yet verified). |
 | Windows (native) | Not supported. |
 
-**Orchestrator.** The team view assumes a **Claude Code** orchestrator: its sub-agents and the `claude -p` and `codex exec` runs it starts are gathered under it. A Codex session is listed with its own status, tools and cost, but the runs a Codex orchestrator starts from its shell are not yet gathered under it (they appear as separate sessions or as unlinked candidates).
+**Orchestrator.** The orchestrator can be a **Claude Code** or a **Codex** session. Its sub-agents (Claude Code's Agent tool, or Codex's native sub-agent threads) and the `claude -p` and `codex exec` runs it starts, or that its sub-agents or those runs start in turn, are gathered under it. For a Codex orchestrator the dashboard reads what Codex records: the sub-agent events, the command records and the environment of its shells (see the [guide](docs/guide.md#a-codex-orchestrator) for what it cannot show: a Codex shell ends a child started with a bare `&`, and the instruction of a native sub-agent is encrypted in the record).
 
 Requires **Python 3.9+**. The standard library only: nothing to `pip install`.
 

@@ -599,7 +599,7 @@ class Item10Ownership(unittest.TestCase):
             e = {'id': self.TID, 'path': self.rollout(d), 'cwd': '/w', 'meta_ts': 1790726400.0, 'model': 'gpt-6.1-sol'}
             info = {'sid': self.X, 'rule': 'prompt', 'call': 'tu1', 'bash_ts': 1790726399.0, 'bash_desc': '', 'dt': 1.0, 'cwd': '/w',
                     'cwd_ok': True, 'prompt_ok': True}
-            sess = types.SimpleNamespace(id=self.X, agents={}, feed=[])
+            sess = types.SimpleNamespace(id=self.X, agents={}, feed=[], launcher_of=lambda a: 'orch')
             sess._event = lambda ts, kind, frm, to, title, text='', agent=None, extra=None, **kw: sess.feed.append({'ts': ts, 'kind': kind, 'agent': agent})
             ready = threading.Event()
             ready.set()
@@ -631,7 +631,7 @@ class Item10Ownership(unittest.TestCase):
         reg.sessions = {self.TID: cx, self.X: owner_sess}
         with mock.patch.object(server.LINKS, 'owners', {}):
             self.assertIs(reg.get(self.TID), cx)                # with no owner it stays as is
-        with mock.patch.object(server.LINKS, 'owners', {self.TID: {'sid': self.X}}):
+        with mock.patch.object(server.LINKS, 'owners', {self.TID: {'sid': self.X, 'rule': 'prompt'}}):
             self.assertIs(reg.get(self.TID), owner_sess)        # linked later
             self.assertIs(reg.get(self.X), owner_sess)
 
@@ -653,7 +653,7 @@ class Item11TurnSeq(unittest.TestCase):
             f.write('{"timestamp":"2026-09-30T00:00:00.000Z","type":"session_meta","payload":{"id":"%s","cwd":"/w"}}\n' % self.TID)
         e = {'id': self.TID, 'path': path, 'cwd': '/w', 'meta_ts': 1790726400.0, 'model': 'gpt-6.1-sol'}
         info = {'sid': 'sidX', 'rule': 'prompt', 'call': None, 'bash_ts': 1790726399.0, 'bash_desc': '', 'dt': 1.0, 'cwd': '/w', 'cwd_ok': True, 'prompt_ok': True}
-        sess = types.SimpleNamespace(id='sidX', agents={}, feed=[])
+        sess = types.SimpleNamespace(id='sidX', agents={}, feed=[], launcher_of=lambda a: 'orch')
         sess._event = lambda ts, kind, frm, to, title, text='', agent=None, extra=None, **kw: sess.feed.append({'ts': ts, 'kind': kind, 'agent': agent, 'text': text})
         ready = threading.Event()
         ready.set()

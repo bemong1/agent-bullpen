@@ -11,6 +11,11 @@ Bundles:
   cpl  coupling: one `claude -p` debate participant crossing launcher x life x report path x file state x OS (the integrated scene)
   room a room: several sub-agents of one orchestrator that share a guide file of any name and each hold a file of their own (a meeting, an agenda ...),
        or only message each other; and the lookalikes that are no room (a common document read, one shared file, code scattered over repositories ...)
+  rer  a rerun: an orchestrator starts the participants of a debate with one script that redirects every run's result to the same file, they stop without a report, the orchestrator
+       fixes the brief and runs the same script again (new sessions, the file now holds the new run's id)
+  cxo  a Codex orchestrator: a page whose top is a Codex thread (TUI or `exec`) and the team around it: native sub-agent threads, `claude -p` and `codex exec` runs started
+       from its shell (alone, or one level down a chain such as Claude > codex exec > claude -p), a guardian thread, a debate folder; and the lookalikes that are no team
+       (a session that only relays the instruction by `tmux send-keys`, two orchestrators of one folder with the same words, a script that runs `codex exec`)
 
 The tables WAY, PROMPT and the helpers at the bottom say what each value does to the *evidence* (does the environment survive, does the process lineage survive,
 can a redirect be read ...). build.py realises them as files and processes; oracle.py reads the same tables to say what a correct reader can know.
@@ -87,6 +92,22 @@ AXES = OrderedDict([
     ('entry', ('cli', 'sdk')),                                # the session the orchestrator page opens: a typed one, or the record of a `claude -p` run (`sdk-cli`: no turn-duration lines)
     ('tail', ('mid', 'end', 'prompt', 'commands', 'commands_only', 'next', 'asked')),    # what the records of that session end with: a turn in progress, a turn that ended, a new prompt nobody answered, local slash commands after the end, nothing but local slash commands, a new prompt and a call without a result that came within a second of the end of a turn, a turn that ended with a question
     ('process', ('there', 'gone')),                           # the process of that session: still running, or gone
+    # --- Codex orchestrator ---
+    ('top', ('claude', 'cx_tui', 'cx_exec')),                 # the provider of the orchestrator whose page is read: a Claude session, a Codex TUI thread (source "cli"), a `codex exec` thread (source "exec")
+    ('chain', ('one', 'cl>cx>cl', 'cx>cl>sub', 'cx>cx')),     # how far down the subject is: started by the page's own orchestrator, or Claude > codex exec > claude -p, Codex > claude -p > its sub-agent, Codex > codex exec > codex exec
+    ('subj', ('cl', 'cx', 'cx_sub', 'cl_sub')),               # the one under test: a `claude -p` run, a `codex exec` run, a native sub-agent thread, a sub-agent of a `claude -p` run
+    ('host', ('main', 'sub')),                                # who acts first below the page: the orchestrator thread itself, or a native sub-agent thread of it (starts the run, or spawns a sub-agent of its own)
+    ('env', ('codex', 'both', 'none', 'stale')),              # the names in the environment of the started process: those of Codex only, those of both providers, none, or those of a Codex thread that has been over for hours (a tmux server that a Codex shell started earlier passes them on)
+    ('how', ('fg', 'bg', 'detach')),                          # the shell call: runs until the child ends, `&` (the child dies with the call and leaves no record), `setsid nohup ... &`
+    ('look', ('live', 'ended')),                              # when the board looks: the child is still running, or everything is over
+    ('lure', ('none', 'relay', 'relay_py', 'relay_script', 'relay_pyfile', 'relay_xargs', 'relay_ssh', 'relay_kube', 'relay_curl', 'twin_orch', 'twin_out', 'user_script', 'gap', 'launch_tmux', 'launch_xargs', 'launch_pyfile', 'pin_unknown', 'pin_stale_claude', 'stale_turn')),    # a lookalike: another session only relays the instruction (`tmux send-keys`, a plain call or inside `python3 -c`; a shell script or a Python file that types it; the same through `xargs`, `ssh`, `kubectl exec`; words that are an argument of `curl`), a Claude and a Codex orchestrator of one folder say the same words (the Codex one's command also redirects the child's output to a file that names it: `twin_out`), a script (no orchestrator) runs `codex exec`, a Claude session starts the child while a Codex thread of the folder has a command whose record has not come yet (`gap`; with `env=none`, the child is the Codex one's, started by `tmux new-window`, and still running); a Claude session that really starts the child itself through a wrapper that is a launch (`launch_tmux`: `tmux new-session -d '...'`, `launch_xargs`: `xargs -I{} claude -p "{}"`, `launch_pyfile`: a Python file that runs `subprocess.run(["claude", "-p", ...])`); names of a thread nobody can check in the environment of a child (`pin_unknown`: a Codex thread the index does not have, beside a running Claude call with the same words; `pin_stale_claude`: a Claude session's names that a tmux server keeps, while a Codex thread starts the child; `stale_turn`: a Codex thread's names from an earlier turn of the thread, whose present turn has only `ls`)
+    ('substate', ('running', 'done', 'int_mid', 'int_after', 'parent_gone')),    # a native sub-agent: working, finished, interrupted while it worked, interrupted after it finished, its parent's process gone while it was open
+    ('guard', ('none', 'one')),                               # an approval-review thread beside the team
+    ('rec', ('end', 'lost', 'late')),                         # the record of the command the child was started by: written when its process ended, never (the turn ended first), or 135 s after the child started (a long run)
+    ('topic', ('none', 'talk')),                              # the child is a participant of a debate folder (talk/r1/<letter>.md) of the repository
+    ('parts', ('ab', 'a', 'b')),                              # which participants are run twice: the `claude -p` one (A) and the `codex exec` one (B), or one of them
+    ('stop', ('cost', 'cut')),                                # how the first runs stop: `claude -p` closes its record with `cost-state` and no end of turn, `codex exec` writes `turn_aborted`; or the record is just cut off (the process was killed)
+    ('edge', ('sure', 'guess')),                              # below Claude > codex exec: the link of the codex exec run to the Claude session is proven (its text is in the call), or only guessed (the call reads its text from a file)
 ])
 
 BUNDLES = OrderedDict([
@@ -95,12 +116,15 @@ BUNDLES = OrderedDict([
     ('sta', ('skind', 'life', 'flaw', 'at', 'os', 'entry', 'tail', 'process')),
     ('cpl', ('spawner', 'life', 'rpath', 'os', 'fstate')),
     ('room', ('guide', 'shape', 'talk', 'trees', 'people', 'word', 'lang', 'seatmark', 'fname', 'proof', 'phase', 'site', 'ref', 'rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy')),
+    ('cxo', ('top', 'chain', 'subj', 'host', 'env', 'how', 'look', 'lure', 'substate', 'guard', 'rec', 'topic', 'edge', 'os')),
+    ('rer', ('parts', 'stop')),
 ])
 
 # Axes that were added after the first case ids were fixed. A case id names them only when they differ from the baseline, so the ids of every earlier case
 # are the same as before (and the times, ids and files made from them). They stay out of the pairwise cover: each has its own product of cases (run.select).
 OPTIONAL = {'aff': ('author', 'busy', 'starter'), 'deb': ('os', 'lang', 'aux', 'wmode', 'edits', 'qform'), 'sta': ('entry', 'tail', 'process'),
-            'room': ('rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy')}
+            'room': ('rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy'),
+            'cxo': ('lure', 'substate', 'guard', 'rec', 'topic', 'edge', 'os')}
 
 BASE = {
     'target': 'cli', 'spawner': 'main', 'way': 'direct', 'via': 'arg', 'src': 'call', 'form': 'new', 'cwd': 'same', 'out': 'none',
@@ -112,6 +136,8 @@ BASE = {
     'phase': 'working', 'site': 'docs', 'ref': 'abs', 'rtime': 'overlap', 'code': 'none', 'cite': 'none', 'delivery': 'ok', 'wrap': 'plain', 'scratch': 'none',
     'bundle': 'none', 'above': 'none', 'copy': 'none',
     'skind': 'cli', 'life': 'running', 'flaw': 'none', 'at': 'live', 'os': 'linux', 'entry': 'cli', 'tail': 'mid', 'process': 'there',
+    'top': 'cx_tui', 'chain': 'one', 'subj': 'cl', 'host': 'main', 'env': 'codex', 'how': 'fg', 'look': 'live', 'lure': 'none', 'substate': 'running', 'guard': 'none', 'rec': 'end',
+    'topic': 'none', 'edge': 'sure', 'parts': 'ab', 'stop': 'cost',
 }
 # a bundle may sit on a different baseline than the global one (the debate bundle's agent is not yet running unless asked)
 BUNDLE_BASE = {
@@ -185,6 +211,52 @@ RESUMABLE = ('limit_exit', 'sub_limit_resume', 'kill_resume', 'time_limit_kill',
 DEB_LIFE = {'sub': ('running', 'normal_end', 'limit_exit', 'taskstop_kill', 'stalled_silent'), 'cli': ('running', 'normal_end', 'limit_exit', 'taskstop_kill', 'stalled_silent'),
             'codex': ('running', 'normal_end', 'taskstop_kill', 'stalled_silent')}
 CPL_LIFE = ('running', 'normal_end', 'limit_exit', 'time_limit_kill', 'taskstop_kill', 'api_529', 'api_400', 'crash')
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The Codex orchestrator scene (the one place the oracle and the builder agree on)
+# ---------------------------------------------------------------------------------------------------------------------
+CXO_RELAYS = ('relay', 'relay_py', 'relay_script', 'relay_pyfile', 'relay_xargs', 'relay_ssh', 'relay_kube', 'relay_curl')     # sessions that only pass the instruction on
+CXO_TWINS = ('twin_orch', 'twin_out')
+CXO_OWN_LAUNCHES = ('launch_tmux', 'launch_xargs', 'launch_pyfile')      # a Claude session that starts the child itself, through a wrapper that is a launch
+CXO_PINS = ('pin_unknown', 'pin_stale_claude', 'stale_turn')            # the names in the environment of the child cannot be checked: the thread is unknown, was a Claude session that is no launcher now, or was a turn ago
+CXO_SUBSTATES_END = ('parent_gone',)
+
+
+def cxo_alive(v):
+    """The process of the child is there when the board looks: it is still running, and a `&` call did not take it down with the call."""
+    return v['look'] == 'live' and v['how'] != 'bg' and v['subj'] in ('cl', 'cx', 'cl_sub', 'cx_sub')
+
+
+def cxo_record(v):
+    """The command that started the child has its `CommandExecution` record when the board looks (the last look): it is written when the process of the command ends (at
+    once for a `setsid nohup ... &` call, when the child ends for a foreground call, a long while after the child started when the run is long: `rec=late`), and never when
+    the turn ended first (`rec=lost`)."""
+    return v['rec'] in ('end', 'late') and (v['how'] in ('detach', 'bg') or v['look'] == 'ended')
+
+
+def cxo_hop(v):
+    """The evidence for the child of the last hop of a case (a shell call of a Codex thread starts it): {env, proc, out, content} -> bool.
+      env      the environment of the child process names the Codex thread that ran the call (alive, and the names were not cleared)
+      proc     the child is still a descendant of the Codex process of the page (a foreground call; `setsid` re-parents it)
+      out      the command redirects the child's output to a file, and the file holds the child's session id (the run is over): the strongest proof, it ranks above the environment
+      content  the command text, with the instruction as a literal argument, is in the launching thread's `CommandExecution` record, and nobody else's launch fits it as well"""
+    if v['lure'] == 'user_script':
+        return {'env': False, 'proc': False, 'out': False, 'content': False}       # started in a terminal by a script: no thread's shell, no thread's record
+    alive = cxo_alive(v)
+    twin = v['lure'] in CXO_TWINS
+    return {'env': alive and v['env'] in ('codex', 'both'), 'proc': alive and v['how'] == 'fg', 'out': v['lure'] == 'twin_out' and cxo_record(v) and v['look'] == 'ended',
+            'content': cxo_record(v) and not twin}                         # two launches with the same words tie: only the environment, the lineage or an output file can tell them apart
+
+
+def cxo_proof(hop):
+    """Whether any of the evidence of `cxo_hop` exists."""
+    return bool(hop['env'] or hop['proc'] or hop['out'] or hop['content'])
+
+
+def cxo_linked(v):
+    """Whether the board can say who started the subject of a shell hop at all: some evidence exists. A subject with none stands alone."""
+    return cxo_proof(cxo_hop(v))
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -321,7 +393,7 @@ def normalize(case):
     """The case with impossible combinations folded (to a fixed point: a fold may enable another). The folded case has the same id as an existing one."""
     v = dict(case.v)
     b = case.bundle
-    fold = {'aff': _aff, 'deb': _deb, 'sta': _sta, 'cpl': _cpl, 'room': _room}[b]
+    fold = {'aff': _aff, 'deb': _deb, 'sta': _sta, 'cpl': _cpl, 'room': _room, 'cxo': _cxo, 'rer': _rer}[b]
     for _ in range(6):
         before = dict(v)
         fold(v)
@@ -711,6 +783,100 @@ def _cpl(v):
         v['marker'] = 'none'
     v['role'] = 'writer'
     _report_file(v, 'cli')
+
+
+def _rer(v):
+    pass                                         # every combination of the one axis can happen
+
+
+def _cxo(v):
+    chain, lure = v['chain'], v['lure']
+    # the chain names the top and the subject; a Claude top exists only in the chain that starts with Claude (a Claude-only team is the affiliation bundle's business)
+    if chain == 'cl>cx>cl':
+        v.update(top='claude', subj='cl', host='main', lure='none', guard='none', topic='none', substate='running')
+    else:
+        v['edge'] = 'sure'
+        if v['top'] == 'claude':
+            v['top'] = 'cx_tui'
+        if chain == 'cx>cl>sub':
+            v['subj'] = 'cl_sub'
+        elif chain == 'cx>cx':
+            v['subj'] = 'cx'
+        elif v['subj'] == 'cl_sub':
+            v['subj'] = 'cl'
+        if chain != 'one':
+            v.update(lure='none', topic='none', substate='running')
+            if v['rec'] == 'late':
+                v['rec'] = 'end'
+        if chain == 'cx>cl>sub':
+            v.update(env='codex', how='fg', rec='end')   # the sub-agent lives inside the `claude -p` run the plain first call started: nothing of the last hop is left to vary
+        if v['env'] == 'both':
+            v['env'] = 'codex'                       # both providers' names are in the environment only below a Claude orchestrator
+    if chain != 'one' and v['how'] == 'bg':
+        v['how'] = 'detach'                          # in every chain: a Codex `&` call takes the child down with the call (nohup does not help, only `setsid` does), so there is no run to put in a chain
+    if chain == 'cl>cx>cl':
+        if v['edge'] == 'guess':
+            # the codex exec run is linked to the Claude session by a guess only when nothing proves it any more: it ended (`setsid` child alive after it), the call reads its text from a file
+            if not (v['env'] == 'both' and v['how'] == 'detach' and v['look'] == 'live'):
+                v['edge'] = 'sure'
+        if v['rec'] == 'late':
+            v['rec'] = 'end'
+    if v['subj'] != 'cx_sub':
+        v['substate'] = 'running'
+    if lure != 'none':
+        if chain != 'one':
+            v['lure'] = lure = 'none'
+        else:
+            v.update(host='main', topic='none', guard='none', substate='running')
+            v['subj'] = 'cx' if lure == 'user_script' else 'cl'
+            if lure in CXO_RELAYS:
+                v['top'] = 'cx_tui'                  # the instruction goes into a terminal: the TUI
+            if lure == 'user_script':
+                v.update(env='none', how='fg', rec='end')       # a script in a terminal: no Codex above it, nothing to leave in a shell, no record of a call anywhere
+            elif lure == 'gap':
+                if v['env'] == 'none':
+                    v.update(how='detach', rec='end', look='live')   # the child is the Codex thread's: its shell started it with `tmux new-window` (nothing of Codex or Claude in its environment, the command's record has not come), and a Claude call with the same words is still running
+                else:
+                    v.update(env='codex', how='fg', rec='end', look='ended')    # the Claude session's own foreground call; the child is over, so only the words can tell whose it is
+            elif lure == 'launch_tmux':
+                v.update(env='none', how='detach', rec='end')        # `tmux new-session -d`: the child is the tmux server's, with none of the names
+            elif lure in ('launch_xargs', 'launch_pyfile'):
+                v.update(env='codex', how='fg', rec='end')
+            elif lure == 'pin_unknown':
+                v.update(env='none', how='fg', rec='end', look='live')   # the child has the names of a thread the index does not know, and a Claude call with the same words is running
+            elif lure == 'pin_stale_claude':
+                v.update(env='none', how='detach', rec='end', look='live')   # a Codex thread starts the child with `tmux new-window`; the tmux server keeps the names of a Claude session
+            elif lure == 'stale_turn':
+                v.update(env='stale', how='detach', rec='end', look='live')   # the names are the Codex thread's own, from an earlier turn
+            elif v['how'] == 'bg':
+                v['how'] = 'detach'
+            if lure in CXO_TWINS:
+                v['rec'] = 'end'                     # the tie between the two launches does not depend on the record of one of them
+    if v['env'] == 'stale':
+        if chain == 'one' and v['lure'] in ('none', 'stale_turn') and v['subj'] == 'cl':
+            # a Claude session starts the child with `tmux new-window` and the names of a Codex thread that is long over come with the tmux server
+            v.update(host='main', how='detach', look='live', rec='end', topic='none', guard='none', substate='running')
+        else:
+            v['env'] = 'codex'
+    if v['subj'] == 'cx_sub':
+        # a native sub-agent has no shell call, no environment, no record to lose: its life is the sub-agent's own, and the page's process
+        v.update(how='fg', env='codex', rec='end', topic='none', lure='none')
+        v['look'] = 'ended' if v['substate'] in CXO_SUBSTATES_END else 'live'
+    elif v['how'] == 'bg':
+        v.update(env='codex', rec='end', topic='none', look='live')      # the child died with the call: there is nothing to look at later
+    if v['rec'] == 'lost' and not (v['how'] == 'detach' or v['look'] == 'ended'):
+        v['rec'] = 'end'                         # a foreground call that is still running has no record yet anyway
+    if v['rec'] == 'late' and not (chain == 'one' and v['how'] == 'fg' and v['look'] == 'ended' and v['env'] == 'none' and v['subj'] in ('cl', 'cx') and v['lure'] == 'none'
+                                    and v['topic'] == 'none'):
+        v['rec'] = 'end'                         # a record that comes late matters where nothing else linked the child before it: no environment, a foreground call, a run that is over
+    if v['topic'] != 'none' and (chain != 'one' or v['subj'] not in ('cl', 'cx') or v['host'] != 'main' or v['lure'] != 'none' or v['how'] == 'bg'):
+        v['topic'] = 'none'
+    if v['top'] == 'claude':
+        v['guard'] = 'none'
+    if v['os'] != 'linux':
+        # macOS: `ps` does not say which file a process holds open, so a Codex process cannot be told from another program. It matters where both providers' names are in
+        # the environment of a grandchild and the chain is read from the process table
+        v['os'] = 'mac' if (chain == 'cl>cx>cl' and v['env'] == 'both' and v['look'] == 'live' and v['edge'] == 'sure') else 'linux'
 
 
 # ---------------------------------------------------------------------------------------------------------------------

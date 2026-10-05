@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat import patched, server  # noqa: E402
 from test_server_i18n import EN, KO, SessionCase, human, say  # noqa: E402
 import test_stage2 as st2  # noqa: E402
-from board import catalog, diag, runstate as RS, views  # noqa: E402
+from board import catalog, diag, link, runstate as RS, views  # noqa: E402
 
 T0 = st2.T0
 
@@ -154,18 +154,34 @@ class OrchDiag(unittest.TestCase):
 
 class Catalog(unittest.TestCase):
     def owners(self, edges):
-        return {c: {'sid': p} for c, p in edges}
+        return {c: {'sid': p, 'rule': 'proc', 'certain': True} for c, p in edges}
 
     def test_a_grandchild_is_counted_with_its_launchers_tree(self):
         with mock.patch.object(catalog.LINKS, 'cli_owners', self.owners([('c1', 'top'), ('c2', 'top'), ('g1', 'c1'), ('gg1', 'g1'), ('x1', 'other')])):
-            self.assertEqual(catalog.cli_totals(), {'top': 4, 'c1': 2, 'g1': 1, 'other': 1})
+            self.assertEqual(catalog.team_totals(), {'top': 4, 'c1': 2, 'g1': 1, 'other': 1})
 
     def test_a_loop_and_the_depth_limit(self):
         with mock.patch.object(catalog.LINKS, 'cli_owners', self.owners([('a', 'a0'), ('b', 'a'), ('a0', 'b')])):
-            self.assertEqual(catalog.cli_totals()['a0'], 2)                              # never counts itself, never counts one twice
+            self.assertEqual(catalog.team_totals()['a0'], 2)                             # never counts itself, never counts one twice
         chain = [('n%d' % i, 'n%d' % (i - 1) if i else 'root') for i in range(12)]
         with mock.patch.object(catalog.LINKS, 'cli_owners', self.owners(chain)):
-            self.assertEqual(catalog.cli_totals()['root'], catalog.MAX_NEST + 1)         # the page follows MAX_NEST levels beyond the first
+            self.assertEqual(catalog.team_totals()['root'], link.MAX_NEST)               # the page follows the graph's limit, which is also the limit of page_of
+
+    def test_a_team_counts_every_kind_of_run_below_the_page(self):
+        cx = {'x1': {'sid': 'top', 'rule': 'prompt'}, 'x2': {'sid': 'c1', 'rule': 'env'}}
+        with mock.patch.object(catalog.LINKS, 'cli_owners', self.owners([('c1', 'top')])), mock.patch.object(catalog.LINKS, 'owners', cx):
+            self.assertEqual(catalog.team_totals(), {'top': 3, 'c1': 1})
+
+    def test_the_agents_of_a_child_session_are_counted_under_the_page(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, 'projects', 'p', 'c1', 'subagents')
+            os.makedirs(folder)
+            for aid in ('a%016x' % 1, 'a%016x' % 2):
+                with open(os.path.join(folder, 'agent-%s.meta.json' % aid), 'w') as f:
+                    f.write('{}')
+            with patched(PROJECTS=os.path.join(tmp, 'projects')), mock.patch.object(catalog.LINKS, 'cli_owners', self.owners([('c1', 'top')])):
+                self.assertEqual(catalog.team_totals(), {'top': 3})
 
     def test_the_session_list_says_the_number_the_page_will_show(self):
         import tempfile

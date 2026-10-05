@@ -18,13 +18,12 @@ from .util import (
 )
 from .tokens import TokenMeter, claude_model_short, cx_model_short
 from .codex_parse import (
-    CX_MAX_READ, CX_PROMPT_MIN, CX_WINDOW, codex_call, codex_say_text, codex_user_text, cx_alive, cx_decode,
-    cx_open, cx_procs, cx_start_offset,
+    CX_MAX_READ, CX_PROMPT_MIN, CX_WINDOW, codex_call, codex_say_text, codex_user_text, cx_alive, cx_open, cx_procs, cx_start_offset,
 )
 from .codex_index import CODEX
-from .link import LINKS, _cx_expand, cx_parse_call
+from .link import LINKS, SCRIPTY_RE, _cx_expand, bash_scripts, cx_parse_call
 from .agents import (
-    Agent, CodexAgent, cx_record_usage, cx_reprice, cx_sync_base, cx_sync_guardians, model_numbers, tool_brief,
+    Agent, CodexAgent, ForkSkip, cx_record_usage, cx_reprice, cx_rows, cx_sync_base, cx_sync_guardians, model_numbers, tool_brief,
 )
 from .debates import REPORT_RE, brief_table, judge as judge_debates, read_head, writer_table
 from . import units as U
@@ -33,6 +32,7 @@ from . import views
 
 AGENT_ID_RE = re.compile(r'^a[0-9a-f]{16}$')
 HANDBACK_MARK = 'The report follows:'
+ENCRYPTED_KO = '지시 내용은 기록에서 암호화되어 있어 볼 수 없습니다.'   # the old Korean field of a body that is ciphertext in the record (the page words it from `event.encrypted.text`)
 STATUS_LABEL = {'completed': '작업 끝', 'done': '작업 끝', 'failed': '실패', 'killed': '중지됨'}   # end notice · turn status → title of the flow card
 STATUS_KEY = {'completed': 'event.notify.done', 'done': 'event.notify.done', 'failed': 'event.notify.failed', 'killed': 'event.notify.killed'}   # notify status -> the dictionary key of its card title
 DEBATE_TTL = 30           # seconds after which a debate judgment is made again whatever the signature says
@@ -40,7 +40,6 @@ WALK_EVERY = 60           # seconds between two walks of the repository folders 
 WALK_ENABLED = False      # the server turns the background walk on (server.py main); tests and tools read only what they ask for
 _WALK_SLOT = threading.Semaphore(1)
 LATER_AFTER = 10         # seconds after the first link scan is ready: the latest the work that waits for the first picture starts, whether or not a picture was built
-MAX_NEST = 4             # how many levels of `claude -p` inside `claude -p` one page follows
 USER_DUP_SEC = 120       # if the same user instruction is recorded again within this time, it counts once
 
 
@@ -132,6 +131,27 @@ def session_procs():
     return {sid: RS.proc_snapshot(entries) for sid, entries in table.items()}
 
 
+class _Relay:
+    """What the record of a descendant Claude of a page (a `claude -p` child, or a sub-agent that child started) tells the Codex linker of the page: its Bash calls, their results, its
+    TaskStop calls and the notices of its background jobs. A call carries whose it is (the session it ran in, and the sub-agent), so that a thread is matched only with a call of the
+    one that started it."""
+
+    def __init__(self, linker, tree, node):
+        self.linker, self.tree, self.node = linker, tree, node
+
+    def bash(self, d, ts, b):
+        self.linker.note_bash(d, ts, b, self.tree, self.node)
+
+    def result(self, tuid, d, ts):
+        self.linker.note_result(tuid, d, ts)
+
+    def stop(self, task_id, ts):
+        self.linker.note_stop(task_id, ts)
+
+    def notice(self, text, ts):
+        self.linker.note_notification(text, ts)
+
+
 class CodexLinker:
     """The Codex agents inside one Claude session. Ownership is decided by the global LINKS; this class handles this session's Bash calls (background jobs, end, stop),
     turn ↔ call, the planned -o paths, reports confirmed by sha1, and the flow events."""
@@ -146,11 +166,15 @@ class CodexLinker:
         self._gone = {}          # threads that lost ownership: tid -> (agent, tail). If owned again they are revived as they were (events are not duplicated because emitted blocks them)
         self.emitted = set()
         self._sha = {}
+        self._cmd_seen = {}      # Codex thread id -> the item ids of its commands that were looked at (the commands of a Codex thread are calls like the Bash calls of the main record)
+        self._in_events = {}     # (thread id, turn number) -> the spawn or orch_msg event made for the turn (a call found later is told to it)
 
     # ---- from this session's main record ----
-    def note_bash(self, d, ts, b):
+    def note_bash(self, d, ts, b, tree=None, node=None):
+        """A Bash call of the main record (tree: this page's session), or of a descendant Claude (its session and sub-agent: `_Relay`)."""
         c = cx_parse_call(ts, b.get('id'), b.get('input') or {}, d.get('cwd'))
         if c and c['id'] not in self.calls:
+            c['tree'], c['node'] = tree or self.s.id, node
             self.calls[c['id']] = c
             self.order.append(c)
 
@@ -186,11 +210,13 @@ class CodexLinker:
         return True
 
     # ---- the Codex side ----
-    def poll(self):
+    def poll(self, owned=None):
+        """Reads the Codex threads of this page: `owned` {thread id: its link}, parents before children (the native sub-agents and the `codex exec` threads below the page in the
+        graph of who started whom: Session._team); None: the threads this session owns directly."""
         if not LINKS.ready.is_set():
             return False
         changed = False
-        owned = LINKS.owned_by(self.s.id)
+        owned = LINKS.owned_by(self.s.id) if owned is None else owned
         for tid in [t for t in self.agents if t not in owned]:      # linked → ambiguous or another session: it is no longer this session's agent
             self._gone[tid] = (self.agents.pop(tid), self.tails.pop(tid))
             self.s.agents.pop(tid, None)                             # the events (feed) and idx already given are left as they are
@@ -206,12 +232,15 @@ class CodexLinker:
                 if not e:
                     continue
                 a = CodexAgent(e, info)
-                a.spawn_ts = info['bash_ts'] or e['meta_ts']     # one linked by process lineage (rule 'proc') does not know the Bash call: the time the thread started
+                a.spawn_ts = info.get('bash_ts') or e['meta_ts']     # one linked by process lineage (rule 'proc') does not know the Bash call: the time the thread started
                 try:
                     size = os.path.getsize(e['path'])
                 except OSError:
                     continue
                 a.partial = cx_start_offset(e['path'], size)
+                a.fork = ForkSkip(e['prefix_ord'] if a.kind == 'sub' else None, a.partial)
+                if a.kind == 'sub':
+                    self._sub_identity(a, e)
                 self.agents[tid] = a
                 self.s.agents[tid] = a
                 self.tails[tid] = Tail(e['path'], start=a.partial, max_read=CX_MAX_READ)
@@ -222,34 +251,182 @@ class CodexLinker:
             lines = self.tails[tid].read()
             if self.tails[tid].pos < before:
                 a.reset_runs()                               # the rollout is read again from its start: rebuild the runs from the same lines
-            for raw in lines:
-                r = cx_decode(raw)
-                if r:
-                    try:
-                        a.feed_cx(r)
-                    except Exception as e:   # noqa: BLE001 — one line must not stop the whole board
-                        line_error(tid, {'timestamp': r['ts']}, e)
-                    fed = True
+                a.fork.restart()
+            for r in cx_rows(lines, a.fork):
+                try:
+                    a.feed_cx(r)
+                except Exception as e:   # noqa: BLE001 — one line must not stop the whole board
+                    line_error(tid, {'timestamp': r['ts']}, e)
+                fed = True
             if fed:
                 cx_sync_base(a.tokens, a.partial, a.thread_total, a.seen, a.model)
                 cx_sync_guardians(a.tokens, tid)
                 changed = True
-            if self._derive(a):
-                changed = True
-            a.trim_turns()                                   # cut after the events are made (even if a lot is read at once, the events of the earlier turns remain)
+        if self._commands(owned):
+            changed = True
+        if self._collab(owned):
+            changed = True
+        for tid in owned:
+            a = self.agents.get(tid)
+            if a is not None:
+                if self._derive(a):
+                    changed = True
+                a.trim_turns()                               # cut after the events are made (even if a lot is read at once, the events of the earlier turns remain)
         # when there is no report name, the model name (sol6.1). If several have the same model, sol6.1, sol6.1-2, … in order of start time (the same after a restart)
         order = sorted(self.agents.values(), key=lambda x: (x.meta_ts or 0, x.id))
-        numbered = model_numbers([a for a in order if not a.report_tag], lambda a: cx_model_short(a.model))
+        numbered = model_numbers([a for a in order if not a.report_tag and a.origin != 'subagent'], lambda a: cx_model_short(a.model))
         for a in order:
-            tag = a.report_tag or numbered[a.id]
+            tag = a.report_tag or (a.sub_name if a.origin == 'subagent' else numbered[a.id])
             if a.tag != tag:
                 a.tag = tag
                 changed = True
         return changed
 
-    def _turn_call(self, tid, i, t):
-        """The call that started a turn, and the run (L) within it: a call within 30 s before the turn start whose instruction matches, or that mentioned this thread id."""
+    @staticmethod
+    def _sub_identity(a, e):
+        """What a native sub-agent is called: the end of its path (`/root/s1` → `s1`), else its nickname, as the name tag; the name Codex gave the thread (or the nickname) as the
+        title. Its instruction is encrypted in the record, so nothing else names it. The root runtime it lives in is looked up once."""
+        a.sub_name = (a.agent_path or '').rstrip('/').rsplit('/', 1)[-1] or a.nick or ''
+        named = CODEX.title(e)
+        a.title = a.description = (named if named != a.sub_name else a.nick) or a.sub_name           # the name it was given, else its nickname beside the task name on the tag
+        root = CODEX.root_of(a.id)
+        re_ = CODEX.get(root) if root else None
+        a.runtime = (root, re_['path']) if re_ else None
+
+    # ---- the commands of Codex threads: calls of the page ----
+    def _commands(self, owned):
+        """The commands the Codex threads of this page ran (the page's own thread when it is a Codex page, and the threads below it that can start something), as calls the
+        way `note_bash` makes them from the Bash calls of a Claude record: so the turn of a `codex exec` thread finds the call that started it. True when there was a new call."""
+        hosts = ([self.s.id] if getattr(self.s, 'provider', 'claude') == 'codex' else []) + [t for t in owned if t in self.agents]
+        fresh = False
+        for tid in hosts:
+            cmds = CODEX.cmds(tid)
+            seen = self._cmd_seen.setdefault(tid, set())
+            if not cmds or cmds[-1]['item_id'] in seen:
+                continue
+            new = []
+            for c in reversed(cmds):
+                if c['item_id'] in seen:
+                    break
+                new.append(c)
+            sub = tid in self.agents and self.agents[tid].origin == 'subagent'
+            for c in reversed(new):
+                seen.add(c['item_id'])
+                text = c['cmd'] if c['cmd'] is not None else CODEX.cmd_text(tid, c['item_id'])
+                if not isinstance(text, str):
+                    continue                                                          # no text (not a shell command, over the limit, not kept): its time is a gap for the link index
+                scripts = bash_scripts(text, c['cwd']) if (not sub or SCRIPTY_RE.search(text)) else []       # (a sub-agent's command is read for a script only when it names one)
+                cc = cx_parse_call(c['start'], c['item_id'], {'command': text}, c['cwd'], scripts=scripts)
+                if cc and cc['id'] not in self.calls:
+                    cc['tree'] = (self.agents[tid].runtime or (None,))[0] if sub else tid       # the root thread whose tree this command ran in
+                    cc['node'] = tid if sub else None
+                    cc['end'] = {'ts': c['end'], 'status': c['status'], 'exit': c['exit_code']}      # a command is recorded when its process ends
+                    self.calls[cc['id']] = cc
+                    self.order.append(cc)
+                    fresh = True
+        if fresh:
+            self.order.sort(key=lambda c: c['ts'] or 0)
+        return fresh
+
+    # ---- the collaboration of native sub-agents: the feed events ----
+    def _collab(self, owned):
+        """The feed events of the native sub-agents (the parent's record says what happened between the threads): `started` is the spawn (its body is ciphertext: the card says
+        so, and the note that comes with it is no instruction), a message from the parent is an orch_msg (the first one is the spawn's own body), the first message a sub-agent
+        sends its parent after its `completed` is its handback, any other message between agents is an agent_msg; waiting for an agent is no event. Also the times its parent
+        interrupted a sub-agent (`cuts`: an interrupt that came while it worked makes it interrupted, one after its end changes nothing). True when something was added."""
+        subs = {t: a for t, a in self.agents.items() if a.origin == 'subagent'}
+        if not subs and getattr(self.s, 'provider', 'claude') != 'codex':
+            return False
+        page = self.s.id
+        hosts = ([page] if getattr(self.s, 'provider', 'claude') == 'codex' else []) + [t for t in owned if t in self.agents]
+        changed = False
+        for host in hosts:
+            col = CODEX.collab(host)
+            if not col:
+                continue
+            tree = host if host == page or host not in subs else (subs[host].runtime or (None,))[0]
+            who = {'/root': 'orch' if tree == page else tree}
+            paths = {}
+            for t, a in subs.items():
+                if a.runtime and a.runtime[0] == tree and a.agent_path:
+                    paths[a.agent_path] = t
+            armed = set()
+            for c in col:
+                kind = c['kind']
+                if kind == 'completed':
+                    armed.add(c['agent_path'])
+                elif kind == 'started':
+                    armed.discard(c['agent_path'])
+                    a = subs.get(c['agent_thread_id'])
+                    if a is not None and ('spawn', a.id) not in self.emitted:
+                        self.emitted.add(('spawn', a.id))
+                        self._spawn(a, c)
+                        changed = True
+                elif kind == 'interrupted':
+                    a = subs.get(c['agent_thread_id'])
+                    if a is not None and c['ts'] and c['ts'] not in a.cuts:
+                        a.cuts.append(c['ts'])
+                        changed = True
+                elif kind == 'message':
+                    first = c['author'] in armed and c['recipient'] == (c['author'] or '').rsplit('/', 1)[0]       # the first message of an agent after its `completed`: its final report
+                    if first:
+                        armed.discard(c['author'])                          # (also when it was told earlier: the end of an agent is one report, however often the record is read)
+                    if self._message(c, who, paths, subs, first):
+                        changed = True
+        return changed
+
+    @staticmethod
+    def _msg_key(c):
+        """What one agent_message is called, so that it is made an event once (the same message can be in the record of the parent and in the record of the sub-agent)."""
+        return 'msg', c['msg_id'] or (c['ts'], c['author'], c['recipient'], c['text'])
+
+    def _message(self, c, who, paths, subs, final):
+        """One agent_message: the event it stands for, or none (the same message twice, the first one the parent sent, a thread that is not on this page). True when an event was made."""
+        author, rec = c['author'], c['recipient']
+        key = self._msg_key(c)
+        if key in self.emitted or not author or not rec:
+            return False
+        frm, to = who.get(author) or paths.get(author), who.get(rec) or paths.get(rec)
+        if frm is None or to is None:
+            return False
+        self.emitted.add(key)
+        text, why = (ENCRYPTED_KO, 'event.encrypted.text') if c['encrypted'] else (c['text'] or '', None)       # the note beside ciphertext says nothing of what was said
+        if rec == author.rsplit('/', 1)[0] and frm in subs:        # a sub-agent to its parent
+            if final:                                              # the first message after its `completed`: its final report
+                self.s._event(c['ts'], 'handback', frm, to, '최종 보고', text, agent=frm, title_key='event.handback.title', text_key=why)
+            else:
+                self.s._event(c['ts'], 'agent_msg', frm, to, '메시지', text, agent=frm, extra={'peer': None if to == 'orch' else to}, title_key='event.message.title', text_key=why)
+            return True
+        if author == rec.rsplit('/', 1)[0] and to in subs:         # the parent to a sub-agent
+            if ('first', to) not in self.emitted:                   # the first one is the body of the spawn: the card of the spawn carries it
+                self.emitted.add(('first', to))
+                return False
+            self.s._event(c['ts'], 'orch_msg', frm, to, '메시지', text, agent=to, title_key='event.message.title', text_key=why)
+            return True
+        if frm in subs or to in subs:                              # between two agents
+            self.s._event(c['ts'], 'agent_msg', frm, to, '메시지', text, agent=frm if frm in subs else to, extra={'peer': None if to == 'orch' else to},
+                          title_key='event.message.title', text_key=why)
+            return True
+        return False
+
+    def _spawn(self, a, c):
+        """The spawn card of a native sub-agent. Its instruction is ciphertext: the card says so (the plain note that comes with it names a path and is no instruction), unless
+        the record holds the first message to it as plain text."""
+        first = next((m for m in CODEX.collab(a.id) if m['kind'] == 'message' and m['recipient'] == a.agent_path), None)
+        plain = first['text'] if first and not first['encrypted'] and first['text'] else ''
+        if first is not None:
+            self.emitted.update((self._msg_key(first), ('first', a.id)))          # that message is what the card carries, not one more message
+        self.s._event(c['ts'], 'spawn', self.s.launcher_of(a), a.id, a.sub_name or a.id[:8], plain or ENCRYPTED_KO, agent=a.id, extra={'tool_use_id': c['call_id'], 'model': a.model},
+                      text_key=None if plain else 'event.encrypted.text')
+
+    def _turn_call(self, tid, i, t, link=None, cwd=None):
+        """The call that started a turn, and the run (L) within it. `link` (what the link index decided of this thread: its tree, its node and, for the first turn, its call) makes
+        the choice the index's: the first turn takes the call the index named (never another one by its time or its words: where the index held the call, none), and a later
+        turn (a resume) only a call of the same tree and node, in the thread's folder, and only when exactly one call fits. Without `link` (nothing decided it): a call within
+        30 s before the turn start whose instruction matches, or that mentioned this thread id."""
         user = (t['user'] or '').strip()
+        if link is not None:
+            return self._decided_call(tid, i, t, user, link, cwd)
         best = (None, None)
         for c in reversed(self.order):
             if c['ts'] is None or c['ts'] > (t['start'] or 0) + 1:
@@ -264,6 +441,32 @@ class CodexLinker:
             if tid in c.get('resumes', ()) and best[0] is None:                    # the call that resumed this thread (a UUID in a path says nothing)
                 best = (c, None)
         return best
+
+    @staticmethod
+    def _of(c, link):
+        """Whether a call is one of the launcher the link index named for a thread: the same tree and the same node (a call of the main record has no node)."""
+        return c.get('tree', link.get('sid')) == link.get('sid') and c.get('node') == link.get('node')
+
+    def _decided_call(self, tid, i, t, user, link, cwd):
+        if i == 0:
+            c = self.calls.get(link.get('call') or '')
+            if c is None or not self._of(c, link):
+                return None, None
+            return c, next((L for L in c['L'] if L['literal'] >= CX_PROMPT_MIN and user and L['rx'].fullmatch(user) and L['resume'] is None), None)
+        start = t['start'] or 0
+        found, said = {}, {}
+        for c in self.order:
+            if c['ts'] is None or c['ts'] > start + 1 or start - c['ts'] > CX_WINDOW or not self._of(c, link):
+                continue
+            for L in c['L']:
+                if cwd and L['cwd'] and os.path.normpath(cwd) != L['cwd']:
+                    continue
+                if L['literal'] >= CX_PROMPT_MIN and user and L['rx'].fullmatch(user) and (not L['resume'] or '$' in L['resume'] or L['resume'] == tid):
+                    said[id(c)] = (c, L)
+            if tid in c.get('resumes', ()):                                       # the call that resumed this thread (a UUID in a path says nothing)
+                found[id(c)] = (c, None)
+        pick = said or found
+        return next(iter(pick.values())) if len(pick) == 1 else (None, None)         # two calls fit: nothing says which one, and time does not break the tie
 
     def _resolve_out(self, c, L, user):
         if not L or not L['out']:
@@ -336,11 +539,18 @@ class CodexLinker:
     def _derive(self, a):
         """Once per turn: finding the call, the planned -o path, the flow events (spawn/orch_msg, handback/notify, stop), and sha1 confirmation."""
         changed, tid, now = False, a.id, time.time()
+        sub = a.origin == 'subagent'          # a native sub-agent: no call started it (its spawn and messages come from its parent's record: _collab), and its instruction is not known
+        up = self.s.launcher_of(a)            # who started it, as the page hangs it: the events are between that one and this thread (the orchestrator itself: 'orch')
+        facts = (len(self.calls), (a.link or {}).get('call'), (a.link or {}).get('node'))      # what the choice of a turn's call rests on: a command that comes late, or a link decided again, may find it
         for t in a.turns:
             i = t['n']
-            if not t.get('mapped') and (t['user'] is not None or t['end']):
-                t['mapped'] = True
-                c, L = self._turn_call(tid, i, t)
+            if sub:
+                if not t.get('mapped'):
+                    t['mapped'] = True
+                    changed = True
+            elif (t['user'] is not None or t['end']) and t.get('call') is None and t.get('facts') != facts:
+                t['mapped'], t['facts'] = True, facts
+                c, L = self._turn_call(tid, i, t, a.link or {}, a.cwd)
                 if c:
                     t['call'], t['bash_ts'] = c['id'], c['ts']
                     out = self._resolve_out(c, L, t['user'])
@@ -349,27 +559,36 @@ class CodexLinker:
                         self._set_out(a, t, out)
                     elif L and L.get('out') and '$' in L['out']:
                         self._unresolved_out(a, L['out'])
+                    ev = self._in_events.get((tid, i))
+                    if ev is not None:                                         # the card was made before the call was found (a command is written when it ends): it learns the call, once
+                        if i == 0 and t['out']:
+                            ev['title'] = os.path.basename(t['out'])
+                        if i == 0 and ev.get('tool_use_id') is None:
+                            ev['tool_use_id'] = c['id']
                 changed = True
             if t.get('mapped') and ('in', i, tid) not in self.emitted:
                 self.emitted.add(('in', i, tid))
-                c = self.calls.get(t['call'])
-                ts = t['bash_ts'] or t['start']
-                text = t['user'] or ''
-                if i == 0:
-                    title = os.path.basename(t['out']) if t['out'] else trunc(text.strip().splitlines()[0] if text.strip() else '', 80)
-                    self.s._event(ts, 'spawn', 'orch', tid, title, text, agent=tid,
-                                  extra={'tool_use_id': c['id'] if c else None, 'model': a.model})
-                else:
-                    self.s._event(ts, 'orch_msg', 'orch', tid, (c['desc'] if c and c['desc'] else '메시지'), text,
-                                  agent=tid, title_key=None if c and c['desc'] else 'event.message.title')
-                changed = True
+                if not sub:
+                    c = self.calls.get(t['call'])
+                    ts = t['bash_ts'] or t['start']
+                    text = t['user'] or ''
+                    if i == 0:
+                        title = os.path.basename(t['out']) if t['out'] else trunc(text.strip().splitlines()[0] if text.strip() else '', 80)
+                        ev = self.s._event(ts, 'spawn', up, tid, title, text, agent=tid,
+                                           extra={'tool_use_id': c['id'] if c else None, 'model': a.model})
+                    else:
+                        ev = self.s._event(ts, 'orch_msg', up, tid, (c['desc'] if c and c['desc'] else '메시지'), text,
+                                           agent=tid, title_key=None if c and c['desc'] else 'event.message.title')
+                    self._in_events[(tid, i)] = ev
+                    changed = True
             if t['end'] and ('end', i, tid) not in self.emitted:
                 self.emitted.add(('end', i, tid))
-                if t['status'] == 'done' and t['msg']:
-                    self.s._event(t['end'], 'handback', tid, 'orch', '최종 보고', t['msg'], agent=tid, title_key='event.handback.title')
+                if t['status'] == 'done' and t['msg'] and not sub:          # (a sub-agent's final report is the message its parent's record holds)
+                    self.s._event(t['end'], 'handback', tid, up, '최종 보고', t['msg'], agent=tid, title_key='event.handback.title')
                 summary = t['error'] or trunc((t['msg'] or '').strip().splitlines()[0] if (t['msg'] or '').strip() else '', 160)
                 title, extra, key = notify_card(t['status'])
-                self.s._event(t['end'], 'notify', tid, 'orch', title, summary, agent=tid, extra=extra, title_key=key)
+                if not (sub and t['status'] == 'killed'):                    # an interrupted sub-agent is held, not finished: its state says so
+                    self.s._event(t['end'], 'notify', tid, up, title, summary, agent=tid, extra=extra, title_key=key)
                 a.notifications.append({'ts': t['end'], 'status': {'done': 'completed'}.get(t['status'], t['status']),
                                         'summary': summary, 'tokens': None, 'tools': None, 'duration_ms': None})
                 changed = True
@@ -379,7 +598,7 @@ class CodexLinker:
                 self.emitted.add(('stop', i, tid))
                 if t['end'] is None:
                     t['status'] = 'killed'
-                self.s._event(c['stopped'], 'stop', 'orch', tid, '에이전트 중지', agent=tid, title_key='event.stop.title')
+                self.s._event(c['stopped'], 'stop', up, tid, '에이전트 중지', agent=tid, title_key='event.stop.title')
                 changed = True
             if t['end'] and t['sha'] and t['out_state'] != 'confirmed' and not t.get('given_up'):
                 paths = [t['out']] if t['out'] else self._cand_files(t)
@@ -396,9 +615,22 @@ class CodexLinker:
     def verdict(self, a, now):
         """The runstate.Verdict of a Codex thread: its own turns (a run is a turn), what the launching Bash call recorded (the end notice of the background
         job, TaskStop) and whether a codex process has the rollout open (True / False / None: `ps` cannot say)."""
+        if a.origin == 'subagent':
+            # a native sub-agent has no process of its own and no launching call: the runtime of its root thread holds its life, its own record says how its turn ended and
+            # its parent's record when it interrupted it (_cxsub_status)
+            f = RS.facts_of(a.runs, 'cxsub', spawn_ts=a.spawn_ts)
+            f.last_ts = max(f.last_ts or 0.0, a.last_ts or 0.0) or None
+            f.pending = [p['ts'] for p in a.pending.values() if p.get('ts')]
+            f.cuts = list(a.cuts)
+            return RS.judge(f, RS.Proc(cx_open(a.runtime[1], a.runtime[0], cx_procs()) if a.runtime else None), now)
         calls = [t['call'] for t in a.turns if t.get('call')] or [(a.link or {}).get('call')]
-        node = (a.link or {}).get('node')
-        ledger = self.s.agents[node].ledger if node in self.s.agents else getattr(self.s, 'ledger', None)
+        node, tree = (a.link or {}).get('node'), (a.link or {}).get('sid')
+        if node in self.s.agents:
+            ledger = self.s.agents[node].ledger
+        elif tree and tree != self.s.id and tree in self.s.agents:                  # started by a descendant of the page: its record holds the notices of the job
+            ledger = self.s.agents[tree].ledger
+        else:
+            ledger = getattr(self.s, 'ledger', None)
         f = RS.facts_of(a.runs, 'codex', ledger=ledger, launch_calls=[c for c in calls if c], spawn_ts=a.spawn_ts)
         f.last_ts = max(f.last_ts or 0.0, a.last_ts or 0.0) or None
         f.pending = [p['ts'] for p in a.pending.values() if p.get('ts')]
@@ -439,6 +671,9 @@ class Session:
         self._cli_alive = set()     # ids of the live child Claude sessions (claude -p)
         self._cli_gone = {}         # child sessions that lost ownership: id -> (agent, tail). If owned again they are revived as they were
         self._cli_spawn = {}        # spawn events of child sessions whose body (first instruction) has not been filled in yet: id -> event
+        self._cli_spawn_ev = {}     # the spawn event of every child session (kept, so that the title and the launcher can be made again when the call that started it becomes known): id -> event
+        self._host_spawn = {}       # the same for the sub-agents of the child sessions: id -> event (None until the agent's first record is read)
+        self._host_seen = set()     # the sub-agents of child sessions whose spawn event was made
         self._sys_limit = None                # the feed event of the last usage-limit line, which the notice that follows it ("continuing automatically") amends
         self.runs = RS.RunTracker(self.id)    # the runs of this record file (the orchestrator's: a usage limit it waits on, board/runstate.py)
         self.ledger = RS.Ledger()             # what the main record knows about the agents it launched: notices, TaskStop calls, background task ids
@@ -456,96 +691,10 @@ class Session:
     def poll(self):
         changed = False
         with self.lock:
-            restarted, lines = tail_records(self.tail)
-            if restarted:
-                self.runs, self.ledger = RS.RunTracker(self.id), RS.Ledger()
-            for recs, torn in lines:
-                count_torn(self.runs, recs, torn)
-                for d in recs:
-                    if not isinstance(d, dict):
-                        continue
-                    failed = None
-                    try:
-                        rc = RS.rec(d)
-                        self.runs.feed(d, rc)
-                        self.ledger.feed(d, rc)
-                    except Exception as e:   # noqa: BLE001 — a field of the wrong type must not stop the session from opening
-                        failed = e
-                    try:
-                        self._feed_main(d)
-                    except Exception as e:   # noqa: BLE001 — one line must not stop the whole board
-                        failed = failed or e
-                    if failed:
-                        self.parse_errors += 1
-                        line_error(self.id, d, failed)
-                    changed = True
-            for mp in glob.glob(os.path.join(self.dir, 'subagents', 'agent-*.meta.json')):
-                aid = os.path.basename(mp)[len('agent-'):-len('.meta.json')]
-                if aid not in self.agents:
-                    try:
-                        with open(mp) as f:
-                            meta = json.load(f)
-                    except (OSError, ValueError):
-                        continue
-                    a = Agent(aid, meta)
-                    sp = self.spawns.get(a.tool_use_id)
-                    if sp:
-                        a.spawn_ts = sp['ts']
-                    self.agents[aid] = a
-                    self.agent_tails[aid] = Tail(os.path.join(self.dir, 'subagents', 'agent-%s.jsonl' % aid))
-                    changed = True
-            if self.provider == 'claude':
-                # Claude Code sessions started from Bash (claude -p): as sub-agents (when started with the model and effort set directly).
-                # If the ownership changes (cancelled, or reassigned to another parent) it is no longer this session's agent. The events and idx already given are left as they are,
-                # and if it is owned again the same agent and tail are revived (the spawn event is not made again)
-                owned = self._cli_children()
-                for csid in [c for c, a in self.agents.items() if a.origin == 'cli' and c not in owned]:
-                    self._cli_gone[csid] = (self.agents.pop(csid), self.agent_tails.pop(csid))
-                    changed = True
-                for csid, o in owned.items():
-                    if csid in self._cli_gone:
-                        a, self.agent_tails[csid] = self._cli_gone.pop(csid)
-                        a.cli, a.spawn_ts = o, o['bash_ts']
-                        self.agents[csid] = a
-                        a.redirects = self._redirects_of(csid)
-                        changed = True
-                        continue
-                    if csid in self.agents:
-                        self.agents[csid].cli = o
-                        self.agents[csid].redirects = self._redirects_of(csid)
-                        continue
-                    paths = glob.glob(os.path.join(PROJECTS, '*', csid + '.jsonl'))
-                    if not paths:
-                        continue
-                    a = Agent(csid, {'description': o['bash_desc'] or 'claude -p'})
-                    a.origin, a.spawn_ts, a.cli = 'cli', o['bash_ts'], o
-                    a.redirects = self._redirects_of(csid)
-                    self.agents[csid] = a
-                    self.agent_tails[csid] = Tail(paths[0])
-                    self._cli_spawn[csid] = self._event(o['bash_ts'], 'spawn', self.launcher_of(a), csid, o['bash_desc'] or 'Claude Code 실행', '', agent=csid,
-                                                    title_key=None if o['bash_desc'] else 'event.spawn_cli.title')
-                    changed = True
-            for aid, t in self.agent_tails.items():
-                a = self.agents[aid]
-                restarted, lines = tail_records(t)
-                if restarted:
-                    a.reset_runs()
-                for recs, torn in lines:
-                    count_torn(a.runs, recs, torn)
-                    for d in recs:
-                        if not isinstance(d, dict):
-                            continue
-                        try:
-                            a.feed(d)
-                        except Exception as e:   # noqa: BLE001
-                            self.parse_errors += 1
-                            line_error(aid, d, e)
-                        changed = True
-            self._route_child_notes()
-            if self.codex and self.codex.poll():
+            changed = self._read_main()
+            if self._read_team():
                 changed = True
-            if self.provider == 'claude':
-                self._walk_later()
+            self._walk_later()
             if changed:
                 self._agent_events()
                 if not self._sorted:      # once, at the first read: the agent-side events are slotted in time order
@@ -554,34 +703,221 @@ class Session:
                 self.version += 1
         return changed
 
-    def _cli_children(self):
-        """The `claude -p` children shown on this page: the ones this session launched (itself or through one of its sub-agents), and, one level of owner at a time,
-        the ones that a child of this page launched in turn (the page of the top orchestrator shows a grand-child under the child that launched it)."""
-        by_tree = {}
-        for c, o in list(LINKS.cli_owners.items()):                 # one pass: the children of every tree
-            by_tree.setdefault(o['sid'], {})[c] = o
-        owned = dict(by_tree.get(self.id, ()))
-        frontier = list(owned)
-        for _ in range(MAX_NEST):
-            nxt = {}
-            for csid in frontier:
-                nxt.update({c: o for c, o in by_tree.get(csid, {}).items() if c not in owned and c != self.id})
-            owned.update(nxt)
-            frontier = list(nxt)
-            if not frontier:
-                break
-        return owned
+    def _read_main(self):
+        """The record of the orchestrator itself (a Claude session) and the folder of the sub-agents it started with its Agent tool. True when something was read."""
+        changed = False
+        restarted, lines = tail_records(self.tail)
+        if restarted:
+            self.runs, self.ledger = RS.RunTracker(self.id), RS.Ledger()
+        for recs, torn in lines:
+            count_torn(self.runs, recs, torn)
+            for d in recs:
+                if not isinstance(d, dict):
+                    continue
+                failed = None
+                try:
+                    rc = RS.rec(d)
+                    self.runs.feed(d, rc)
+                    self.ledger.feed(d, rc)
+                except Exception as e:   # noqa: BLE001 — a field of the wrong type must not stop the session from opening
+                    failed = e
+                try:
+                    self._feed_main(d)
+                except Exception as e:   # noqa: BLE001 — one line must not stop the whole board
+                    failed = failed or e
+                if failed:
+                    self.parse_errors += 1
+                    line_error(self.id, d, failed)
+                changed = True
+        for mp in glob.glob(os.path.join(self.dir, 'subagents', 'agent-*.meta.json')):
+            aid = os.path.basename(mp)[len('agent-'):-len('.meta.json')]
+            if aid not in self.agents:
+                try:
+                    with open(mp) as f:
+                        meta = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                a = Agent(aid, meta)
+                sp = self.spawns.get(a.tool_use_id)
+                if sp:
+                    a.spawn_ts = sp['ts']
+                self.agents[aid] = a
+                self.agent_tails[aid] = Tail(os.path.join(self.dir, 'subagents', 'agent-%s.jsonl' % aid))
+                changed = True
+        return changed
+
+    def _read_team(self):
+        """Everything below the orchestrator on this page, read from the one graph of who started whom (LINKS): the `claude -p` children, the native sub-agent threads and the
+        `codex exec` threads of Codex, whoever of the page started them, and the sub-agents each `claude -p` child started with its own Agent tool. Then every record of them."""
+        changed = False
+        cli, cx = self._team()
+        # Claude Code sessions started from Bash (claude -p): as sub-agents (when started with the model and effort set directly).
+        # If the ownership changes (cancelled, or reassigned to another parent) it is no longer this session's agent. The events and idx already given are left as they are,
+        # and if it is owned again the same agent and tail are revived (the spawn event is not made again)
+        for csid in [c for c, a in self.agents.items() if a.origin == 'cli' and c not in cli]:
+            self._cli_gone[csid] = (self.agents.pop(csid), self.agent_tails.pop(csid))
+            for aid in [x for x, a in self.agents.items() if a.host == csid]:      # what the child started goes with it (it comes back with it)
+                del self.agents[aid]
+                del self.agent_tails[aid]
+                self._host_spawn.pop(aid, None)
+            changed = True
+        for csid, o in cli.items():
+            if csid in self._cli_gone:
+                a, self.agent_tails[csid] = self._cli_gone.pop(csid)
+                a.cli, a.spawn_ts = o, o['bash_ts']
+                self.agents[csid] = a
+                a.redirects = self._redirects_of(csid)
+                self._cli_retitle(a, o)
+                changed = True
+                continue
+            if csid in self.agents:
+                a = self.agents[csid]
+                a.cli = o
+                a.redirects = self._redirects_of(csid)
+                if self._cli_retitle(a, o):
+                    changed = True
+                continue
+            paths = glob.glob(os.path.join(PROJECTS, '*', csid + '.jsonl'))
+            if not paths:
+                continue
+            a = Agent(csid, {'description': o['bash_desc'] or 'claude -p'})
+            a.origin, a.spawn_ts, a.cli, a.cli_desc, a.cli_node = 'cli', o['bash_ts'], o, o['bash_desc'], o.get('node')
+            a.relay = _Relay(self.codex, csid, None)
+            a.redirects = self._redirects_of(csid)
+            self.agents[csid] = a
+            self.agent_tails[csid] = Tail(paths[0])
+            self._cli_spawn[csid] = self._cli_spawn_ev[csid] = self._event(o['bash_ts'], 'spawn', self.launcher_of(a), csid, o['bash_desc'] or 'Claude Code 실행', '', agent=csid,
+                                                                           title_key=None if o['bash_desc'] else 'event.spawn_cli.title')
+            changed = True
+        if self._hosted(cli):
+            changed = True
+        for aid, t in self.agent_tails.items():
+            a = self.agents[aid]
+            restarted, lines = tail_records(t)
+            if restarted:
+                a.reset_runs()
+            for recs, torn in lines:
+                count_torn(a.runs, recs, torn)
+                for d in recs:
+                    if not isinstance(d, dict):
+                        continue
+                    try:
+                        a.feed(d)
+                    except Exception as e:   # noqa: BLE001
+                        self.parse_errors += 1
+                        line_error(aid, d, e)
+                    changed = True
+        self._hosted_spawns()
+        self._route_child_notes()
+        if self.codex and self.codex.poll(cx):
+            changed = True
+        return changed
+
+    def _team(self):
+        """({claude -p child id: its link}, {Codex thread id: its link}) of what this page shows below its orchestrator: the descendants of the page in the graph of who started
+        whom (`LINKS.descendants`: parents before the children they started), by what each is: a `claude -p` child (`cli_owners`), a `codex exec` thread (`owners`) or a native
+        sub-agent thread of Codex (its link is what the graph says of it)."""
+        cli, cx = {}, {}
+        if not LINKS.ready.is_set():
+            return cli, cx
+        for tid in LINKS.descendants(self.id):
+            o = LINKS.owner_of(tid)
+            if o is None:
+                continue
+            link = {'cli': LINKS.cli_owners, 'cx': LINKS.owners}.get(o['kind'], {}).get(tid)
+            if o['kind'] == 'cli' and link is not None:
+                cli[tid] = link
+            elif o['kind'] == 'cx' and link is not None:
+                cx[tid] = link
+            elif o['kind'] == 'sub':
+                cx[tid] = o
+        return cli, cx
+
+    def _hosted(self, cli):
+        """The sub-agents (Agent tool) that the `claude -p` children of this page started: each child is a Claude session with a folder of its own, read like this page's own
+        (`a.host`: the child it hangs under). True when one was found."""
+        changed = False
+        for csid in cli:
+            t = self.agent_tails.get(csid)
+            if csid not in self.agents or t is None:
+                continue
+            folder = os.path.join(os.path.dirname(t.path), csid, 'subagents')
+            for mp in glob.glob(os.path.join(folder, 'agent-*.meta.json')):
+                aid = os.path.basename(mp)[len('agent-'):-len('.meta.json')]
+                if aid in self.agents:
+                    continue
+                try:
+                    with open(mp) as f:
+                        meta = json.load(f)
+                except (OSError, ValueError):
+                    continue
+                a = Agent(aid, meta)
+                a.host = csid
+                a.relay = _Relay(self.codex, csid, aid)
+                self.agents[aid] = a
+                self.agent_tails[aid] = Tail(os.path.join(folder, 'agent-%s.jsonl' % aid))
+                if aid not in self._host_seen:
+                    self._host_spawn[aid] = None
+                changed = True
+        return changed
+
+    def _hosted_spawns(self):
+        """The spawn card of a sub-agent of a `claude -p` child: made when its record has been read (its first time), its body filled in when its instruction is known."""
+        for aid, ev in list(self._host_spawn.items()):
+            a = self.agents.get(aid)
+            if a is None:
+                continue
+            if ev is None:
+                ts = a.spawn_ts or a.first_ts
+                if ts is None:
+                    continue
+                ev = self._host_spawn[aid] = self._event(ts, 'spawn', self.launcher_of(a), aid, a.description, '', agent=aid, extra={'tool_use_id': a.tool_use_id, 'model': a.model_hint})
+                self._host_seen.add(aid)
+            if a.spawn_prompt is not None:
+                ev['text'] = a.spawn_prompt
+                del self._host_spawn[aid]
+
+    def _cli_retitle(self, a, o):
+        """A child is shown as soon as a process, an environment or a remembered line places it, and the call that started it (and the agent inside the parent whose call it was) is known
+        later: the sub-agents' records and the text index are read after the first screen. When the link now names a call the child was shown without (or another one), the title, the time it
+        started and its spawn event (the title, the launcher) are made again from it. True when something changed."""
+        if o['bash_desc'] == getattr(a, 'cli_desc', o['bash_desc']) and o.get('node') == getattr(a, 'cli_node', o.get('node')):
+            return False
+        a.cli_desc, a.cli_node = o['bash_desc'], o.get('node')
+        a.describe(o['bash_desc'] or 'claude -p')
+        a.spawn_ts = o['bash_ts']
+        ev = self._cli_spawn_ev.get(a.id)
+        if ev is not None:
+            ev['title'], ev['from'] = o['bash_desc'] or 'Claude Code 실행', self.launcher_of(a)
+            if o['bash_desc']:
+                ev.pop('title_i18n', None)
+                ev.pop('title_is_default', None)
+            else:
+                ev['title_i18n'], ev['title_is_default'] = {'key': 'event.spawn_cli.title', 'params': {}}, True
+        return True
 
     def launcher_of(self, a):
-        """Who an agent hangs under on the page: 'orch' (this session's orchestrator), or the id of the sub-agent or `claude -p` child that launched it."""
+        """Who an agent hangs under on the page: 'orch' (this page's orchestrator), or the id of the sub-agent, `claude -p` child or Codex thread that started it."""
+        if a.provider == 'codex':
+            link = a.link or {}
+            if a.origin == 'subagent':
+                parent = link.get('parent')
+                return parent if parent and parent != self.id and parent in self.agents else 'orch'
+            node, tree = link.get('node'), link.get('sid')
+            if link.get('parent_kind') == 'codex' and node in self.agents:        # a shell of a native sub-agent of Codex started it
+                return node
+            return tree if tree and tree != self.id and tree in self.agents else 'orch'
         if a.origin == 'cli' and a.cli:
             node, tree = a.cli.get('node'), a.cli.get('sid')
             if node:
                 return node
             if tree and tree != self.id:
                 return tree
-        elif a.origin == 'subagent' and a.parent_agent:
-            return a.parent_agent
+        elif a.origin == 'subagent':
+            if a.parent_agent:
+                return a.parent_agent
+            if a.host:
+                return a.host
         return 'orch'
 
     def _redirects_of(self, csid):
@@ -594,7 +930,7 @@ class Session:
         cand = [L for L in dec.call.launches if L.reader and affil.launch_ok(L, dec.child, run)]
         return list(cand[0].redirects) if len(cand) == 1 else []
 
-    def _event(self, ts, kind, frm, to, title, text='', agent=None, extra=None, title_key=None, questions=None):
+    def _event(self, ts, kind, frm, to, title, text='', agent=None, extra=None, title_key=None, questions=None, text_key=None):
         """Appends a feed event. `title` and `text` are the old Korean fields (unchanged). The fields below are added after them:
         title_key = the dictionary key of the title when the server wrote it (title_i18n {key, params}; title_is_default is true for a stand-in title, false for a
         status label); questions = the structured body of a choice question."""
@@ -604,6 +940,8 @@ class Session:
         if title_key:
             ev['title_i18n'] = {'key': title_key, 'params': {}}
             ev['title_is_default'] = not title_key.startswith('event.notify.')
+        if text_key:
+            ev['text_i18n'] = {'key': text_key, 'params': {}}
         if questions is not None:
             ev['questions'] = questions
         self.feed.append(ev)
@@ -929,11 +1267,13 @@ class Session:
         recorded about it (notices, TaskStop) and the process table. `alive` is the main session's process (a sub-agent has none of its own)."""
         if a.provider == 'codex' and self.codex:
             return self.codex.verdict(a, now)
+        if a.host:                   # a sub-agent of a `claude -p` child lives in that child's session: its process is the one that counts
+            alive = self._cli_proc(a.host).alive
         if a.origin == 'cli':        # claude -p child session: its own process, found by its session id
             f = RS.facts_of(a.runs, 'cli', ledger=self._launcher_ledger(a), launch_calls=self.launch_calls(a.cli or {}), spawn_ts=a.spawn_ts)
         else:
             parent_over = bool(a.parent_agent and a.origin == 'subagent' and self._parent_over(a, alive, now, _seen))       # only a sub-agent ends with its parent
-            parent = self.agents.get(a.parent_agent) if a.parent_agent else None
+            parent = self.agents.get(a.parent_agent) if a.parent_agent else self.agents.get(a.host) if a.host else None       # (a sub-agent of a child session: the notices are in the record of that child)
             f = RS.facts_of(a.runs, 'subagent', ledger=parent.ledger if parent is not None else getattr(self, 'ledger', None), agent_id=a.id, tool_use_id=a.tool_use_id,
                             handbacks=[h['ts'] for h in a.handbacks if h['ts']], parent_over=parent_over, spawn_ts=a.spawn_ts)
         f.last_ts = max(f.last_ts or 0.0, a.last_ts or 0.0) or None          # a notice the agent received counts as a sign of life, as it always did
@@ -1114,16 +1454,15 @@ class Session:
 
 
 class CodexSession(Session):
-    """An unlinked Codex thread (tui · desktop · an exec that could not be linked) seen as a session. The thread itself is the orchestrator.
-    A guardian child thread is not an agent; it comes in only as tokens (tokens.guardian)."""
+    """A Codex thread that no session or thread started (tui · desktop · an exec that could not be linked) seen as a page. The thread itself is the orchestrator, and what it
+    started is its team like a Claude page's: its native sub-agent threads, the `claude -p` and `codex exec` runs its shell (or a sub-agent's) started. A guardian child thread
+    is not an agent; it comes in only as tokens (tokens.guardian)."""
 
     def __init__(self, e):
-        Session.__init__(self, e['path'])       # the Claude session's Tail and CodexLinker get made, but below the tail is replaced for this thread and the linker is not used (codex = None)
+        Session.__init__(self, e['path'])       # the Claude session's Tail and CodexLinker get made, but below the tail is replaced for this thread (the linker reads the threads below it)
         self.id = e['id']
         self.dir = None
         self.provider = 'codex'
-        self.codex = None
-        self.entry = e
         self.cwd = e['cwd'] or ''
         self.first_ts = e['meta_ts']
         self.title = CODEX.title(e)
@@ -1133,35 +1472,32 @@ class CodexSession(Session):
             size = 0
         self.partial = cx_start_offset(e['path'], size)
         self.tail = Tail(e['path'], start=self.partial, max_read=CX_MAX_READ)
+        self.fork = ForkSkip(e['prefix_ord'] if e.get('kind') == 'sub' else None, self.partial)
         self.orch_tokens.fixed_limit = True
         self.orch['model'] = e['model']       # so that calls before the first turn_context are priced too when reading from the end
         self.seen, self.thread_total, self.nomodel = {}, None, []
         self._alive = None
 
-    def poll(self):
+    def _read_main(self):
+        """The rollout of the thread itself. True when something was read."""
         changed = False
-        with self.lock:
-            for raw in self.tail.read():
-                r = cx_decode(raw)
-                if not r:
-                    continue
-                try:
-                    self._feed_cx(r)
-                except Exception as e:   # noqa: BLE001 — one line must not stop the whole board
-                    line_error(self.id, {'timestamp': r['ts']}, e)
-                changed = True
-            if changed:
-                cx_sync_base(self.orch_tokens, self.partial, self.thread_total, self.seen, self.orch['model'])
-            t = self.orch_tokens.t
-            before = (t['g_calls'], t['g_input'], t['g_output'])
-            cx_sync_guardians(self.orch_tokens, self.id)
-            if (t['g_calls'], t['g_input'], t['g_output']) != before:
-                changed = True
-            if changed:
-                if not self._sorted:
-                    self.feed.sort(key=lambda e: e['ts'] or 0)
-                    self._sorted = True
-                self.version += 1
+        before = self.tail.pos
+        lines = self.tail.read()
+        if self.tail.pos < before:
+            self.fork.restart()
+        for r in cx_rows(lines, self.fork):
+            try:
+                self._feed_cx(r)
+            except Exception as e:   # noqa: BLE001 — one line must not stop the whole board
+                line_error(self.id, {'timestamp': r['ts']}, e)
+            changed = True
+        if changed:
+            cx_sync_base(self.orch_tokens, self.partial, self.thread_total, self.seen, self.orch['model'])
+        t = self.orch_tokens.t
+        reviewed = (t['g_calls'], t['g_input'], t['g_output'])
+        cx_sync_guardians(self.orch_tokens, self.id)
+        if (t['g_calls'], t['g_input'], t['g_output']) != reviewed:
+            changed = True
         return changed
 
     def _feed_cx(self, r):

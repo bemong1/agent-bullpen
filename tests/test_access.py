@@ -430,7 +430,9 @@ class Version(unittest.TestCase):
     def test_the_changelog_names_the_same_version(self):
         with open(os.path.join(ROOT, 'CHANGELOG.md'), encoding='utf-8') as f:
             heads = re.findall(r'^## (\S+)', f.read(), re.M)
-        self.assertEqual(heads[0], board.__version__)
+        released = [h for h in heads if h != 'Unreleased']          # what is done since the last release has its own heading above it
+        self.assertEqual(released[0], board.__version__)
+        self.assertEqual([i for i, h in enumerate(heads) if h == 'Unreleased'], [0] if 'Unreleased' in heads else [])      # ... and only at the top
 
 
 if __name__ == '__main__':

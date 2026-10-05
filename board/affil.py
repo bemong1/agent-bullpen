@@ -130,22 +130,33 @@ class Instr:
 
 
 class ChildFacts:
-    __slots__ = ('sid', 't0', 'cwd', 'entry', 'runs')
+    """`codex_free`: the environment of the child's process was read and held no name of Codex (`CODEX_THREAD_ID`, `CODEX_SESSION_ID`): no shell of a Codex thread started it, so
+    no Codex thread can be what it was started by. False when the environment has them or was never read (a process not seen, no way to read it)."""
+    __slots__ = ('sid', 't0', 'cwd', 'entry', 'runs', 'codex_free', 'unknown', 'cleared')
 
-    def __init__(self, sid, t0, cwd, entry, runs):
+    def __init__(self, sid, t0, cwd, entry, runs, codex_free=False, unknown=(), cleared=()):
         self.sid, self.t0, self.cwd, self.entry, self.runs = sid, t0, cwd, entry, runs
+        self.codex_free = codex_free
+        self.cleared = tuple(cleared)             # (run number, tree) whose names in the environment were found not to be about that run (_stale_pin): for that run their facts are whole, so they are no competitor nobody can read
+        self.unknown = tuple(unknown)             # the Codex threads its environment names that nothing is known of (not in the index): a thread whose commands nobody can read started it, as far as anyone can tell
 
 
 class Owner:
-    """One record file that can hold launching calls: a main session (node None) or one sub-agent. `pool(lo, hi)` gives (normalised text, complete) of
-    its Bash commands, Write contents and Edit replacements between two times; `text_of(call)` the normalised text of one call."""
+    """One record file that can hold launching calls: a main session (node None) or one sub-agent, or a Codex thread (a root: node None; a sub-agent: its thread id). `pool(lo, hi)`
+    gives (normalised text, complete) of its Bash commands, Write contents and Edit replacements (a Codex thread: the command strings) between two times; `text_of(call)` the
+    normalised text of one call. `blind_at(lo, hi)`: the owner may have run a command in that time that its facts do not hold (an unknown-text competitor); `gap_at(lo, hi)`: the same
+    leaving out an open turn on its own (what is left is a command known to run whose record has not come, text that was not kept, a line that could not be read ...)."""
 
-    def __init__(self, tree, node=None, first_ts=None, last_ts=None, pool=None, text_of=None):
+    def __init__(self, tree, node=None, first_ts=None, last_ts=None, pool=None, text_of=None, provider='claude', cwd=None, blind_at=None, gap_at=None):
         self.tree, self.node = tree, node
         self.first_ts, self.last_ts = first_ts, last_ts
         self.calls, self._starts = [], []
         self.pool = pool or (lambda lo, hi: ('', True))
         self.text_of = text_of or (lambda call: '')
+        self.provider = provider                     # whose record it is: `claude` (a transcript) or `codex` (a thread: its commands come from the facts of the Codex index)
+        self.cwd = cwd                               # the folder the thread was opened in (a Codex thread: for the blind test)
+        self.blind_at = blind_at or (lambda lo, hi: False)      # True when the owner may have run something between the two times that its facts do not hold (see _blind)
+        self.gap_at = gap_at or self.blind_at                   # the same, without a turn that is merely open: for asking whether a thread whose commands are all there can have started something (see _stale_pin)
 
     def add(self, call):
         i = bisect.bisect_right(self._starts, call.span.start)
@@ -260,7 +271,7 @@ def _user_text(d):
 class Decision:
     """The judgment about one child. `relation` is the facts.Relation (None tree = not linked); `call` the Call object (or None); `held` is 'ambiguous'
     when the evidence tied at its best rank; `diags` a list of (code, detail dict); `by` one (tree, node) or None per run."""
-    __slots__ = ('child', 'relation', 'call', 'held', 'held_trees', 'diags', 'rank', 'kind', 'by', 'incomplete', 'assumed', 'claims', 'calls', 'run_claims', 'run_ts')
+    __slots__ = ('child', 'relation', 'call', 'held', 'held_trees', 'diags', 'rank', 'kind', 'by', 'incomplete', 'assumed', 'claims', 'calls', 'run_claims', 'run_ts', 'run_ranks')
 
     def __init__(self, child):
         self.child = child
@@ -271,6 +282,7 @@ class Decision:
         self.calls = []                          # per run: the Call the evidence names for it, or None (`call` is the first run's)
         self.run_claims = []                     # per run: the calls it could have been started by (one entry of `claims`); a run the evidence names has just that call
         self.run_ts = []                         # per run: when it started
+        self.run_ranks = []                      # per run: the rank of the evidence that decided its tree (None: none did)
 
     @property
     def tree(self):
@@ -318,6 +330,34 @@ def viable(call, child, run):
     in it and none of them can be it. A call the reader could not read (tmux, xargs, a script it could not follow) has no launch to contradict and stays."""
     readers = [L for L in call.launches if L.reader]
     return not readers or any(launch_ok(L, child, run) for L in readers)
+
+
+def _under(path, base):
+    """Whether `path` is `base` or inside it (through realpath when the names differ); an unknown folder on either side is taken to be."""
+    import os
+    if not path or not base:
+        return True
+    if _inside(path, base):
+        return True
+    try:
+        return _inside(os.path.realpath(path), os.path.realpath(base))
+    except OSError:
+        return False
+
+
+def _blind(owners, child, run, k):
+    """The (tree, node) of the owners that may have started run number `k` with something their facts do not hold: a Codex thread whose commands have a gap in the time
+    the run started in (a command that runs is written when it ends; a text that was not kept), and that was opened in the child's folder or above it. Such an owner
+    is a competitor whose text nobody knows: no other owner's content match is a certain link then (a guess, and its comparison is incomplete). Nobody is one for a child
+    whose environment was read and holds no name of Codex (`codex_free`: no Codex shell started it). A tree whose names were found not to be about this run (`child.cleared`) is none for
+    this run only: another run of the child, which they may be about, still has it."""
+    out = set()
+    if child.codex_free:
+        return out
+    for o in owners:
+        if o.tree != child.sid and (k, o.tree) not in child.cleared and o.blind_at(run.ts - RUN_GRACE, run.ts + RUN_SLACK_BEFORE) and _under(child.cwd, o.cwd):
+            out.add((o.tree, o.node))
+    return out
 
 
 def _running(owners, child, run):
@@ -388,7 +428,7 @@ def _best_call(owner, calls, run):
     return None
 
 
-def run_evidence(child, run, run_index, owners, out=None, content=True, pin_trees=()):
+def run_evidence(child, run, run_index, owners, out=None, content=True, pin_trees=(), up=None):
     """Evidence of ranks 1, 3, 4 and 5 for one run: (evidence list, tie list, notes). Evidence = (rank, kind, tree, node, call); tie = (rank, kind, [(tree, node)]).
     notes: {'incomplete': bool, 'content_tie': bool, 'author': tree or None, 'assumed': bool, 'unresolved': [Redirect], 'running': [Call]} (`running`: the calls with launches, read or not, that were running and could be the launcher; `author`: the session whose text holds the instruction although it ran nothing able to start a child; `assumed`: the content evidence is a guess because the owner's only launching call was a script nobody could read). content=False leaves out the fingerprint (rank 3 by text): the quick first
     judgment before the text index exists. Weaker evidence is not looked for once an output file decides tree, node and call (nothing below rank 1 can change
@@ -413,6 +453,7 @@ def run_evidence(child, run, run_index, owners, out=None, content=True, pin_tree
         ties.append((3, 'resume', keys))
     # rank 3: content, a long instruction found in the text of an owner with a running launching call
     if content and run.anchors and by_owner:
+        blind = _blind(owners, child, run, run_index)
         scores, complete, firm, assumed = {}, True, set(), set()
         for key, (o, calls) in by_owner.items():
             if pin_trees and o.tree not in pin_trees:
@@ -428,6 +469,18 @@ def run_evidence(child, run, run_index, owners, out=None, content=True, pin_tree
             notes['content_tie'] = True                              # the diagnostic: the same instruction fits several launchers
         scope = {k: v for k, v in scores.items() if not pin_trees or k[0] in pin_trees}
         verdict, got = fp.pick(scope) if scope else ('none', None)
+        if verdict in ('tie', 'weak'):
+            # Owners that only wrote the words (they ran nothing that could start a session: no evidence, see below) do not make a tie with one that ran a launch: among the owners
+            # that did, one that stands out is the answer (a session that relays the instruction through a script it runs, next to the thread that really ran it).
+            starters = {k: v for k, v in scope.items() if k in firm or k in assumed}
+            v2, g2 = fp.pick(starters) if len(starters) < len(scope) and starters else ('none', None)
+            if v2 == 'tie':
+                verdict, got = v2, g2                                     # two launchers fit: they are the tie, the one that only wrote the words is not in it
+            if v2 == 'ok':
+                verdict, got = v2, g2
+                wrote = sorted((k for k, v in scope.items() if v >= fp.COVER_MIN and k not in starters), key=lambda k: (k[0], k[1] or ''))
+                if wrote:
+                    notes['author'] = by_owner[wrote[0]][0].tree         # who wrote the words is still said
         if verdict == 'ok' and got not in firm and got not in assumed:
             # The owner whose text it is was running nothing that could start a session (a server, a test run, a script that was read and starts nothing): it shows
             # who wrote the words, not who started the child. That is no evidence of a launch, so no link: the author is said, and a launcher that reads the words
@@ -438,10 +491,15 @@ def run_evidence(child, run, run_index, owners, out=None, content=True, pin_tree
             # Firm only when the comparison was whole and a call shown to start a session was running; a script nobody could read, or text left out of the
             # comparison, makes it a guess.
             o, calls = by_owner[got]
-            rank, kind = (3, 'content') if complete and got in firm else (4, 'content_short')
+            # A thread that may have run something unknown is a competitor and the comparison is not whole, unless it is one of the winner's own tree (it cannot change the tree: the node is
+            # the sub-agent whose recorded launch shows it, a possibility of another node is no evidence) or above the winner's tree in the chain of certain links (the winner is its own
+            # descendant, started from a command that may still be running: that blindness is what a launch of the winner looks like from above).
+            above = up(got[0]) if (up and blind) else ()
+            seen = complete and not child.unknown and not {k for k in blind if k[0] != got[0] and k[0] not in above}     # (a thread nothing is known of is a competitor whose text nobody can read)
+            rank, kind = (3, 'content') if seen and got in firm else (4, 'content_short')
             notes['assumed'] = got not in firm
             ev.append((rank, kind, o.tree, o.node, _best_call(o, [c for c in calls if c.starts('claude')], run)))
-            notes['incomplete'] = notes['incomplete'] or not complete    # the comparison left text out: never a certain link
+            notes['incomplete'] = notes['incomplete'] or not seen         # the comparison left text out: never a certain link
         elif verdict == 'tie':
             ties.append((3, 'content', sorted(got, key=lambda k: (k[0], k[1] or ''))))
         elif verdict == 'weak':
@@ -521,9 +579,10 @@ def _launched_elsewhere(owners, child, run, tree, node):
     return any(L.reader for o in owners if o.tree == tree and o.node != node and o.tree != child.sid for L in launches(o))
 
 
-def settle(evs, ties):
+def settle(evs, ties, exact=()):
     """The best evidence decides the tree; the best node-capable evidence inside that tree decides the node. A tie at the deciding rank holds the field.
-    -> dict(tree, rank, kind, held, node, node_rank, node_tie, call_ev)"""
+    `exact`: [(tree, node)] of the rank 2 evidence that names the node as well (a Codex environment: the thread that ran the command is the node, or the root itself:
+    node None); the explicit exception to "rank 2 says the tree only". -> dict(tree, rank, kind, held, node, node_rank, node_tie, call_ev)"""
     res = {'tree': None, 'rank': None, 'kind': None, 'held': False, 'held_trees': (), 'node': None, 'node_rank': None, 'node_tie': False, 'call': None, 'node_known': False}
     if any(e[1] == 'resume' for e in evs):
         # the child's own id written in a running call names its launcher; the words of an instruction (which another owner can share) are not weighed against it
@@ -545,6 +604,7 @@ def settle(evs, ties):
     if tree is None:
         return res
     cand = [(e[0], e[3], e[4]) for e in evs if e[2] == tree and e[0] in NODE_RANKS]
+    cand += [(2, n, None) for t, n in exact if t == tree]
     tie_nodes = [(t[0], k[1]) for t in ties if t[0] in NODE_RANKS for k in t[2] if k[0] == tree]
     ranks = [c[0] for c in cand] + [t[0] for t in tie_nodes]
     if ranks:
@@ -553,7 +613,8 @@ def settle(evs, ties):
         res['node_rank'], res['node_known'] = rb, True
         if len(nodes) == 1:
             res['node'] = next(iter(nodes))
-            calls = {id(c): c for r, n, c in cand if r == rb and n == res['node'] and c is not None}      # evidence that does not know the call does not undo one that does
+            of_rank = (rb,) if rb != 2 else (1, 3)                    # an environment (2) does not know the call: a certain output file or text match at the same node does
+            calls = {id(c): c for r, n, c in cand if r in of_rank and n == res['node'] and c is not None}      # evidence that does not know the call does not undo one that does
             res['call'] = next(iter(calls.values())) if len(calls) == 1 else None
         else:
             res['node_tie'] = True
@@ -566,7 +627,7 @@ def _pin_runs(pins, runs):
     minutes), a pin without a start time to the latest run. -> {run index: [pin]}"""
     out = {}
     for p in pins:
-        if not p.get('tree'):
+        if not (p.get('tree') or p.get('conflict')):
             continue
         k = 0
         if len(runs) > 1:
@@ -579,6 +640,18 @@ def _pin_runs(pins, runs):
                     k = len(runs) - 1
         out.setdefault(k, []).append(p)
     return out
+
+
+def _pin_evidence(pins):
+    """(evidence, ties) of the pins of one run. A pin with a `conflict` names no tree: the environment holds the names of two providers that point to different parents and
+    nothing decided between them (Lineage.pending): the two are a tie at rank 2, which holds the child (rank 3 and below do not break it)."""
+    return ([(2, p['kind'], p['tree'], None, None) for p in pins if p.get('tree')],
+            [(2, p['kind'], [tuple(k) for k in p['conflict']]) for p in pins if p.get('conflict')])
+
+
+def _exact(pins):
+    """[(tree, node)] of the pins that name the node as well (`exact`: the environment of a Codex shell says which thread ran the command)."""
+    return [(p['tree'], p.get('node')) for p in pins if p.get('exact')]
 
 
 def _claims(res, notes):
@@ -597,31 +670,67 @@ def _claims(res, notes):
     return [c for c in cands if any(L.reader for L in c.launches)]
 
 
-def decide(child, owners, pins=(), out=None, saved=None, content=True):
-    """The Decision for one child. `owners`: [Owner]; `pins`: [{'kind': env|proc|file, 'tree': sid, 'ts': process start or None}] (live process,
-    environment, a remembered link: tree evidence of rank 2 for the run that process belongs to); `out`: an object with files_with(sid) and writers(path)
+def _stale_pin(child, run, k, pin, owners, out, content, up):
+    """Whether an environment pin (a tree) is not about this run: the names a tmux server or another long-lived process carried on from the shell that
+    started it. The pin counts as long as the tree it names (the thread, for a Codex environment) can have started the run: it ran a call that was running at the run's start and could be
+    its launcher, or its facts may lack a command in that time (a gap). It is out only when nothing of it can have started the run, its record is whole, and another tree's launch
+    fits the run firmly (an output file or an id written in a call that names it, or a match of the instruction that is not a guess: with a thread nobody can read about, it is). The comparison is made as if a Codex shell might
+    have started the child, whatever the pin says."""
+    tree = pin['tree']
+    mine = [o for o in owners if o.tree == tree]                       # the tree: its main record and every sub-agent (a Codex environment names one thread of it; the tree is what a call of any node supports)
+    if not mine or any(o.gap_at(run.ts - RUN_GRACE, run.ts + RUN_SLACK_BEFORE) for o in mine):
+        return False
+    if any(c.starts('claude') for _, c in _running(mine, child, run)):
+        return False
+    other = ChildFacts(child.sid, child.t0, child.cwd, child.entry, child.runs, False, child.unknown, child.cleared)
+    ev, _, notes = run_evidence(other, run, k, [o for o in owners if o.tree != tree], out, content, (), up)
+    return any(e[0] <= 3 and e[2] != tree for e in ev)
+
+
+def decide(child, owners, pins=(), out=None, saved=None, content=True, up=None):
+    """The Decision for one child. `owners`: [Owner]; `pins`: [{'kind': env|proc|file, 'tree': sid, 'ts': process start or None, 'node': the thread, 'exact': True}]
+    (live process, environment, a remembered link: tree evidence of rank 2 for the run that process belongs to; `exact` is only for a Codex environment, which also
+    says the node: the thread that ran the command, None for a root); `out`: an object with files_with(sid) and writers(path)
     (see _out_evidence); `saved`: a remembered {'tree', 'node'} used only when the records and the processes give no evidence at all (rule `cache`);
-    `content`: False skips the text fingerprint (the quick first judgment)."""
+    `content`: False skips the text fingerprint (the quick first judgment). `up(tree)`: the ids above a tree through links that are certain (nearest first), for the blind test."""
     dec = Decision(child)
     rel = dec.relation
     runs = child.runs
-    pinned = _pin_runs([p for p in pins if p.get('tree') != child.sid], runs)
-    per_run = []
-    for k, run in enumerate(runs):
-        e, t, n = run_evidence(child, run, k, owners, out, content, {p['tree'] for p in pinned.get(k, [])})
-        per_run.append((e, t, n))
     if not runs and child.t0 is not None:
         runs = [Instr(child.t0, 1, '')]                              # no instruction line was read: judge by the start time alone (nothing can veto)
-        per_run = [run_evidence(child, runs[0], 0, owners, out, content, {p['tree'] for p in pinned.get(0, [])})]
-    if not per_run:
+    if not runs:
         return dec
+    pinned = _pin_runs([p for p in pins if p.get('tree') != child.sid], runs)
+    unknown = tuple(sorted({u for p in pins if p.get('unknown') for u in p['unknown']}))
+    stale = []
+    for k, run in enumerate(runs):
+        kept = []
+        for p in pinned.get(k, []):
+            if p.get('kind') == 'env' and p.get('tree') and _stale_pin(child, run, k, p, owners, out, content, up):
+                stale.append((k, p['tree']))
+            else:
+                kept.append(p)
+        if k in pinned:
+            pinned[k] = kept
+    if stale or unknown:
+        # an environment that is not about this run takes the claim that nothing of Codex can have started it with it (`codex_free`); a thread nothing is known of can have
+        child = ChildFacts(child.sid, child.t0, child.cwd, child.entry, child.runs, child.codex_free and not stale, unknown, stale)
+        dec.child = child
+    dec.diags += [('evidence_conflict', {'other': t}) for t in sorted({t for _, t in stale} | set(unknown))]
+    per_run = []
+    for k, run in enumerate(runs):
+        e, t, n = run_evidence(child, run, k, owners, out, content, {p['tree'] for p in pinned.get(k, []) if p.get('tree')}, up)
+        per_run.append((e, t, n))
     evs, ties, notes = per_run[0]
     t_first = runs[0].ts
-    first_ev = list(evs) + [(2, p['kind'], p['tree'], None, None) for p in pinned.get(0, [])]
-    s = settle(first_ev, ties)
-    if s['tree'] is None and not s['held'] and saved and saved.get('tree') != child.sid:
+    pin_ev, pin_ties = _pin_evidence(pinned.get(0, []))
+    first_ev = list(evs) + pin_ev
+    ties = list(ties) + pin_ties
+    exact = _exact(pinned.get(0, []))
+    s = settle(first_ev, ties, exact)
+    if s['tree'] is None and not s['held'] and saved and saved.get('tree') != child.sid and not unknown:
         first_ev = first_ev + [(2, 'cache', saved['tree'], saved.get('node'), None)]
-        s = settle(first_ev, ties)
+        s = settle(first_ev, ties, exact)
         if s['tree'] is not None and saved.get('node') is not None and not s['node_known']:
             s['node'], s['node_known'], s['node_rank'] = saved['node'], True, 3         # the remembered node came from a firm rule
     if s['tree'] is not None and s['rank'] == 3 and s['kind'] == 'content' and _launched_elsewhere(owners, child, runs[0], s['tree'], s['node']):
@@ -637,8 +746,10 @@ def decide(child, owners, pins=(), out=None, saved=None, content=True):
         dec.diags.append(('path_unresolved', {'n': len(unresolved)}))
     if s['held']:
         dec.held, dec.held_trees = 'ambiguous', tuple(s['held_trees'])
+        if pin_ties and s['rank'] is None:
+            dec.diags += [('evidence_conflict', {'other': t}) for t in sorted(s['held_trees'])]      # two providers' names in one environment, nothing says which is the parent
     dec.claims = _claims(s, notes)
-    dec.calls, dec.run_claims, dec.run_ts = [s['call']], [list(dec.claims)], [t_first]
+    dec.calls, dec.run_claims, dec.run_ts, dec.run_ranks = [s['call']], [list(dec.claims)], [t_first], [s['rank']]
     if s['tree'] is not None:
         tree = s['tree']
         rel.tree, rel.node, dec.rank, dec.kind = tree, s['node'], s['rank'], s['kind']
@@ -659,13 +770,15 @@ def decide(child, owners, pins=(), out=None, saved=None, content=True):
         if k == 0:
             dec.by.append((s['tree'], s['node']) if s['tree'] is not None else None)
             continue
-        ev_k = list(e) + [(2, p['kind'], p['tree'], None, None) for p in pinned.get(k, [])]
-        sk = settle(ev_k, t)
+        pe_k, pt_k = _pin_evidence(pinned.get(k, []))
+        ev_k = list(e) + pe_k
+        sk = settle(ev_k, list(t) + pt_k, _exact(pinned.get(k, [])))
         ck = _claims(sk, n)
         dec.claims += ck
         dec.calls.append(sk['call'])
         dec.run_claims.append(ck)
         dec.run_ts.append(runs[k].ts)
+        dec.run_ranks.append(sk['rank'])
         if sk['tree'] is None:
             dec.by.append(None)
             continue

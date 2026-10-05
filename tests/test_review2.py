@@ -171,7 +171,7 @@ class F03BulkTurns(unittest.TestCase):
         e = {'id': self.TID, 'path': path, 'cwd': '/w', 'meta_ts': 1790726400.0, 'model': 'gpt-6.1-sol'}
         info = {'sid': 'sidX', 'rule': 'prompt', 'call': None, 'bash_ts': 1790726399.0, 'bash_desc': '', 'dt': 1.0, 'cwd': '/w',
                 'cwd_ok': True, 'prompt_ok': True}
-        sess = types.SimpleNamespace(id='sidX', agents={}, feed=[])
+        sess = types.SimpleNamespace(id='sidX', agents={}, feed=[], launcher_of=lambda a: 'orch')
         sess._event = lambda ts, kind, frm, to, title, text='', agent=None, extra=None, **kw: sess.feed.append({'ts': ts, 'kind': kind, 'agent': agent, 'text': text})
         ready = threading.Event()
         ready.set()

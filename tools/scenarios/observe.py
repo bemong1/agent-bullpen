@@ -143,7 +143,7 @@ def observe(b):
                                             CODEX_SESSIONS=os.path.join(b.codex, 'sessions'), CODEX_NAMES=os.path.join(b.codex, 'session_index.jsonl'),
                                             CODEX=index, LINKS=links))
                 stack.enter_context(mock.patch.dict(os.environ, {'HOME': b.home}))
-                objs = types.SimpleNamespace(links=links, index=index, sessions={})
+                objs = types.SimpleNamespace(links=links, index=index, sessions={}, pages={})
             os_kind = case.v.get('os', 'linux')
             write_sessions(b, ph.procs)
             with contextlib.ExitStack() as st:
@@ -155,8 +155,12 @@ def observe(b):
                     st.enter_context(mock.patch.object(procs, 'subprocess', ps_stub(ph.procs, usable=(os_kind == 'mac'))))
                 st.enter_context(frozen(ph.now))
                 procs.reset()
+                if ph.hook:
+                    ph.hook()                              # the records that arrive between two looks
                 objs.index.refresh(force=True)
                 objs.links.scan()
+                if case.bundle == 'cxo':
+                    step_page(b, objs)                    # the server opens a page once and keeps polling it: what comes between two looks (a late record) reaches a page that is open already
                 if i == len(b.phases) - 1:
                     read_final(b, obs, objs)
         return obs
@@ -177,6 +181,10 @@ def read_final(b, obs, objs):
         read_room(b, obs, objs)
     if bundle in ('sta', 'cpl'):
         read_sta(b, obs, objs)
+    if bundle == 'cxo':
+        read_cxo(b, obs, objs)
+    if bundle == 'rer':
+        read_rer(b, obs, objs)
     read_diag(b, obs, objs)
 
 
@@ -188,10 +196,13 @@ def read_diag(b, obs, objs):
         return
     s, st = open_state(b, objs)
     G = b.ids.get('child')
+    rer_roles = {b.ids[r]: r for r in ('a1', 'a2', 'b1', 'b2') if r in b.ids} if getattr(b.case, 'bundle', None) == 'rer' else {}
     for e in s._diag or ():
         who = None
         if e['scope'] == 'agent' and e['agent'] == G:
             who = 'child'
+        elif e['scope'] == 'agent' and e['agent'] in rer_roles:
+            who = rer_roles[e['agent']]                      # a rerun: the diagnostics of the runs of each participant
         elif e['scope'] == 'agent' and e['code'] == 'proc_unknown':
             who = 'orch'                                    # every agent says it (the process table is one for the page): beside the participant, it is the page that says it
         elif e['scope'] == 'unit':
@@ -206,12 +217,40 @@ def read_diag(b, obs, objs):
 # ---------------------------------------------------------------------------------------------------------------------
 # shared readers
 # ---------------------------------------------------------------------------------------------------------------------
+def page_of(b, objs):
+    """The page of the top orchestrator, made when it can be (its record is there, and its thread is listed), then kept: (Session or None)."""
+    key = b.main_path
+    s = objs.pages.get(key)
+    if s is None:
+        if b.meta.get('page') == 'codex':
+            e = objs.index.get(b.ids['top'])
+            s = server.CodexSession(e) if e is not None else None      # the page of a Codex thread: the thread itself is the orchestrator
+        elif os.path.isfile(key):
+            s = server.Session(key)
+        if s is not None:
+            objs.pages[key] = s
+    return s
+
+
+def step_page(b, objs):
+    """One look of the server at the page of this phase: it is opened at the first look that can and polled at every later one, and its state is drawn (the page is drawn every few seconds)."""
+    s = page_of(b, objs) if b.main_path else None
+    if s is not None:
+        s.poll()
+        views.state(s)
+
+
 def open_state(b, objs, path=None):
-    """The API state of the main session (opened once per observation): (Session, state dict)."""
+    """The API state of the main session (opened once per observation, or kept from the earlier looks of a case that is looked at in steps): (Session, state dict)."""
     key = path or b.main_path
     if key in objs.sessions:
         return objs.sessions[key]
-    s = server.Session(key)
+    s = page_of(b, objs) if key == b.main_path and key in objs.pages or b.case.bundle == 'cxo' else None
+    if s is None:
+        if b.meta.get('page') == 'codex':
+            s = server.CodexSession(objs.index.get(b.ids['top']))      # the page of a Codex thread: the thread itself is the orchestrator
+        else:
+            s = server.Session(key)
     s.poll()
     s.poll()
     s.walk_repos()                    # the background walk of the repository for debate folders no record names, done once (the server does it a few seconds after opening)
@@ -385,3 +424,87 @@ def read_sta(b, obs, objs):
             obs.set('child', 'resets_at', a.get('resets_at', MISSING))
             obs.set('child', 'by', (tuple(a['by']) if a['by'] else None) if 'by' in a else MISSING)
             obs.set('child', 'alert', {al['id'].split(':')[0] for al in st['alerts'] if al.get('agent') == G})
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Codex orchestrator
+# ---------------------------------------------------------------------------------------------------------------------
+EVENT_KINDS = ('spawn', 'orch_msg', 'agent_msg', 'handback')           # the kinds of event a sub-agent's story is made of (others, such as the orchestrator's own words, are not about it)
+
+
+def owner_info(links, G):
+    """What the board says about who started the run or thread G: {tree, node, certain} or None. The board's own graph (`owner_of`) when it has one, else the older
+    tables of the link index (`cli_owners` for a `claude -p` run, `owners` for a Codex thread). `tree` is the launching session or root thread."""
+    of = getattr(links, 'owner_of', None)
+    if of is not None:
+        o = of(G)
+        return None if o is None else {'tree': o.get('parent'), 'node': o['node'] if 'node' in o else MISSING, 'certain': bool(o.get('certain'))}
+    o = links.cli_owners.get(G) or links.owners.get(G)
+    if not o:
+        return None
+    return {'tree': o['sid'], 'node': o['node'] if 'node' in o else MISSING, 'certain': link.certain(o['rule'])}
+
+
+def read_cxo(b, obs, objs):
+    """The page of the top orchestrator (a Claude session or a Codex thread) and the link index, read for every run and thread of the scene that the truth speaks about."""
+    v = b.case.v
+    s, st = open_state(b, objs)
+    links, index = objs.links, objs.index
+    repo = b.meta['repo']
+    rel = lambda p: os.path.relpath(p, repo) if p else None
+    page_of = getattr(links, 'page_of', None)
+    for role in ('child', 'mid', 'host', 'guardian'):
+        G = b.ids.get(role)
+        if G is None or not isinstance(G, str):
+            continue
+        a = agent_api(st, G)
+        obs.set(role, 'listed', 'yes' if a is not None else 'none')
+        if role == 'guardian':
+            continue
+        o = owner_info(links, G)
+        obs.set(role, 'tree', o['tree'] if o else None)
+        obs.set(role, 'rule_class', 'none' if not o else ('certain' if o['certain'] else 'guess'))
+        obs.set(role, 'node', o['node'] if o else MISSING)
+        obs.set(role, 'page', page_of(G) if page_of is not None else MISSING)
+        if a is None:
+            for f in ('parent', 'status', 'label'):
+                obs.set(role, f, MISSING)
+        else:
+            obs.set(role, 'parent', a['parent'] if 'parent' in a else MISSING)
+            obs.set(role, 'status', a.get('status', MISSING))
+            obs.set(role, 'label', a.get('tag') or a.get('title') or MISSING)
+    G = b.ids.get('child')
+    if v['subj'] == 'cx_sub' and G:
+        mine = [ev for ev in st['feed'] if G in (ev.get('agent'), ev.get('to'), ev.get('from'))]
+        obs.set('child', 'events', frozenset(ev['kind'] for ev in mine if ev['kind'] in EVENT_KINDS))
+        obs.set('child', 'spawn_text', next((ev.get('text') for ev in mine if ev['kind'] == 'spawn'), MISSING))
+        e = index.get(G)
+        obs.set('child', 'first_user', e['first_user'] if e else MISSING)
+    obs.set('orch', 'guardian_calls', (st['orch'].get('tokens') or {}).get('guardian', {}).get('calls', 0))
+    if v['topic'] != 'none' and G:
+        a, placed, readers, listed = deb_view(st, rel, G)
+        set_places(obs, 'child', a, placed, readers, rel)
+        obs.set('listing', 'units', frozenset(listed))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# a rerun
+# ---------------------------------------------------------------------------------------------------------------------
+def read_rer(b, obs, objs):
+    """The two runs of each participant: the tree, the call (the Bash call the link names), the start and the title the page gives it, and the seat it holds in the debate list."""
+    s, st = open_state(b, objs)
+    links = objs.links
+    repo = b.meta['repo']
+    rel = lambda p: os.path.relpath(p, repo) if p else None
+    for role in ('a1', 'a2', 'b1', 'b2'):
+        G = b.ids.get(role)
+        if G is None:
+            continue
+        o = links.cli_owners.get(G) or links.owners.get(G)
+        obs.set(role, 'tree', o['sid'] if o else None)
+        obs.set(role, 'call', (o['call'] if 'call' in o else MISSING) if o else None)
+        a, placed, readers, listed = deb_view(st, rel, G)
+        obs.set(role, 'start', a['spawn_ts'] if a is not None and a.get('spawn_ts') else MISSING)
+        obs.set(role, 'title', a['title'] if a is not None else MISSING)
+        set_places(obs, role, a, placed, readers, rel)
+        obs.set('listing', 'units', frozenset(listed))

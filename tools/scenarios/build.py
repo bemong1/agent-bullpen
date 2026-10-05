@@ -178,8 +178,9 @@ class Transcript:
     def turn_end(self, t, ms=1000):
         return self.add(t, 'system', subtype='turn_duration', durationMs=ms, isMeta=True, messageCount=2)
 
-    def save(self):
-        rows = sorted(self.rows, key=lambda r: r[:2])
+    def save(self, before=None):
+        """Writes the record in time order. `before`: only the lines up to that time (the record as it was when the board first looked, the rest still to be written)."""
+        rows = sorted((r for r in self.rows if before is None or r[0] <= before), key=lambda r: r[:2])
         put(self.path, ''.join(dump(d) + '\n' for _, _, d in rows), rows[-1][0] if rows else None)
 
 
@@ -187,8 +188,9 @@ class Transcript:
 class Phase:
     """One look at the board: the time, which processes exist, and whether the board process is a fresh one (a restart)."""
 
-    def __init__(self, now, procs, boot=0, note=''):
+    def __init__(self, now, procs, boot=0, note='', hook=None):
         self.now, self.procs, self.boot, self.note = now, procs, boot, note
+        self.hook = hook                       # called before the board looks in this phase: the records that arrive in the meantime (a rollout line written late)
 
 
 class Built:
@@ -297,6 +299,12 @@ def build_case(case, root):
     elif bundle == 'room':
         from .scene_room import build_room
         build_room(b)
+    elif bundle == 'cxo':
+        from .scene_cxo import Cxo
+        Cxo(b).build()
+    elif bundle == 'rer':
+        from .scene_rer import Rer
+        Rer(b).build()
     else:
         from .scene_deb import build_cpl
         build_cpl(b)

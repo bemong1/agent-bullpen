@@ -18,6 +18,7 @@ CX_PROMPT_MIN = 40         # number of characters outside variables that the pro
 CX_TOOL_ORDER = ('apply_patch', 'web__run', 'exec_command', 'view_image', 'write_stdin')
 
 CX_HEAD_RE = re.compile(rb'^\{"timestamp":"([^"]*)",(?:"ordinal":\d+,)?"type":"([a-z_]+)"(?:,"payload":\{"type":"([A-Za-z_]+)")?')
+CX_ORD_RE = re.compile(rb'^\{"timestamp":"[^"]*","ordinal":(\d+),')       # the line's own number minus one, when the record has it (a sub-agent's copied history is told by it)
 CX_CALL_ID_RE = re.compile(rb'"call_id":"([^"]+)"')
 
 CX_CTX_BLOCK_RE = re.compile(r'<(environment_context|recommended_plugins|user_instructions|permissions[a-z_]*)\b[^>]*>'
@@ -38,15 +39,19 @@ def _js_str(s):
 
 
 def codex_tool(js):
-    """From the JS of a custom_tool_call exec, the inner tool name and a short description. If there are several, one, in CX_TOOL_ORDER order."""
+    """From the JS of a custom_tool_call exec, the inner tool name and a short description. If there are several, one, in CX_TOOL_ORDER order.
+    The description is a literal the call gives (a command, a path, a query; the session number of a write_stdin): when there is none it is empty, never a line of the JS."""
     js = js or ''
     names = re.findall(r'\btools\.([A-Za-z_][A-Za-z0-9_]*)\s*\(', js)
     name = next((n for n in CX_TOOL_ORDER if n in names), names[0] if names else 'exec')
     lit = r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`[^`]*`)'
     text = ''
-    if name in ('exec_command', 'write_stdin'):
-        m = re.search(r'\b(?:cmd|chars)\s*:\s*' + lit, js)
+    if name == 'exec_command':
+        m = re.search(r'\bcmd\s*:\s*' + lit, js)
         text = _js_str(m.group(1)) if m else ''
+    elif name == 'write_stdin':            # what is typed into the process is not shown: the session it goes to is
+        m = re.search(r'\bsession_id\s*:\s*[\'"]?(\d+)', js)
+        text = 'session ' + m.group(1) if m else ''
     elif name == 'web__run':
         m = re.search(r'\b(?:q|ref_id|pattern)\s*:\s*' + lit, js)
         text = _js_str(m.group(1)) if m else ''
@@ -55,8 +60,6 @@ def codex_tool(js):
     elif name == 'view_image':
         m = re.search(r'\bpath\s*:\s*' + lit, js)
         text = short_path(_js_str(m.group(1))) if m else ''
-    if not text:
-        text = next((ln.strip() for ln in js.splitlines() if ln.strip()), '')
     return name, trunc(text.strip().splitlines()[0] if text.strip() else '', 240)
 
 
@@ -77,7 +80,7 @@ def codex_say_text(p):
 
 
 def cx_decode(raw):
-    """A rollout line. A line over 1 MB is not decoded; only the line head (time, kind) and the first 600 bytes are returned."""
+    """A rollout line. A line over 1 MB is not decoded; only the line head (time, kind) and the first 600 bytes are returned. `ord` is the line's ordinal (None when it has none)."""
     raw = raw.strip()
     if not raw:
         return None
@@ -85,14 +88,16 @@ def cx_decode(raw):
         m = CX_HEAD_RE.match(raw)
         if not m:
             return None
-        return {'ts': parse_ts(m.group(1).decode()), 'type': m.group(2).decode(),
+        om = CX_ORD_RE.match(raw)
+        return {'ts': parse_ts(m.group(1).decode()), 'type': m.group(2).decode(), 'ord': int(om.group(1)) if om else None,
                 'pt': (m.group(3) or b'').decode(), 'p': None, 'head': raw[:600]}
     try:
         d = json.loads(raw)
     except ValueError:
         return None
     p = d.get('payload') if isinstance(d.get('payload'), dict) else {}
-    return {'ts': parse_ts(d.get('timestamp')), 'type': d.get('type'), 'pt': p.get('type'), 'p': p}
+    o = d.get('ordinal')
+    return {'ts': parse_ts(d.get('timestamp')), 'type': d.get('type'), 'ord': o if isinstance(o, int) and not isinstance(o, bool) else None, 'pt': p.get('type'), 'p': p}
 
 
 def cx_start_offset(path, size):

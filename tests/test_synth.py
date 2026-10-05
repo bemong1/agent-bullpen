@@ -22,7 +22,7 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compat import isolated_env  # noqa: E402  (first of the board imports: it pins HOME and the cache to a throwaway folder)
+from compat import isolated_env, patched  # noqa: E402  (first of the board imports: it pins HOME and the cache to a throwaway folder)
 import synth_home  # noqa: E402
 
 SERVER = os.path.join(ROOT, 'server.py')
@@ -384,6 +384,15 @@ class SynthBoard(unittest.TestCase):
             self.assertIn(word, text)
 
 
+def work_names(blob, home):
+    """(the folders the records name under `work/`, up to three places that name a folder this check does not expect). Where the folder happens to be on the machine is no business
+    of the check: the folder of `home` is taken out first, so a temporary folder whose name ends in `work` (or a path of the runner that has `work/` in it) cannot add a name."""
+    scrubbed = blob.replace(home.encode(), b'~')
+    names = set(re.findall(rb'work/([A-Za-z0-9_-]+)/', scrubbed))
+    odd = [m.group(0) for m in re.finditer(rb'.{0,50}work/(?!acme-app/|acme-robot/|acme-ledger/|demo-notes/)[A-Za-z0-9_-]+/', scrubbed)][:3]
+    return names, odd
+
+
 class LiveFlag(unittest.TestCase):
     """--live: with a fake process named `claude` and ~/.claude/sessions/<pid>.json present, a session reads as "working". --stop turns it off."""
 
@@ -648,6 +657,30 @@ class StoppedScene(unittest.TestCase):
         _, state = self.build(busy=True, stopped=True)
         self.check_scene(state, 'T5-B', 'T5-C')
 
+    def test_the_run_that_is_still_working_is_started_from_the_orchestrators_shell(self):
+        """A shell of a Claude session leaves its id and its process number in the environment of what it starts (the real Bash tool does): the fake `claude -p` run of the stopped scene has both."""
+        if not os.path.isdir('/proc'):
+            self.skipTest('the environment of a process is read from /proc here')
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(os.path.realpath(tmp), 'home')
+            self.addCleanup(synth_home.stop_live, home, True)
+            info = synth_home.build(home, busy=True, stopped=True)
+            pids, procs = start_live(info)
+            try:
+                sdir = os.path.join(home, '.claude', 'sessions')
+                by_sid = {}
+                for f in os.listdir(sdir):
+                    d = json.loads(read(os.path.join(sdir, f)))
+                    by_sid[d['sessionId']] = d['pid']
+                run = synth_home.STOPPED_KIDS['grand']
+                with open('/proc/%d/environ' % by_sid[run], 'rb') as f:
+                    env = dict(x.split('=', 1) for x in f.read().decode().split('\0') if '=' in x)
+                self.assertEqual((env['CLAUDE_CODE_SESSION_ID'], env['CLAUDE_PID']), (info['orch'], str(by_sid[info['orch']])))
+                self.assertEqual(set(env), {'PATH', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID'})        # and nothing of the machine it was started on
+            finally:
+                synth_home.stop_live(home, True)
+                reap(procs)
+
     def test_a_tool_summary_the_board_words_itself(self):
         _, state = self.build(stopped=True)
         mine = [a for a in state['agents'] if (a.get('last_tool') or {}).get('name') == 'SubagentHandback']
@@ -884,8 +917,252 @@ class BusyGenerator(unittest.TestCase):
                     self.assertNotIn(('/%s/' % user).encode(), data, name)
             for word in (b'@', b'password', b'secret', b'/Dev/', b'.claude/projects', b'netbird'):          # no address, no credential word, no folder of a real workspace or HOME
                 self.assertNotIn(word, blob, word)
-            names = set(re.findall(rb'work/([A-Za-z0-9_-]+)/', blob))
-            self.assertEqual(names, {b'acme-robot', b'demo-notes'})
+            names, odd = work_names(blob, home)
+            self.assertEqual(names, {b'acme-robot', b'demo-notes'}, odd)                  # a failure shows where the other name stands
+
+
+class CodexRecordsAreReal(unittest.TestCase):
+    """Every Codex rollout the tool writes (the small scene, `--busy`, `--codex-orch`, the docs scene's base) has the shapes of the real records: a shell command is a call of the exec
+    tool and, when its process ended, a `CommandExecution` item with all its fields; a turn that ended has its `task_complete`. A reader that keeps the commands (board/codex_facts.py)
+    reads every one of them: the only thing it cannot know about is a turn that is still going."""
+    FIELDS = ('id', 'process_id', 'command', 'cwd', 'status', 'exit_code', 'duration', 'source')
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.homes = {}
+        for name, kw in (('small', {}), ('busy', {'busy': True}), ('orch', {'codex_orch': True})):
+            home = os.path.join(os.path.realpath(cls.tmp.name), name)
+            synth_home.build(home, now=1_800_000_000.0, **kw)
+            cls.homes[name] = home
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def rollouts(self, home):
+        out = []
+        for d, _, files in os.walk(os.path.join(home, '.codex', 'sessions')):
+            out += [os.path.join(d, f) for f in sorted(files) if f.startswith('rollout-')]
+        return sorted(out)
+
+    def rows(self, path):
+        return [json.loads(ln) for ln in read(path).splitlines()]
+
+    def test_a_command_is_a_call_of_the_exec_tool_and_a_command_execution_with_all_its_fields(self):
+        n = 0
+        for name, home in self.homes.items():
+            for path in self.rollouts(home):
+                rows = self.rows(path)
+                self.assertEqual([d['ordinal'] for d in rows], list(range(len(rows))), path)
+                calls = [d['payload'] for d in rows if d['type'] == 'response_item' and d['payload'].get('type') in ('custom_tool_call', 'function_call')
+                         and d['payload'].get('name') not in ('spawn_agent', 'wait_agent', 'interrupt_agent')]
+                self.assertEqual({c['type'] for c in calls}, {'custom_tool_call'} if calls else set(), (name, path))        # no `function_call exec_command`: the old shape is gone
+                self.assertTrue(all(c['name'] == 'exec' and 'tools.exec_command(' in c['input'] for c in calls), path)
+                items = [d['payload']['item'] for d in rows if d['type'] == 'event_msg' and d['payload'].get('type') == 'item_completed' and d['payload']['item']['type'] == 'CommandExecution']
+                for it in items:
+                    n += 1
+                    for f in self.FIELDS:
+                        self.assertIn(f, it, (name, f))
+                    self.assertEqual(len(it['command']), 3, it['command'])
+                    self.assertEqual(it['command'][:2], ['/bin/bash', '-lc'])
+                    self.assertTrue(it['cwd'].startswith('file:///'), it['cwd'])
+                    self.assertIsInstance(it['process_id'], str)
+                    self.assertEqual((it['status'], it['exit_code']), ('completed', 0))
+                    self.assertEqual(set(it['duration']), {'secs', 'nanos'})
+                self.assertLessEqual(len(items), len(calls), path)                                                         # a call that has not returned has none yet
+                if rows[0]['payload']['thread_source'] != 'guardian_review':                                              # an approval review runs no command
+                    self.assertGreater(len(items), 0, path)
+        self.assertGreater(n, 30)
+
+    def test_a_turn_that_ended_has_its_task_complete_and_only_a_turn_that_is_going_is_open(self):
+        open_turns = {}
+        for name, home in self.homes.items():
+            for path in self.rollouts(home):
+                rows = self.rows(path)
+                rows = rows[rows[0]['payload'].get('subagent_history_start_ordinal', 0):]                                  # a sub-agent's front part is its parent's turn
+                started = [d for d in rows if d['payload'].get('type') == 'task_started']
+                done = [d for d in rows if d['payload'].get('type') == 'task_complete']
+                ids = [d['payload']['turn_id'] for d in started]
+                self.assertEqual(len(ids), len(set(ids)), path)                                                            # every turn has an id of its own
+                self.assertEqual({d['payload']['turn_id'] for d in done} - set(ids), set(), path)
+                open_turns[(name, os.path.basename(path))] = len(started) - len(done)
+        self.assertEqual(sum(1 for (name, _), n in open_turns.items() if name == 'small' and n), 0)                         # the small scene's thread is over
+        self.assertEqual(sum(n for (name, _), n in open_turns.items() if name == 'busy'), 2)                                # the two that are working in the busy scene
+        self.assertEqual(sum(n for (name, _), n in open_turns.items() if name == 'orch'), 2)                                # the orchestrator and the sub-agent that is working
+        self.assertTrue(all(n <= 1 for n in open_turns.values()), open_turns)
+
+    def test_the_board_reads_every_command_and_knows_only_the_turns_that_are_going(self):
+        from board import codex_index
+        for name, home in self.homes.items():
+            idx = codex_index.CodexIndex()
+            with patched(HOME=home, CODEX_HOME=os.path.join(home, '.codex'), CODEX_SESSIONS=os.path.join(home, '.codex', 'sessions'),
+                         CODEX_NAMES=os.path.join(home, '.codex', 'session_index.jsonl')):
+                idx.refresh(force=True)
+                for e in idx.entries():
+                    rows = self.rows(e['path'])
+                    items = [d for d in rows if d['type'] == 'event_msg' and d['payload'].get('type') == 'item_completed' and d['payload']['item']['type'] == 'CommandExecution']
+                    self.assertEqual(len(idx.cmds(e['id'])), len(items), (name, e['id']))
+                    self.assertTrue(all(c['cmd'] for c in idx.cmds(e['id'])), (name, e['id']))
+                    self.assertEqual({g[2] for g in idx.gaps(e['id'])} - {'turn'}, set(), (name, e['id']))                  # no line it could not read, nothing left out
+
+
+class CodexOrchScene(unittest.TestCase):
+    """--codex-orch: a Codex orchestrator (a TUI thread) and its team, in the shapes of the records of Codex 0.160: two native sub-agents (one finished, one working), a guardian, two
+    `claude -p` runs and a `codex exec` run started from its shell, a small debate in talk/. It is added to the default scene and changes none of its files."""
+    NOW = 1_800_000_000.0
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.home = os.path.join(os.path.realpath(cls.tmp.name), 'home')
+        cls.info = synth_home.build(cls.home, now=cls.NOW, codex_orch=True)
+        cls.co = cls.info['codex_orch']
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def rows(self, role):
+        return [json.loads(ln) for ln in read(self.co['paths'][role]).splitlines()]
+
+    def commands(self, role):
+        return [d['payload']['item'] for d in self.rows(role) if d['type'] == 'event_msg' and d['payload'].get('type') == 'item_completed'
+                and d['payload']['item']['type'] == 'CommandExecution']
+
+    def test_the_files_of_the_default_scene_are_the_same_with_and_without_the_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plain = os.path.join(os.path.realpath(tmp), 'home')
+            synth_home.build(plain, now=self.NOW)
+            base = {n: d.replace(plain.encode(), b'HOME') for n, d in tree_digest(plain)}
+            self.assertNotIn('codex_orch', synth_home.build(plain, now=self.NOW))
+        flagged = {n: d.replace(self.home.encode(), b'HOME') for n, d in tree_digest(self.home)}      # the records hold the folder's own path
+        self.assertGreater(len(flagged), len(base))
+        for name, data in base.items():
+            dashed = lambda path: re.sub(r'[^A-Za-z0-9]', '-', path)                      # the project folders are named after the folder they are in
+            self.assertEqual(flagged.get(name.replace(dashed(plain), dashed(self.home))), data, name)
+
+    def test_the_scene_is_repeatable_and_has_no_real_name_or_path(self):
+        first = tree_digest(self.home)
+        synth_home.build(self.home, now=self.NOW, codex_orch=True)
+        self.assertEqual(tree_digest(self.home), first)
+        real = os.path.realpath(os.path.expanduser('~'))
+        user = getpass.getuser()
+        blob = b''
+        for name, data in first:
+            blob += data
+            if real not in ('/', '') and not self.home.startswith(real + os.sep):
+                self.assertNotIn(real.encode(), data, name)
+            if len(user) > 3 and '/%s/' % user not in self.home:
+                self.assertNotIn(('/%s/' % user).encode(), data, name)
+        for word in (b'@', b'password', b'secret', b'/Dev/', b'.claude/projects', b'netbird'):
+            self.assertNotIn(word, blob, word)
+        names, odd = work_names(blob, self.home)
+        self.assertEqual(names, {b'acme-app', b'acme-ledger', b'demo-notes'}, odd)
+        for name, data in first:
+            if name.endswith('.jsonl'):
+                for ln in data.decode().splitlines():
+                    self.assertEqual(json.dumps(json.loads(ln), separators=(',', ':'), ensure_ascii=False), ln)
+
+    def test_the_team_is_a_root_two_native_sub_agents_a_guardian_and_an_exec_thread(self):
+        meta = {r: self.rows(r)[0]['payload'] for r in ('root', 's1', 's2', 'guardian', 'reviewer_b')}
+        self.assertEqual((meta['root']['source'], meta['root']['originator'], meta['root']['thread_source']), ('cli', 'codex-tui', 'user'))
+        for r, path in (('s1', '/root/s1'), ('s2', '/root/s2')):
+            self.assertEqual(meta[r]['source']['subagent']['thread_spawn']['parent_thread_id'], self.co['root'])
+            self.assertEqual((meta[r]['thread_source'], meta[r]['agent_path'], meta[r]['parent_thread_id']), ('subagent', path, self.co['root']))
+            n = meta[r]['subagent_history_start_ordinal']
+            rows = self.rows(r)
+            self.assertEqual(rows[n + 2 - 1]['payload']['type'], 'task_started')           # its own first turn comes behind the front part (line n + 2)
+            users = [d for d in rows if d['type'] == 'response_item' and d['payload'].get('role') == 'user']
+            self.assertEqual([d['ordinal'] <= n for d in users], [True])                   # the one user message is in the front part: the parent's
+            first = next(d['payload'] for d in rows if d['payload'].get('type') == 'agent_message')
+            self.assertEqual([p['type'] for p in first['content']], ['input_text', 'encrypted_content'])
+        self.assertEqual((meta['guardian']['source'], meta['guardian']['thread_source']), ({'subagent': {'other': 'guardian'}}, 'guardian_review'))
+        self.assertEqual((meta['reviewer_b']['source'], meta['reviewer_b']['originator']), ('exec', 'codex_exec'))
+        self.assertNotIn('parent_thread_id', meta['reviewer_b'])
+
+    def test_the_root_wrote_completed_before_the_message_and_one_sub_agent_is_still_working(self):
+        root = self.rows('root')
+        acts = [(d['payload']['item']['kind'], d['payload']['item']['agent_path']) for d in root if d['type'] == 'event_msg' and d['payload'].get('type') == 'item_completed'
+                and d['payload']['item']['type'] == 'SubAgentActivity']
+        self.assertEqual(acts, [('started', '/root/s1'), ('started', '/root/s2'), ('completed', '/root/s1')])
+        seq = [(d['payload'].get('item') or {}).get('kind') or d['payload'].get('type') for d in root if d['type'] in ('event_msg', 'response_item')]
+        i = seq.index('completed')
+        self.assertEqual(seq[i + 1], 'agent_message')
+        self.assertFalse([d for d in self.rows('s2') if d['payload'].get('type') == 'task_complete'])
+        self.assertTrue([d for d in self.rows('s1') if d['payload'].get('type') == 'task_complete'])
+        self.assertFalse([d for d in root if d['payload'].get('type') == 'task_complete'])      # the orchestrator's turn is open
+
+    def test_the_commands_are_told_when_their_processes_end_and_the_helpers_is_still_running(self):
+        cmds = [c['command'][2] for c in self.commands('root')]
+        self.assertEqual(len(cmds), 2)                                                    # participants A and B (`setsid nohup ... &`: the call ends at once); the helper has no record yet
+        self.assertIn('claude -p', cmds[0])
+        self.assertIn('codex exec', cmds[1])
+        self.assertIn('-o %s' % os.path.join(self.co['work'], 'talk', 'r1', 'B.md'), cmds[1])
+        for c in self.commands('root'):
+            self.assertEqual(c['command'][:2], ['/bin/bash', '-lc'])
+            self.assertIn('setsid nohup', c['command'][2])
+            self.assertTrue(c['command'][2].endswith(' &'))
+        calls = [d['payload']['input'] for d in self.rows('root') if d['payload'].get('type') == 'custom_tool_call']
+        self.assertEqual(len(calls), 3)
+        self.assertIn(self.co['texts']['helper'], calls[2])
+        self.assertNotIn(self.co['texts']['helper'], ' '.join(cmds))
+
+    def test_the_debate_folder_and_the_two_claude_runs(self):
+        talk = os.path.join(self.co['work'], 'talk')
+        self.assertEqual(sorted(os.listdir(talk)), ['brief.md', 'r1'])
+        self.assertEqual(sorted(os.listdir(os.path.join(talk, 'r1'))), ['A.md', 'B.md'])
+        self.assertIn('**A —', read(os.path.join(talk, 'brief.md')))
+        proj = os.path.join(self.info['claude'], 'projects', re.sub(r'[^A-Za-z0-9]', '-', self.co['work']))
+        self.assertEqual(sorted(os.listdir(proj)), sorted(sid + '.jsonl' for sid in self.co['claude'].values()))
+        a = [json.loads(ln) for ln in read(os.path.join(proj, self.co['claude']['reviewer'] + '.jsonl')).splitlines()]
+        self.assertEqual(a[0]['entrypoint'], 'sdk-cli')
+        self.assertEqual(a[0]['message']['content'], self.co['texts']['a'])                 # the words the launching command carries
+        self.assertIn(self.co['texts']['a'], self.commands('root')[0]['command'][2])
+        self.assertTrue([d for d in a if d['type'] == 'assistant' and d['message']['content'][0].get('name') == 'Write'])
+
+    def test_live_the_helper_has_the_environment_a_codex_shell_leaves_and_stop_ends_everything(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(os.path.realpath(tmp), 'home')
+            self.addCleanup(synth_home.stop_live, home, True)
+            info = synth_home.build(home, now=time.time(), codex_orch=True)
+            pids, procs = start_live(info)
+            try:
+                self.assertEqual(len(pids), 4)                                                    # the two sessions of the default scene, the helper, and the fake codex process of the root
+                sdir = os.path.join(home, '.claude', 'sessions')
+                helper = [json.loads(read(os.path.join(sdir, f))) for f in os.listdir(sdir)]
+                helper = next(d for d in helper if d['sessionId'] == synth_home.CX_ORCH_CLAUDE['helper'])
+                self.assertEqual((helper['kind'], helper['entrypoint'], helper['synthHome']), ('sdk-cli', 'sdk-cli', True))
+                live = json.loads(read(os.path.join(home, synth_home.LIVE_FILE)))
+                self.assertEqual([q['cmd'] for q in live['procs']], ['codex %d' % synth_home.LIVE_SECONDS])
+                if os.path.isdir('/proc'):
+                    with open('/proc/%d/environ' % helper['pid'], 'rb') as f:
+                        env = dict(x.split('=', 1) for x in f.read().decode().split('\0') if '=' in x)
+                    root = info['codex_orch']['root']
+                    self.assertEqual((env['CODEX_THREAD_ID'], env['CODEX_SESSION_ID']), (root, root))
+                    self.assertNotIn('CLAUDE_CODE_SESSION_ID', env)
+                    held = os.readlink('/proc/%d/fd/0' % live['procs'][0]['pid'])
+                    self.assertEqual(held, info['codex_orch']['paths']['root'])             # the fake codex process holds the root's rollout open
+                board = Board(home, info['orch'])
+                self.addCleanup(board.close)
+                code, st = 0, None
+                deadline = time.time() + 40                                                          # the Codex threads are listed a moment after the Claude session has loaded
+                while time.time() < deadline:
+                    code, st = board.get('/api/state?session=' + info['codex_orch']['root'], session=False)
+                    if code == 200:
+                        break
+                    time.sleep(0.3)
+                self.assertEqual(code, 200, st)
+                self.assertEqual(st['session']['id'], info['codex_orch']['root'])                    # the page of the Codex orchestrator opens
+                if os.path.isdir('/proc'):                                                           # without /proc `ps` cannot say which rollout a codex process holds open
+                    self.assertTrue(st['session']['alive'])
+                    self.assertEqual(st['orch']['state'], 'working')
+            finally:
+                stopped = synth_home.stop_live(home, True)
+                reap(procs)
+            self.assertEqual(sorted(stopped), sorted(pids))
+            self.assertEqual(os.listdir(sdir), [])
+            self.assertFalse(os.path.exists(os.path.join(home, synth_home.LIVE_FILE)))
 
 
 class LinkScene(unittest.TestCase):

@@ -10,6 +10,8 @@ Writes <out>/synth_state.json, _sessions.json, _talk.json (user talk), _atalk.js
 A second HOME, <out>/home_stopped (the same scene + `synth_home.py --stopped --live`: a usage limit the orchestrator waits on, runs that stopped for each reason, a paused debate cell,
 grandchildren, system lines, diagnostics), is saved as synth_stopped_state.json, _sessions, _talk, _atalk, _plans and _diag (what /api/diag answers); tools/regress/state_checks.js reads it.
 --no-stopped leaves it out.
+A third HOME, <out>/home_codex (`synth_home.py --codex-orch --live`: a Codex orchestrator with two native sub-agents, a guardian, two `claude -p` runs and a `codex exec` run, a small debate), is saved as
+synth_codex_state.json, _sessions, _talk, _atalk, _plans and _agent (what /api/agent answers for its `codex exec` run); tools/regress/codex_checks.js reads it. --no-codex leaves it out.
 --port 0 (default) takes any free port; only the server this script started is stopped (by its own handle).
 
 Two things are done to the saved answers so the checks do not depend on when they run:
@@ -66,10 +68,19 @@ def stopped_ready(port, sid):
     return len(cli) >= 5 and any(a['parent'] for a in cli) and all(a['link']['rule_class'] == 'certain' for a in cli)
 
 
-def snapshot(args, out, prefix, stopped=False):
-    """Build a HOME under <out>/home[_stopped], serve it, save what the pages fetch as synth_<prefix>*.json, stop the server and the fake processes."""
-    info = synth_home.build(os.path.join(out, 'home_stopped' if stopped else 'home'), stopped=stopped)
-    pids = synth_home.start_live(info) if args.live or stopped else []
+def codex_ready(port, root):
+    """True once the board shows the whole team of the Codex orchestrator (two sub-agents, two `claude -p` runs, the `codex exec` run)."""
+    try:
+        st = get(port, '/api/state?session=' + root)
+    except OSError:
+        return False
+    return len(st['agents']) >= 5
+
+
+def snapshot(args, out, prefix, stopped=False, codex=False):
+    """Build a HOME under <out>/home[_stopped|_codex], serve it, save what the pages fetch as synth_<prefix>*.json, stop the server and the fake processes."""
+    info = synth_home.build(os.path.join(out, 'home_stopped' if stopped else 'home_codex' if codex else 'home'), stopped=stopped, codex_orch=codex)
+    pids = synth_home.start_live(info) if args.live or stopped or codex else []
     env = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CACHE_HOME', 'AGENT_BULLPEN_LOG', 'AGENT_BULLPEN_TOKEN')}
     env.update(HOME=info['home'], PYTHONDONTWRITEBYTECODE='1', AGENT_BULLPEN_LANG='ko')     # the ready line below is matched in Korean, whatever LANG the runner has
     log = tempfile.TemporaryFile('w+')
@@ -92,11 +103,19 @@ def snapshot(args, out, prefix, stopped=False):
                 time.sleep(0.5)
             if not stopped_ready(port, info['orch']):
                 raise StoppedNotReady('the stopped scene was not linked in 60 s')
-        sid = '?session=' + info['orch']
+        if codex:
+            end = time.time() + 60
+            while time.time() < end and not codex_ready(port, info['codex_orch']['root']):
+                time.sleep(0.5)
+            if not codex_ready(port, info['codex_orch']['root']):
+                raise StoppedNotReady('the team of the Codex orchestrator was not linked in 60 s')
+        sid = '?session=' + (info['codex_orch']['root'] if codex else info['orch'])
         files = {'sessions': '/api/sessions', 'state': '/api/state' + sid, 'talk': '/api/talk?limit=80&' + sid[1:],
                  'atalk': '/api/talk?scope=agents&limit=80&' + sid[1:], 'plans': '/api/plans'}
         if stopped:
             files['diag'] = '/api/diag' + sid
+        if codex:
+            files['agent'] = '/api/agent?id=%s&%s' % (info['codex_orch']['ids']['reviewer_b'], sid[1:])
         data = {name: get(port, path) for name, path in files.items()}
         keep = [x for x in data['sessions']['sessions'] if not x.get('solo')]
         data['sessions'].update(sessions=keep, projects=[p for p in data['sessions']['projects'] if p['rep'] in {x['id'] for x in keep}])
@@ -128,6 +147,7 @@ def main():
     ap.add_argument('--live', action='store_true', help='with fake claude processes: sessions and agents read as working')
     ap.add_argument('--no-freeze', action='store_true', help='keep the real clock in the saved answers')
     ap.add_argument('--no-stopped', action='store_true', help='leave out the second fixture (synth_stopped_*.json)')
+    ap.add_argument('--no-codex', action='store_true', help='leave out the third fixture (synth_codex_*.json)')
     args = ap.parse_args()
     out = os.path.realpath(args.out)
     os.makedirs(out, exist_ok=True)
@@ -137,6 +157,11 @@ def main():
             snapshot(args, out, 'stopped_', stopped=True)
         except (StoppedNotReady, SystemExit, OSError) as e:           # only state_checks.js needs it: it skips itself without the files on a laptop and fails when CI is set
             print('note: the stopped fixture (synth_stopped_*.json) was not made: %s' % (e or type(e).__name__), file=sys.stderr)
+    if not args.no_codex:
+        try:
+            snapshot(args, out, 'codex_', codex=True)
+        except (StoppedNotReady, SystemExit, OSError) as e:           # only codex_checks.js needs it: it skips itself without the files on a laptop and fails when CI is set
+            print('note: the Codex fixture (synth_codex_*.json) was not made: %s' % (e or type(e).__name__), file=sys.stderr)
 
 
 if __name__ == '__main__':

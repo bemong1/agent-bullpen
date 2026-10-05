@@ -13,7 +13,7 @@ from .lineage import claude_alive_ids
 from .util import CLAUDE_HOME, CODEX_HOME, CODEX_SESSIONS, PATH_FROM, PROJECTS, SID_RE, parse_records, parse_ts, short_path
 from .codex_index import CODEX
 from .link import LINKS
-from .sessions import LATER, MAX_NEST, CodexSession, Session
+from .sessions import LATER, CodexSession, Session
 from . import views
 
 
@@ -90,21 +90,22 @@ def last_talk(path):
     return found
 
 
-def cli_totals():
-    """{session id: how many `claude -p` children its page shows}: the children it launched (itself or through a sub-agent) and the ones those launched in turn, down to
-    MAX_NEST further levels (the page of the top orchestrator shows a grandchild under the child that launched it, and counts it)."""
-    by_tree = {}
-    for c, o in list(LINKS.cli_owners.items()):
-        by_tree.setdefault(o['sid'], []).append(c)
+def team_totals():
+    """{session or thread id: how many agents its page shows below its orchestrator}: everything started from it, directly or through others (the descendants of the one graph of who
+    started whom: `claude -p` children, native sub-agent threads and `codex exec` threads of Codex, down as many levels as the graph follows), and the sub-agents (Agent tool) that
+    the `claude -p` children among them started (the page of the top orchestrator shows them under their child, and counts them). Only an id that started something has an entry."""
+    graph = LINKS.edges()[1]
+    folders = {os.path.basename(p)[:-6]: p[:-6] for p in list(LINKS.files)}          # the folder of each session the link index has read: no search through the projects
+    hosted = {}
+    for tid, o in graph.items():
+        if o['kind'] == 'cli':
+            n = len(glob.glob(os.path.join(folders[tid] if tid in folders else os.path.join(PROJECTS, '*', tid), 'subagents', 'agent-*.meta.json')))
+            if n:
+                hosted[tid] = n
     out = {}
-    for sid in by_tree:
-        seen, frontier = set(), [sid]
-        for _ in range(MAX_NEST + 1):
-            frontier = [c for p in frontier for c in by_tree.get(p, ()) if c not in seen and c != sid]
-            seen.update(frontier)
-            if not frontier:
-                break
-        out[sid] = len(seen)
+    for page in {o['parent'] for o in graph.values()}:
+        team = LINKS.descendants(page)
+        out[page] = len(team) + sum(hosted.get(t, 0) for t in team)
     return out
 
 
@@ -125,7 +126,7 @@ def _is_file(path):
         return False
 
 
-def _session_item(p, sid, cli, now):
+def _session_item(p, sid, team, now):
     """The list item of one Claude record, or None when the record is not a session to list. `mtime` and `agents_mtime` are the file times here (the upper bound of the
     time of the last talk); refine() puts the time of the talk in their place."""
     st = _regular(p)
@@ -134,7 +135,7 @@ def _session_item(p, sid, cli, now):
     sub = os.path.join(p[:-6], 'subagents')
     n = len(glob.glob(os.path.join(sub, 'agent-*.meta.json')))
     subs = [(f, t.st_mtime) for f in glob.glob(os.path.join(sub, 'agent-*.jsonl')) for t in [_regular(f)] if t]
-    agents = n + LINKS.count(sid) + cli.get(sid, 0)
+    agents = n + team.get(sid, 0)
     if not agents and not st.st_size:
         return None                  # an empty record file (a session with no conversation) is not counted as solo
     newest = max(subs, key=lambda x: x[1], default=None)
@@ -183,13 +184,13 @@ def scan_sessions():
     looked at (it went away, cannot be read, is a link that leads nowhere or a folder) is left out; it does not stop the list.
     counts: claude (all sessions), agent_sessions (those with agents), codex (those of the last 7 days that made the list)."""
     out, solo, now = [], [], time.time()
-    cli = cli_totals()
+    team = team_totals()
     for p in glob.glob(os.path.join(PROJECTS, '*', '*.jsonl')):
         sid = os.path.basename(p)[:-6]
         if LINKS.cli_owner(sid):
             continue                 # a child session started with claude -p is seen only as an agent of its parent session
         try:
-            item = _session_item(p, sid, cli, now)
+            item = _session_item(p, sid, team, now)
         except OSError:
             continue
         if item:
@@ -204,10 +205,10 @@ def scan_sessions():
     CODEX.refresh()
     cx = []
     for e in CODEX.entries():
-        if e['guardian'] or LINKS.owner(e['id']) or now - (e['mtime'] or 0) > CX_LIST_DAYS * 86400:
+        if e['guardian'] or LINKS.owner_of(e['id']) or now - (e['mtime'] or 0) > CX_LIST_DAYS * 86400:
             continue
         proj = os.path.basename(e['cwd'].rstrip('/')) or e['cwd']
-        cx.append({'id': e['id'], 'project': proj, 'proj': proj, 'mtime': e['mtime'], 'agents': 0, 'agents_mtime': 0,
+        cx.append({'id': e['id'], 'project': proj, 'proj': proj, 'mtime': e['mtime'], 'agents': team.get(e['id'], 0), 'agents_mtime': 0,
                    'provider': 'codex', 'origin': e['origin'], 'title': CODEX.title(e),
                    'active': 1 if now - (e['mtime'] or 0) < 120 else 0})
     cx.sort(key=lambda s: -s['mtime'])
@@ -285,8 +286,8 @@ class Registry:
                 if mine:
                     ev = self.loading[sid] = threading.Event()
         if s:
-            own = LINKS.owner(sid) if s.provider == 'codex' else None
-            return self.get(own['sid']) if own and own['sid'] != sid else s      # if it was opened standalone and then linked to a Claude session, that session
+            top = LINKS.page_of(sid)
+            return self.get(top) if top != sid else s      # what was opened on its own and then linked to a session or thread is a card of that one's page
         if not mine:
             return self.get(sid) if ev.wait(120) else None    # when it ends, it has been registered (or handed over to another session)
         try:
@@ -299,15 +300,15 @@ class Registry:
     def _open(self, sid):
         paths = [p for p in glob.glob(os.path.join(PROJECTS, '*', sid + '.jsonl')) if _is_file(p)]
         LINKS.ready.wait(30)                  # the first link scan must end so that Codex events fall within the first ordering
+        top = LINKS.page_of(sid)              # a run or thread that something started is a card of the page of the top orchestrator (R8b)
+        if top != sid:
+            return self.get(top)
         if not paths:
             CODEX.refresh()
             e = CODEX.get(sid)
             if not e:
                 return None
-            own = LINKS.owner(e['id'])
-            if own:
-                return self.get(own['sid'])
-            if e['guardian'] and e['parent'] and e['parent'] != sid:
+            if e['guardian'] and e['parent'] and e['parent'] != sid:      # not a root: a guardian review thread (or a sub-agent the board cannot place) is shown on the page of its parent
                 return self.get(e['parent'])
         s = Session(paths[0]) if paths else CodexSession(e)
         s.poll()                              # the first read and catch-up must succeed before registering. On an exception it is not registered and is handed to the requester
