@@ -1754,6 +1754,34 @@ class Graph(LineageFixture):
         L._graph = real
         self.assertGreater(L.edges()[0], ver)                                                     # (the graph made again meanwhile has the next one)
 
+    def test_the_graph_does_not_go_by_the_address_of_a_dict(self):
+        """A dict of links put in place by hand is seen by the object, not by `id()`: the address of a dict that was freed is given to the next one (on Python 3.12 it happens at once),
+        and a key made of addresses then says nothing changed. With `id()` made to answer the same for every dict, the graph still follows the dict that is there."""
+        one = {'a': {'sid': 'p', 'node': None, 'rule': 'proc', 'certain': True}}
+        two = {'b': {'sid': 'q', 'node': None, 'rule': 'proc', 'certain': True}}
+        L = server.LinkIndex()
+        with mock.patch.object(link, 'id', lambda x: 1, create=True):
+            L.cli_owners = one
+            self.assertEqual(set(L.edges()[1]), {'a'})
+            L.cli_owners = two
+            self.assertEqual(set(L.edges()[1]), {'b'})
+            L.owners = {'t': {'sid': 'q', 'rule': 'prompt'}}
+            self.assertEqual(set(L.edges()[1]), {'b', 't'})
+            L.owners = {'u': {'sid': 'q', 'rule': 'prompt'}}
+            self.assertEqual(set(L.edges()[1]), {'b', 'u'})
+
+    def test_a_dict_that_took_the_address_of_a_freed_one_is_seen(self):
+        """The same without the fake: dicts of the same size put in place one after the other, each given to the graph before the next one is made (the freed one's address is free again)."""
+        L = server.LinkIndex()
+        link_of = {'sid': 'p', 'node': None, 'rule': 'proc', 'certain': True}
+        d = None
+        for i in range(300):
+            L.cli_owners = None
+            d = None                                                                               # the dict the graph was last made from is freed (unless the graph keeps it: the fix)
+            d = {'k%d' % i: link_of}                                                               # the next one of the same size takes its place in memory
+            L.cli_owners = d
+            self.assertEqual(set(L.edges()[1]), {'k%d' % i}, i)
+
     def test_owner_of_gives_a_copy_and_nothing_for_an_unknown_id(self):
         self.codex_tui(200, CX, cmds=[(T0 - 50, T0 - 49, 'ls')])
         self.proc.add(201, 200, ['/bin/bash', '-lc', 'claude -p x'])

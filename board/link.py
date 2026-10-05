@@ -2344,6 +2344,7 @@ class LinkIndex:
         self._cx_dirty = None      # the earliest time a Codex fact arrived for (a command, a gap) since the settled judgments were last checked
         self._cx_gaps = None       # {thread id: [(start, end, why)]} where the commands of a thread may be missing (for the blind test), made once for one judgment
         self._graph_key, self._graph_state = None, (0, {}, {})                 # the graph of who started whom (owner_of, page_of, descendants), made again when its inputs changed: (version, edges, children)
+        self._graph_src = (None, None)                                         # the two dicts of links it was made from (kept, so that a new dict can never take the address of one it was compared with)
         self._pub = 0              # rises each time the links are published (the children's, the threads') or the Codex threads change: what the graph is made of
 
     def _quota(self, raw):
@@ -3629,14 +3630,15 @@ class LinkIndex:
         lock and never changed afterwards, so a reader that uses only this tuple sees one graph, whatever is published meanwhile. The version is a whole number that rises each time
         the graph is made again."""
         with self.lock:
-            # the whole number rises with every publication; the identity of the two dicts also counts, so that a reader that puts a dict of links in place by hand (a test, a tool) is seen too
-            key = (self._pub, CODEX.version, id(self.cli_owners), id(self.owners))
-            if self._graph_key == key:
+            # the whole number rises with every publication; the two dicts themselves also count, so that a reader that puts a dict of links in place by hand (a test, a tool) is seen too. They
+            # are compared as objects and kept (`_graph_src`), not by their address: the address of a dict that was freed is given to the next one, which then looks like it
+            key, src = (self._pub, CODEX.version), (self.cli_owners, self.owners)
+            if self._graph_key == key and self._graph_src[0] is src[0] and self._graph_src[1] is src[1]:
                 return self._graph_state
             g = {}
-            for csid, o in self.cli_owners.items():
+            for csid, o in src[0].items():
                 g[csid] = {'parent': o['sid'], 'node': o.get('node'), 'kind': 'cli', 'rule': o['rule'], 'certain': bool(o['certain'])}
-            for tid, o in self.owners.items():
+            for tid, o in src[1].items():
                 g[tid] = {'parent': o['sid'], 'node': o.get('node'), 'kind': 'cx', 'rule': o['rule'], 'certain': certain(o['rule'])}
             for tid, f in self.cx_files.items():
                 e = f['entry']
@@ -3648,7 +3650,7 @@ class LinkIndex:
             kids = {}
             for cid, info in g.items():
                 kids.setdefault(info['parent'], []).append(cid)
-            self._graph_key, self._graph_state = key, (self._graph_state[0] + 1, g, kids)
+            self._graph_key, self._graph_src, self._graph_state = key, src, (self._graph_state[0] + 1, g, kids)
             return self._graph_state
 
     def edges(self):
