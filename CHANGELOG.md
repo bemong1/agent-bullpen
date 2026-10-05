@@ -2,7 +2,7 @@
 
 Agent Bullpen is in **beta** (0.x): the formats it reads are the private on-disk transcripts of Claude Code and Codex, which can change with any release of those tools, and options and screens may change between 0.x releases. Please report what looks wrong with the bug template (it asks for the output of `python3 tools/harvest.py <session id>`, which holds no transcript text). `python3 server.py --version` prints the release you run.
 
-## Unreleased
+## 0.2.0 — Codex sessions as orchestrators
 
 - **A Codex orchestrator's page gathers its team like a Claude one.** The runs a Codex thread starts are cards on its page, whoever started them: its native sub-agent threads (named by the end of their path, with their own state and tokens), the `claude -p` and `codex exec` runs its shell started (and those started by a sub-agent's shell, hanging under that sub-agent), and the runs those started in turn. They are found from what Codex records: the sub-agent events in the parent's transcript, the command records (`CommandExecution`: the command text and folder, written when the command ends) and the `CODEX_THREAD_ID` / `CODEX_SESSION_ID` its shells leave in the environment of a child. Debates are seated from these runs as for a Claude orchestrator, and the diagnostics count a launch that left no record (`orphan_launch`).
 - **The conversation of native sub-agents**: the spawn, the messages between agents and a sub-agent's final report appear as cards. The instruction a sub-agent got is ciphertext in the record, so its spawn card says so instead of showing it; the card of the final report is the first message a sub-agent sends after it is done.
@@ -41,5 +41,5 @@ Agent Bullpen is in **beta** (0.x): the formats it reads are the private on-disk
 
 ### Known limitations
 
-- (0.1.0) The team view assumed a Claude Code orchestrator: runs that a Codex orchestrator started from its shell were not gathered under it. This is no longer so; see Unreleased above for what a Codex orchestrator's page can and cannot show.
+- (0.1.0) The team view assumed a Claude Code orchestrator: runs that a Codex orchestrator started from its shell were not gathered under it. This is no longer so; see 0.2.0 above for what a Codex orchestrator's page can and cannot show.
 - macOS is experimental (unit tests in CI, not yet verified on a Mac); native Windows is not supported.
