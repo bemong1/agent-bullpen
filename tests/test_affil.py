@@ -1393,6 +1393,9 @@ class LinkCacheVersion2(unittest.TestCase):
 
     def test_a_remembered_link_survives_a_restart_without_the_records_evidence(self):
         ln = lineage.Lineage()
+        clock = mock.patch('time.time', lambda: T0 + 10)                                       # the clock of the test: a link seen at T0 is kept for the days the file keeps them, whatever day it is now
+        clock.start()
+        self.addCleanup(clock.stop)
         with tempfile.TemporaryDirectory() as d:
             os.chmod(d, 0o700)
             p = os.path.join(d, 'links.json')

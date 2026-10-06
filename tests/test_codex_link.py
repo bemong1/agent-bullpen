@@ -591,7 +591,8 @@ class CodexEnvironment(LineageFixture):
         self.assertEqual((d['links'][0]['parent'], d['links'][0]['node'], d['links'][0]['rule']), (CX, SUB, 'env'))
         self.assertNotIn('SECRET', json.dumps(d))
         again = server.LinkIndex()
-        again.lineage.enable_cache(path)
+        with mock.patch('time.time', lambda: T0 + 700):                                           # the clock of the test: the link was seen at T0 + 600, and a row older than the days the file keeps is not read
+            again.lineage.enable_cache(path)
         self.assertEqual((again.lineage.cli[K]['sid'], again.lineage.cli[K]['pk'], again.lineage.cli[K]['node'], again.lineage.cli[K]['exact']), (CX, 'codex', SUB, True))
 
 

@@ -483,6 +483,15 @@ def sdk(sid, t, cwd='/w', entry='sdk-cli'):
 
 
 class Unlinked(Fixture):
+    """The sessions and calls here are at the fixed time T0, and only the candidates of the last UNLINKED_DAYS are looked for, so the clock is the test's own: the days that have gone by since T0
+    must not matter."""
+
+    def setUp(self):
+        super().setUp()
+        clock = mock.patch('time.time', lambda: T0 + 600)
+        clock.start()
+        self.addCleanup(clock.stop)
+
     def kid(self, sid, t, cwd='/w', entry='sdk-cli'):
         self.write(sid, sdk(sid, t, cwd, entry))
         return sid
