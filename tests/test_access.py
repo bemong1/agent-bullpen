@@ -424,8 +424,8 @@ class LiveServer(unittest.TestCase):
 class Version(unittest.TestCase):
     def test_server_prints_the_version(self):
         r = subprocess.run([sys.executable, os.path.join(ROOT, 'server.py'), '--version'], capture_output=True, text=True, timeout=30, env=isolated_env(tempfile.gettempdir()))
-        self.assertEqual((r.returncode, r.stdout.strip(), r.stderr), (0, 'Agent Bullpen 0.2.1', ''))
-        self.assertEqual(board.__version__, '0.2.1')
+        self.assertEqual((r.returncode, r.stdout.strip(), r.stderr), (0, 'Agent Bullpen 0.3.0', ''))
+        self.assertEqual(board.__version__, '0.3.0')
 
     def test_the_changelog_names_the_same_version(self):
         with open(os.path.join(ROOT, 'CHANGELOG.md'), encoding='utf-8') as f:

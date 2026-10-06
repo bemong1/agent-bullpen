@@ -2,7 +2,7 @@
 
 Agent Bullpen is in **beta** (0.x): the formats it reads are the private on-disk transcripts of Claude Code and Codex, which can change with any release of those tools, and options and screens may change between 0.x releases. Please report what looks wrong with the bug template (it asks for the output of `python3 tools/harvest.py <session id>`, which holds no transcript text). `python3 server.py --version` prints the release you run.
 
-## Unreleased — 0.3.0: debates from folders and real writes, not from sentences
+## 0.3.0 — debates from folders and real writes, not from sentences
 
 The debate table, the rooms and the end of a topic are no longer judged from the words of an instruction, a brief or a report. They are judged from what the agents wrote and where, which the board already reads from the records, so the same record gives the same table in any language. Only the first heading of a brief, its table and the list of documents are still read, and only to be shown. The rules are in the [screen guide](docs/guide.md#how-debates-are-recognized).
 
