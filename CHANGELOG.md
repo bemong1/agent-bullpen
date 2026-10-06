@@ -2,6 +2,10 @@
 
 Agent Bullpen is in **beta** (0.x): the formats it reads are the private on-disk transcripts of Claude Code and Codex, which can change with any release of those tools, and options and screens may change between 0.x releases. Please report what looks wrong with the bug template (it asks for the output of `python3 tools/harvest.py <session id>`, which holds no transcript text). `python3 server.py --version` prints the release you run.
 
+## Unreleased
+
+- The office card starts open from a window width of 768 px (a tablet) instead of 1500 px, and a collapsed office (a phone, or a choice you made) says so in one line inside the card; pressing the line opens it. On an iPad the card used to start collapsed with nothing to tell why.
+
 ## 0.2.0 — Codex sessions as orchestrators
 
 - **A Codex orchestrator's page gathers its team like a Claude one.** The runs a Codex thread starts are cards on its page, whoever started them: its native sub-agent threads (named by the end of their path, with their own state and tokens), the `claude -p` and `codex exec` runs its shell started (and those started by a sub-agent's shell, hanging under that sub-agent), and the runs those started in turn. They are found from what Codex records: the sub-agent events in the parent's transcript, the command records (`CommandExecution`: the command text and folder, written when the command ends) and the `CODEX_THREAD_ID` / `CODEX_SESSION_ID` its shells leave in the environment of a child. Debates are seated from these runs as for a Claude orchestrator, and the diagnostics count a launch that left no record (`orphan_launch`).

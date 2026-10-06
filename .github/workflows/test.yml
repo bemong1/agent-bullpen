@@ -80,6 +80,9 @@ jobs:
         env:
           REQUIRE_FIXTURES: '1'
         run: node tools/regress/codex_checks.js static "$RUNNER_TEMP/fx/synth"
+      # The first state of the office card by window width (open from 768 px, collapsed below with a one-line note that opens it), in ko and en
+      - name: Office card first state
+        run: node tools/regress/office_fold_checks.js static "$RUNNER_TEMP/fx/synth"
       - name: Keep the snapshot when a check fails
         if: failure()
         uses: actions/upload-artifact@v4

@@ -23,7 +23,7 @@ The dashboard draws what Claude Code and Codex leave on disk and only **reads** 
 |---|---|
 | Header | Project selector, whether the session process is alive, counts of working · done agents, and chips that appear only when there is something to count: possibly stalled · interrupted · unknown · failed agents, and Diagnostics (it opens the list, see "Diagnostics"). Then the theme and language selectors |
 | Alerts | Only what needs your judgment (see "Alerts"). Hidden when empty. The count is in the header chip and in the browser tab title as `(N)` |
-| Agent office | The pixel-art strip (see "Office view"). Collapsed at first when the window is narrower than 1500px |
+| Agent office | The pixel-art strip (see "Office view"). Open at first when the window is 768px wide or more (a tablet), collapsed below that (a phone); a collapsed office says so in one line inside the card, and pressing the line opens it. What you pick with the Collapse / Expand button or that line is remembered |
 | Orchestrator | Working / waiting for results / waiting for a usage limit to reset, last action, current context |
 | Token usage | Per provider (Claude Code / ◆ Codex): summary tiles (cost, input, output, agent count) and a table (Orchestrator / Working / Finished agents). The footer has cache, calls and per-model figures plus what only that provider has (Claude advisor model; Codex reasoning, approval review and weekly limit) |
 | Progress | One line per topic: which round, how many submitted, who is left / the next topic and what it waits for / stall warnings |

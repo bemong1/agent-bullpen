@@ -8,12 +8,13 @@ const store = {
 const qs = new URLSearchParams(location.search);
 let SESSION = qs.get('session') || '';
 let S = null, serverSkew = 0;
+const OFFICE_OPEN_MIN = 768;   // the office card starts open from this window width (a tablet), folded below it (a phone), until the user picks: the pick is kept
 // Screen state (ui): every field is declared here, once (properties are not added later)
 const ui = {
   // Saved choices (localStorage)
   debate: store.get('debate', null), agentFilter: store.get('agentFilter', 'debate'),
   feedFilter: store.get('feedFilter', 'all'), tlWin: store.get('tlWin', 'debate'),
-  gameOpen: store.get('gameOpen', innerWidth >= 1500),
+  gameOpen: store.get('gameOpen', innerWidth >= OFFICE_OPEN_MIN),
   // Drawer, feed and agent list
   drawer: null, dTab: 'overview', openEvents: new Set(), oldOpen: false, unlinkedOpen: false,
   // Open modal: 'file' (document) | 'talk' (conversation: one message opened by its event number, or the whole conversation) | 'diag' (the diagnostics list) | null
@@ -1099,6 +1100,7 @@ function renderGame() {
   $('#gameBox').hidden = !ui.gameOpen;
   $('#officeRow').classList.toggle('folded', !ui.gameOpen);
   $('#gameLegend').hidden = !ui.gameOpen;
+  $('#gameFolded').hidden = ui.gameOpen;      // a folded office says so in one line, which opens it
   if (window.AgentGame && S) {   // Legend: the same text as under /game (the large view)
     const lh = AgentGame.legendHtml(hasCodex(S) || !!(GAME && GAME.demoOn));
     if ($('#gameLegend').innerHTML !== lh) $('#gameLegend').innerHTML = lh;
@@ -1110,7 +1112,9 @@ function renderGame() {
   if (!GAME) GAME = AgentGame.mount($('#gameBox'), { mode: 'strip', onAgent: id => openDrawer(id) });
   GAME.update(S, currentDebate());
 }
-$('#gameToggle').onclick = () => { ui.gameOpen = !ui.gameOpen; store.set('gameOpen', ui.gameOpen); renderGame(); };
+const toggleGame = () => { ui.gameOpen = !ui.gameOpen; store.set('gameOpen', ui.gameOpen); renderGame(); };
+$('#gameToggle').onclick = toggleGame;
+$('#gameFolded').onclick = toggleGame;
 // Demo: plays a scenario in the game strip. The "trouble" scenario also puts fake alerts in the alert box (to check that it appears without jitter)
 function startDemo(key) {
   if (!ui.gameOpen) { ui.gameOpen = true; store.set('gameOpen', true); renderGame(); }
