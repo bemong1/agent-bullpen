@@ -70,7 +70,9 @@ ORACLE_WORDS = ('orch', 'orch2', 'orch_new', 'mid', 'child', 'child2', 'sub', 'l
                 'page', 'listed', 'parent', 'label', 'events', 'first_user', 'spawn', 'spawn_text', 'agent_msg', 'handback', 'guardian', 'guardian_calls',
                 's1', 'ss', 'notice', 'orchc', 'relayer', 'root_text',
                 # the rerun bundle (rer): the first and second run of each participant, their calls, and the start and title of a run
-                'a1', 'a2', 'b1', 'b2', 'call_a1', 'call_a2', 'call_b1', 'call_b2', 'start', 'title')
+                'a1', 'a2', 'b1', 'b2', 'call_a1', 'call_a2', 'call_b1', 'call_b2', 'start', 'title',
+                # the orchestrator's own writes (owr): the rooms and cells the page shows (fields of `orch`), the folder of the case's work below its HOME
+                'rooms', 'cells', 'work')
 OTHER_WORDS = ('target', 'spawner', 'node', 'tree')
 COUNTS = ('nodes', 'main', 'sub', 'child', 'nopersist_launches', 'skipped_deb_roles', 'linked_by_time', 'linked_by_content', 'linked_by_out', 'hidden_scripts')
 DETAILS = ('no_invocation', 'variable_prompt', 'no_prompt_file', 'output', 'report_path', 'seat_name', 'decoy_switch', 'decoy_sidmention', 'link_by_time',

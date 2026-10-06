@@ -171,13 +171,18 @@ the *launcher* of a run is the thread (or session) whose shell call started it, 
      and its title are that command's) and holds the seat of its participant: the period of the seat of the first run is closed (no `seat_tie_held`). The first run's call is the
      first command or none, never the second; its seat is gone. The output file proves nothing for the first run (it was overwritten). A first run that was closed with
      `cost-state` and no end of turn, or whose record was cut off, is over either way (`stop`): it does not keep the seat.
+ 45. The orchestrator's own writes (`owr`): a guide it wrote with a tool, a patch or a command that succeeded, or the round folder it made with `mkdir`, says where to look: the page
+     lists that folder when the disk makes it a debate (a guide and a round folder, or a brief.md that declares two result files) and it is not under the agent's own state folder.
+     A write that failed, words that only name the files, a lone brief.md, a README.md of notes and the `mkdir` of any other folder list nothing; inside the repository the walk lists
+     what it finds whatever the orchestrator did. The write seats nobody and makes no room: no cell is the orchestrator's, it is no member of a room, and the seat of a participant it
+     started does not depend on whether it wrote the folder. A run nobody started, or one that left no record, seats nobody.
 """
 
 import collections
 import os
 
-from .axes import (ABOVE_DOC, COMMON_DOCS, EDIT_DIR, FILE_WAYS, FLAW_VERSION, RESUMABLE, ROUND_DIR, SEAT_LETTERS, WAY, CXO_OWN_LAUNCHES, CXO_RELAYS, CXO_TWINS, aux_file_exists, cxo_alive, cxo_hop, cxo_proof,
-                   launcher_writes, room_coders,
+from .axes import (ABOVE_DOC, COMMON_DOCS, EDIT_DIR, FILE_WAYS, FLAW_VERSION, RESUMABLE, ROUND_DIR, SEAT_LETTERS, WAY, CXO_OWN_LAUNCHES, CXO_RELAYS, CXO_TWINS, OWR_SITE_REL, aux_file_exists, cxo_alive, cxo_hop,
+                   cxo_proof, launcher_writes, owr_listed, room_coders,
                    room_folder, room_guide, room_out, room_stem, room_title, room_tree)
 
 
@@ -233,7 +238,8 @@ STA_CODES = frozenset(('limit_group', 'not_resumed', 'silent_live', 'torn_lines'
                        'cache_error', 'orphan_launch'))
 DEB_CODES = frozenset(('path_unresolved', 'path_ambiguous', 'alias_collision', 'seat_tie_held', 'debate_in_misc', 'declaration_missing', 'listing_capped', 'orphan_launch'))
 CXO_CODES = frozenset(('orphan_launch', 'format_drift', 'evidence_conflict'))      # a `&` launch that left nothing; a drift that the shapes of this bundle (all valid) never call for; a hold between two providers' names
-BUNDLE_CODES = {'aff': AFF_CODES, 'sta': STA_CODES, 'deb': DEB_CODES, 'room': DEB_CODES, 'cxo': CXO_CODES, 'rer': DEB_CODES}
+OWR_CODES = frozenset(('listing_capped',))              # the folder of a case is one among a few: a cap on the list would be a mistake (the title-only folders say `declaration_missing` and a `&` launch says `orphan_launch`: not asked)
+BUNDLE_CODES = {'aff': AFF_CODES, 'sta': STA_CODES, 'deb': DEB_CODES, 'room': DEB_CODES, 'cxo': CXO_CODES, 'rer': DEB_CODES, 'owr': OWR_CODES}
 
 
 def diag_scope(case):
@@ -892,7 +898,7 @@ def cxo_truth(case):
         if v['lure'] == 'user_script':
             T.deny('child', 'tree', '@top')
             T.allow('orphan_launch', 'orch')                          # the orchestrator's own `codex exec` of the folder, run just before, has no thread behind it: whether it counts is not asked
-        if v['topic'] == 'talk' and certain_hop:
+        if v['topic'] != 'none' and certain_hop:
             _cxo_seat(v, T)
         return T
     # a chain: the first hop is a plain foreground call with the names of its provider in the environment (certain); the last hop varies
@@ -980,6 +986,40 @@ def rer_truth(case):
     return T
 
 
+# ---------------------------------------------------------------------------------------------------------------------
+# the orchestrator's own writes
+# ---------------------------------------------------------------------------------------------------------------------
+OWR_COPY_REL = 'work/wt/docs/talk'                      # the copy of a folder of the repository in a linked worktree where another agent works (`copy=worktree`)
+
+
+def owr_truth(case):
+    """The orchestrator's own writes (rule 45): which folder the page lists, and who sits in it.
+      - the page lists a debate folder the orchestrator made: a guide it wrote with a tool, a patch or a command that succeeded, or the round folder it made with `mkdir`, when the folder
+        is a debate on disk (a guide and a round folder, or a brief.md that declares two result files) and is not under the agent's own state folder. The write only says where to look:
+        what the folder is, is the disk's say;
+      - nothing else lists it: a write that failed, words that only name the files, a lone brief.md or one that declares one result, a README.md of notes, a `mkdir` of any other folder.
+        Inside the repository the page lists what a walk of the repository finds, as before: the folders there are listed whatever the orchestrator did;
+      - a participant the orchestrator started and told its report path sits in the folder it writes into, whatever the orchestrator wrote;
+      - the orchestrator never sits in a debate: no cell is its, and it makes no room and is no member of one (a write names a folder, no person);
+      - a run nobody started (a record, no launch) or one that left no record seats nobody, in a folder the orchestrator wrote too;
+      - copies of the folder in a linked worktree are one debate: it is listed once, as the folder of the page or as the copy."""
+    v = case.v
+    T = Truth()
+    unit = OWR_SITE_REL[v['dsite']]
+    listed = owr_listed(v)
+    T.set('listing', units=frozenset([unit]) if listed else frozenset())
+    if listed and v['copy'] == 'worktree':
+        T.accept('listing', 'units', frozenset([OWR_COPY_REL]))
+    T.set('orch', rooms=frozenset(), cells=frozenset())
+    if v['kid'] == 'seated':
+        T.set('orch', cells=frozenset(['%s|1|A|kid' % unit]))
+        T.set('kid', unit=unit, round=1, seat='A', role='writer', placements=place(unit, 1, 'A', 'r1'), cell=cell_state('normal_end', True))
+    elif v['kid'] == 'unlinked':
+        T.set('kid', seat=None, role='none', placements=frozenset())
+    T.allow('orphan_launch', 'orch')
+    return T
+
+
 class Case_like:
     """Just enough of a Case (a `.v`) for the truth functions."""
 
@@ -1001,4 +1041,6 @@ def truth(case):
         return cxo_truth(case)
     if case.bundle == 'rer':
         return rer_truth(case)
+    if case.bundle == 'owr':
+        return owr_truth(case)
     return cpl_truth(case)

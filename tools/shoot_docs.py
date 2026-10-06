@@ -30,6 +30,18 @@ import synth_home  # noqa: E402
 LIMIT = 500 * 1024
 
 
+def read_log(f):
+    """Everything the server has written so far to `f`, the temporary file it was given as its output. Read with `pread`: `f.seek(0)` would move the position the server writes at too
+    (the file is one open file for both), and a line it writes next would land on the text that is already there."""
+    fd, pos, chunks = f.fileno(), 0, []
+    while True:
+        chunk = os.pread(fd, 1 << 16, pos)
+        if not chunk:
+            return b''.join(chunks).decode('utf-8', 'replace')
+        chunks.append(chunk)
+        pos += len(chunk)
+
+
 def start(home, port, ready, src):
     env = {k: v for k, v in os.environ.items() if k not in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_CACHE_HOME', 'AGENT_BULLPEN_LOG', 'AGENT_BULLPEN_TOKEN')}
     env.update(HOME=home, PYTHONDONTWRITEBYTECODE='1', AGENT_BULLPEN_LANG='ko')     # the ready lines matched in main() are Korean, whatever LANG the runner has
@@ -37,12 +49,10 @@ def start(home, port, ready, src):
     p = subprocess.Popen([sys.executable, os.path.join(src, 'server.py'), '--port', str(port)], stdout=log, stderr=subprocess.STDOUT, env=env, stdin=subprocess.DEVNULL, cwd=src)
     end = time.time() + 60
     while time.time() < end and p.poll() is None:
-        log.seek(0)
-        if ready in log.read():
+        if ready in read_log(log):
             return p, log
         time.sleep(0.1)
-    log.seek(0)
-    raise SystemExit('board on port %d did not come up:\n%s' % (port, log.read()))
+    raise SystemExit('board on port %d did not come up:\n%s' % (port, read_log(log)))
 
 
 def wait_links(port, info):

@@ -22,26 +22,35 @@ from test_synth import Board, reap, start_live, synth_home_codex_unknown, tree_d
 class DocsScene(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        # Every resource gets its cleanup as soon as it exists: a setUpClass that fails half way is not followed by tearDownClass, and the server and the fake processes would stay.
         cls.tmp = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(cls.tmp.cleanup)
         cls.info = docs_scene.build(os.path.join(cls.tmp.name, 'home'))
         cls.home = cls.info['home']
         cls.pids, cls.procs = start_live(cls.info)
+        cls.addClassCleanup(lambda: (synth_home.stop_live(cls.home, quiet=True), reap(cls.procs)))
         cls.board = Board(cls.home, cls.info['orch'])
+        cls.addClassCleanup(cls.board.close)
         end = time.time() + 30                                  # the first seconds after the start show the `claude -p` runs a live process or an environment places, without the call that started them (the sub-agents' records are read after the first screen): wait for it
+        cls.state, why = None, 'no answer'
         while True:
-            cls.state = cls.board.get('/api/state')[1]
-            grand = {a['id']: a for a in cls.state['agents']}.get(synth_home.STOPPED_KIDS['grand'])
-            if (grand and grand['title'] != 'claude -p') or time.time() > end:
+            try:
+                code, body = cls.board.get('/api/state')
+            except OSError as e:                                # a server that is busy may be slow to answer: the next look is another try
+                code, body, why = None, None, 'no answer (%s: %s)' % (type(e).__name__, e)
+            if code == 200:
+                cls.state = body
+                grand = {a['id']: a for a in body['agents']}.get(synth_home.STOPPED_KIDS['grand'])
+                if grand and grand['title'] != 'claude -p':
+                    break
+            elif code is not None:
+                why = 'HTTP %s: %r' % (code, body[:200])
+            if time.time() > end:
                 break
             time.sleep(0.5)
+        if cls.state is None:
+            raise AssertionError('/api/state gave no state in 30 s (%s); the server printed:\n%s' % (why, cls.board.text()))
         cls.unknown = synth_home_codex_unknown(cls.home)         # no /proc (macOS): the Codex seat of T3 cannot be told from a fake process
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.board.close()
-        synth_home.stop_live(cls.home, quiet=True)
-        reap(cls.procs)
-        cls.tmp.cleanup()
 
     def topics(self):
         return {t['dir'].rsplit('/', 1)[1][:2].upper(): t for t in self.state['debates'][0]['topics']}

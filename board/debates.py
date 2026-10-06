@@ -335,6 +335,8 @@ def _evidence(s, jd, folders):
     for us in jd.members.values():
         for u in us:
             bump(u, 2)
+    for u in getattr(s, 'orch_hints', None) or ():                      # what the orchestrator wrote counts as a touch only: the weakest evidence of where the work is
+        bump(u, 2)
     return {r: tuple(v) for r, v in ev.items()}
 
 
@@ -389,9 +391,11 @@ def judge(s, statuses):
 
     names = peer_names(s)
     facts = [facts_of(a, launcher, names) for a in s.agents.values()]
-    jd = U.assign(facts, cat, statuses, extra_units=getattr(s, 'walked_units', ()) or (), tops_of=tops_of)
+    jd = U.assign(facts, cat, statuses, extra_units=getattr(s, 'walked_units', ()) or (), tops_of=tops_of, hinted=getattr(s, 'orch_hints', None))
     if getattr(s, 'walk_capped', False):                                  # the background walk ran out of budget: the list may be incomplete
         jd.diag.append({'code': 'listing_capped', 'agent': None, 'unit': None, 'detail': None})
+    if getattr(s, 'orch_hints_dropped', False):                           # the orchestrator wrote into more folders than the page keeps: the oldest were let go
+        jd.diag.append({'code': 'listing_capped', 'agent': None, 'unit': None, 'detail': 'writes'})
     # A shared guide that groups topics (a brief.md with a table, and topic folders below it) is a root, not a topic of its own, unless an agent holds a seat in it.
     # Whatever the guide says about rounds, a folder that has no round folder, no seat and debate folders below it is such a root (a common guide that describes the
     # round layout of its topics still holds none itself). Grouping roots: if both the unit and its parent have brief.md and the parent itself has no round folder,
@@ -409,6 +413,10 @@ def judge(s, statuses):
             roots[unit]
         else:
             roots[unit].add(unit)
+    # A debate that is on the list only because the orchestrator wrote there (no agent is tied to it, no walk found it) shows what the gate let through and nothing more: its group does not
+    # bring in the other folders below the root. A debate with no agent tied to it, wherever it came from (the walk, a write), never takes the place of one that has agents: `current` is
+    # the first of the list (`agentless` below).
+    hint_only = {root for root, us in roots.items() if us and all(u in jd.hinted for u in us)}
     # One folder is one debate: the copies of a folder (a link into it, the same place in another worktree of the repository) are folded into the one this session's agents work in
     # (copies.fold). What was in a folded copy is known by the folder that stands for it: the agents tied to it, the writes and reads, the time of its last start.
     all_roots = list(roots)
@@ -419,6 +427,8 @@ def judge(s, statuses):
             del roots[root]
     jd.members = {aid: {at(u) for u in us} for aid, us in jd.members.items()}
     jd.worked = {aid: {at(u) for u in us} for aid, us in jd.worked.items()}
+    tied = {u for us in jd.members.values() for u in us} | {u for us in jd.worked.values() for u in us} | {at(u) for us in jd.agent_units.values() for u in us}
+    agentless = set()
     # for each agent, the latest round it holds within a unit (the round it is writing now)
     cur_round = {}
     for a in jd.assignments:
@@ -446,11 +456,13 @@ def judge(s, statuses):
         q['refs_ts'] = max(q['refs_ts'], ts)
     out = []
     for root, us in roots.items():
-        if len(us) > 1 or root not in us:
+        if root not in hint_only and (len(us) > 1 or root not in us):
             for child in cat.children(root):
                 us.add(child.path)
         if not us:
             continue
+        if root not in tied and tied.isdisjoint(us):
+            agentless.add(root)
         d = _debate(s, root, sorted(us), jd.slots, unit_info, statuses, writer_of, readers_of, cur_round, jd.folders, jd.rooms, jd.room_files)
         d['copies'] = len(folded.get(root, ()))
         out.append(d)
@@ -458,7 +470,7 @@ def judge(s, statuses):
     # records, not a debate of its own; a folder like that with no debate around it is still listed, as a title.
     shown = {d['root'] for d in out if any(t['rows'] or t['final']['exists'] for t in d['topics'])}
     out = [d for d in out if d['root'] in shown or not any(at(above) in shown for above in _above(d['root']))]
-    out.sort(key=lambda d: -d['last_ts'])
+    out.sort(key=lambda d: (d['root'] in agentless, d['root'] in hint_only, -d['last_ts']))
     for i, d in enumerate(out):
         d['current'] = i == 0
     agent_units = collections.defaultdict(set)

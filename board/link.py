@@ -644,16 +644,83 @@ def _script_pick(kind, shell, words):
     return (words[j], words[j + 1:]) if j < len(words) else None
 
 
+ENV_FLAGS = frozenset(('-i', '--ignore-environment', '-v', '--debug'))                  # `env` options that take no value
+ENV_VALUED = frozenset(('-u', '--unset', '-C', '--chdir', '-a', '--argv0'))             # ... and those whose value is the next word (a short one may also be written attached: `-uNAME`)
+ENV_ATTACHED = ('--unset=', '--chdir=', '--argv0=')
+ENV_STRING_BAD_RE = re.compile(r'[\'"\\$#]')                                             # what `env -S` reads in a string beyond whitespace (quotes, escapes, ${VAR}, a comment): not taken apart here
+PY_FLAGS_RE = re.compile(r'-[BbdEIOPqRsSuvx]+')                                           # options of python that take no value and do not change what runs
+
+
+def _env_words_target(words):
+    """(the program, the words after it) that `env` runs for the words it is given: its options and the values they take (`-u NAME`, `-C DIR`, `-a NAME`, `-i`, `-v`, `--`) and the `NAME=VALUE`
+    assignments come first. None when an option is not one of those (it is not known what it does to what runs)."""
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w == '--':
+            i += 1
+            break
+        if w in ENV_FLAGS:
+            i += 1
+        elif w in ENV_VALUED:
+            if i + 1 >= len(words):
+                return None
+            i += 2
+        elif w.startswith(ENV_ATTACHED) or (len(w) > 2 and w[:2] in ('-u', '-C', '-a')):
+            i += 1
+        elif w.startswith('-'):
+            return None
+        elif '=' in w:
+            i += 1
+        else:
+            break
+    return (words[i], words[i + 1:]) if i < len(words) else None
+
+
+def _shebang_target(text):
+    """(the program a `#!` line makes run, its words, whether every system reads the line the same way), or None when the file has no such line or it cannot be read with certainty. The program is
+    the interpreter, or for `env` what `env` runs once its options are taken (`env -S -u python3 true` runs `true`: `python3` is the name `-u` unsets). The last is False when the line has
+    several words for `env` without `-S` (Linux hands the whole rest to env as one word, macOS splits it) and for an interpreter given more than one word."""
+    if not text.startswith('#!'):
+        return None
+    parts = text[2:].split('\n', 1)[0].split(None, 1)
+    if not parts:
+        return None
+    name, rest = os.path.basename(parts[0]), (parts[1].strip() if len(parts) > 1 else '')
+    if name != 'env':
+        return name, (rest.split() if rest else []), len(rest.split()) <= 1
+    m = re.match(r'(?:-S|--split-string[= \t])', rest)
+    if m:                                                                            # `env -S STRING`: env takes STRING apart itself, the same everywhere
+        string = rest[m.end():]
+        if ENV_STRING_BAD_RE.search(string):
+            return None
+        got = _env_words_target(string.split())
+        return (os.path.basename(got[0]), got[1], True) if got else None
+    words = rest.split()
+    got = _env_words_target(words)
+    return (os.path.basename(got[0]), got[1], len(words) == 1) if got else None
+
+
 def _shell_shebang(text):
-    """If there is a `#!` line, whether that interpreter is a shell (`env bash` too). True if there is no line (a shell script run by path)."""
+    """If there is a `#!` line, whether the program it makes run is a shell (`env bash` too, with the options of `env` taken: `env -S -u bash true` runs `true`). True if there is no line (a shell
+    script run by path)."""
     if not text.startswith('#!'):
         return True
-    words = text[2:].split('\n', 1)[0].split()
-    name = os.path.basename(words[0]) if words else ''
-    if name == 'env':
-        rest = [w for w in words[1:] if not w.startswith('-') and '=' not in w]
-        name = os.path.basename(rest[0]) if rest else ''
-    return name in CX_SHELLS
+    got = _shebang_target(text)
+    return got is not None and got[0] in CX_SHELLS
+
+
+PY_SHEBANG_RE = re.compile(r'python[0-9.]*')
+
+
+def _python_shebang(text):
+    """Whether the file begins with a `#!` line that runs this file with python (`/usr/bin/python3`, `/usr/bin/env python3`, `/usr/bin/env -S python3 -u`): the program is python after the options
+    of `env` are taken, and what is given to python are options that do not change what runs (`-u`, `-O`, not `-c`, `-m` or a file). A line that is not read the same way everywhere
+    (`env python3 -u` without `-S`: Linux looks for a program of that name) or has an option that is not known is not read: a launch is not counted for a file that may not be run by python."""
+    got = _shebang_target(text)
+    if got is None or not got[2] or PY_SHEBANG_RE.fullmatch(got[0]) is None:
+        return False
+    return all(PY_FLAGS_RE.fullmatch(w) for w in got[1])
 
 
 def read_script(path):
@@ -1039,10 +1106,20 @@ def launch_kinds(cmd, base_cwd):
     for m in list(SCRIPT_RUN_RE.finditer(code))[:SCRIPT_RUNS_MAX]:
         kind = _script_kind(m)
         pick = _script_pick(kind, os.path.basename(m.group('sh') or ''), _words_at(cmd, code, m.end()))
-        if not pick or (kind == 'path' and not pick[0].endswith('.sh')):
-            continue                                                   # a program run by path is not a script we expect to read
+        if not pick:
+            continue
         if kind == 'path' and '$' in pick[0] and not _cx_expand(pick[0], assigns):
             continue                                                   # `$R/run.sh` is a script file only where the command itself says what `$R` is
+        if kind == 'path' and not pick[0].endswith('.sh'):
+            # a program run by path is not a script we expect to read, unless it is a python file with a python shebang (`./relay.py`, `$R/relay.py`): it is read as code, like `python3 relay.py`
+            # (a file without a shebang, or one for a shell, is read as before: the shell scripts above)
+            path = _file_path(pick[0], shell_cwd(cmd, code, m.start(), assigns, base_cwd), assigns)
+            got = read_script(path) if path else None
+            if got is not None and _python_shebang(got[0]):
+                named_, assumed_ = py_tools(got[0])
+                named |= named_
+                assumed |= assumed_
+            continue
         got, guess = _file_tools(pick[0], shell_cwd(cmd, code, m.start(), assigns, base_cwd), assigns, False)
         named |= got
         assumed |= guess

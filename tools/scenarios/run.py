@@ -194,7 +194,7 @@ def run_case(case, root):
 # ---------------------------------------------------------------------------------------------------------------------
 # selection
 # ---------------------------------------------------------------------------------------------------------------------
-PAIR_SKIP = {'env': ('stale',)}      # a value added after the cover was fixed has its own cases (cxo_shapes): the cover of the older values stays exactly as it was
+PAIR_SKIP = {'env': ('stale',), 'copy': ('link',)}      # a value added after the cover was fixed has its own cases (cxo_shapes): the cover of the older values stays exactly as it was; `copy=link` is the room's alone
 
 
 def pair_values(name):
@@ -421,6 +421,14 @@ def cxo_shapes():
     # the child is a participant of a debate folder of the repository
     for subj, how, look, top in itertools.product(('cl', 'cx'), ('fg', 'detach'), AXES['look'], ('cx_tui', 'cx_exec')):
         out.append(cx(topic='talk', subj=subj, how=how, look=look, top=top))
+    # ... where the report is told by `-o` only: a relative one, one that is not the file the instruction names, a `claude -p` run whose output a shell `>` writes to the report
+    for topic, how, look, top in itertools.product(('talk_rel', 'talk_aux'), ('fg', 'detach'), AXES['look'], ('cx_tui', 'cx_exec')):
+        out.append(cx(topic=topic, subj='cx', how=how, look=look, top=top))
+    for how, look, top in itertools.product(('fg', 'detach'), AXES['look'], ('cx_tui', 'cx_exec')):
+        out.append(cx(topic='talk_redir', subj='cl', how=how, look=look, top=top))
+    # macOS: no `/proc` to read the arguments of a running participant from
+    for subj, top in itertools.product(('cl', 'cx'), ('cx_tui', 'cx_exec')):
+        out.append(cx(topic='talk', subj=subj, how='fg', look='live', top=top, env='codex', os='mac'))
     # what only passes the words on, however it is written (a script that types them, `xargs`, `ssh`, `kubectl exec`, an argument of `curl`)
     for lure, env, how, look in itertools.product(('relay_script', 'relay_pyfile', 'relay_xargs', 'relay_ssh', 'relay_kube', 'relay_curl'), ('codex', 'none'), ('fg', 'detach'), AXES['look']):
         out.append(cx(lure=lure, env=env, how=how, look=look))
@@ -446,6 +454,50 @@ def cxo_shapes():
     for parts, stop in itertools.product(AXES['parts'], AXES['stop']):
         out.append(normalize(Case('rer', {'parts': parts, 'stop': stop})))
     return out
+
+
+OWR_PAIR_AXES = ('top', 'ow', 'dshape', 'dsite', 'kid', 'copy')
+OWR_TOPS = ('claude', 'cx_tui', 'cx_exec')
+
+
+def owr_twin_of(case):
+    """The decoy twin of a case whose folder the page lists only because of what the orchestrator wrote: the same scene (the same files, whoever made them) where the orchestrator's
+    attempt failed or only said what it would do. Nothing lists the folder there."""
+    v = case.v
+    if not (axes.owr_listed(v) and not axes.owr_walked(v) and v['kid'] != 'seated'):
+        return None
+    t = normalize(Case('owr', dict(v, ow=('failed', 'words')[int(axes.digest(case.id, 'twin', n=6), 16) % 2])))
+    t.twin_of = case.id
+    return t if t.key() != case.key() else None
+
+
+def owr_shapes():
+    """The orchestrator's own writes: every kind of write x every shape of folder in a plain folder and in a scratch folder (the provider of the orchestrator turns with the shape),
+    the pairwise cover of the rest (where the folder is, the run beside it, a copy in a worktree), and a decoy twin of every case that lists a folder by the orchestrator's write."""
+    out = collections.OrderedDict()
+
+    def add(c):
+        out.setdefault(c.id, c)
+    for k, site in enumerate(('plain', 'scratch')):
+        for i, (o, shape) in enumerate(itertools.product(AXES['ow'], AXES['dshape'])):
+            top = {'tool': 'claude', 'patch': OWR_TOPS[1 + k]}.get(o, OWR_TOPS[(i + k) % 3])
+            add(normalize(Case('owr', {'top': top, 'ow': o, 'dshape': shape, 'dsite': site})))
+    # what must stay as it is: a participant the orchestrator started sits in the folder whatever the orchestrator wrote; a run that left no record or that nobody started seats nobody and
+    # does not list the folder; the agent's own state folder lists nothing
+    rounded = ('brief_r1', 'readme_r1')
+    for i, (o, shape, site) in enumerate(itertools.product(AXES['ow'], rounded, ('plain', 'repo'))):
+        add(normalize(Case('owr', {'top': OWR_TOPS[i % 3], 'ow': o, 'dshape': shape, 'dsite': site, 'kid': 'seated'})))
+    for i, (kid, o, shape) in enumerate(itertools.product(('died', 'unlinked'), ('tool', 'redirect', 'mkdir_only'), ('brief_r1', 'declared2'))):
+        add(normalize(Case('owr', {'top': OWR_TOPS[i % 3], 'ow': o, 'dshape': shape, 'dsite': 'plain', 'kid': kid})))
+    for i, (o, shape) in enumerate(itertools.product(AXES['ow'], ('brief_r1', 'declared2'))):
+        add(normalize(Case('owr', {'top': OWR_TOPS[i % 3], 'ow': o, 'dshape': shape, 'dsite': 'state'})))
+    for c in pairwise('owr', OWR_PAIR_AXES, seed_cases=list(out.values()), tries=120):
+        add(c)
+    for c in list(out.values()):
+        t = owr_twin_of(c)
+        if t is not None:
+            add(t)
+    return list(out.values())
 
 
 def room_shapes():
@@ -579,6 +631,8 @@ def select():
         c.core = True
     for c in shapes():
         add(c)
+    for c in owr_shapes():
+        add(c)
     _SELECTED.extend(chosen.values())
     return list(_SELECTED)
 
@@ -693,7 +747,10 @@ REASONS = {
     'X-BOTH-ENV': ('lineage/link', 'The names of both providers in one environment: the grandchild of Claude > codex exec > claude -p is given to the top Claude session (CLAUDE_CODE_SESSION_ID); the Codex run between is never the parent.'),
     'X-EDGE': ('lineage/link', 'The names of both providers where the codex exec run is linked to the Claude session by a guess only: the grandchild is linked to the top Claude session as if the environment proved it (no hold, no `evidence_conflict`).'),
     'X-ORPHAN': ('link', 'A `&` launch from a Codex shell that left no run behind is not counted: `orphan_launch` is made from Bash calls of Claude sessions only.'),
-    'X-DEBATE': ('units/debates', 'A still-running foreground `codex exec` sits in no debate yet: its CommandExecution (with `-o`) is written only when the process ends, so its report path is not known until then (the plan\'s limit: JS is not interpreted).'),
+    'X-DEBATE': ('units/debates', 'A running participant of a debate has no seat where its report is known from nothing the board reads: a macOS `codex exec` (no `/proc`, so no arguments), a `claude -p` run whose output a shell `>` redirect writes to the report (no path in the instruction or the arguments), a relative `-o` (the run\'s folder is not trusted); the seat comes once the run is over and its record says where the report went.'),
+    # the orchestrator's own writes
+    'O-HINT': ('units/debates', 'A folder the orchestrator made is not listed: its own successful write (a Write, a patch, a command that succeeded, the `mkdir` of the round folder) says where to look and is not read as that; only the repository walk and the participants\' own paths put a folder on the list.'),
+    'X-MAC-LIVE': ('lineage/link', 'On macOS a running `codex exec` run is not tied to its rollout (`ps` does not say which file it holds open): it is not linked to the thread that started it and is not a page of its own team, so nothing of it is known until the run is over.'),
     'X-WRAP-LAUNCH': ('link', 'A wrapper that is a launch (`tmux new-session -d \'claude -p "..."\'`, `xargs -I{} claude -p "{}"`) is no longer read as one, or the Claude session that used it is not linked to its child.'),
     'X-STALE-ENV': ('lineage/link', 'The names (`CODEX_THREAD_ID`, `CODEX_SESSION_ID`) a tmux server passes on from a Codex thread that has been over for hours, or from an earlier turn of a thread that is working again, are read as the launcher\'s: the child of another session is given to that thread.'),
     'X-PIN-UNKNOWN': ('lineage/link', 'The names of a Codex thread the index does not have are dropped as if there were none: the child is given to the Claude call with the same words as a certain content link, although it may be the unknown thread\'s.'),
@@ -747,6 +804,8 @@ def cxo_reason(c):
         return 'X-STALE-ENV'
     if a['os'] != 'linux' and a['chain'] == 'cl>cx>cl' and c.role == 'child':
         return 'X-MAC-BOTH'
+    if a['os'] != 'linux' and a['subj'] == 'cx' and a['chain'] == 'one' and c.role == 'child' and head not in ('unit', 'round', 'seat', 'cell', 'role', 'placements', 'units'):
+        return 'X-MAC-LIVE'
     if a['lure'] in axes.CXO_RELAYS:
         return 'X-RELAY'
     if head == 'diag':
@@ -779,6 +838,8 @@ def reason_of(c):
         return cxo_reason(c)
     if b == 'rer':
         return 'R-RERUN-SEAT'
+    if b == 'owr':
+        return 'O-HINT'
     if b == 'room':
         kind, _, _, why = oracle.room_trace(a)
         if why:

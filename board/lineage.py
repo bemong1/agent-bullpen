@@ -238,6 +238,47 @@ def codex_agents(sessions, codex_root):
     return out
 
 
+# the options of `codex exec` that take a value in the next word (so that a value which looks like an option is not read as one)
+EXEC_VALUE_OPTS = frozenset(('-C', '--cd', '--add-dir', '-s', '--sandbox', '-m', '--model', '-c', '--config', '-o', '--output-last-message', '-p', '--profile', '-i', '--image',
+                             '--output-schema', '--color', '--enable', '--disable', '--thread-source', '--local-provider'))
+EXEC_OUT_MAX = 4096                # a path longer than this is no path of ours
+
+
+def exec_out(argv):
+    """The path a live `codex exec` process was told to write its last message to, from its own command line (`-o FILE`, `--output-last-message FILE`, `--output-last-message=FILE`;
+    argv is what the shell made of the command, so a variable in the launching text is already its value), or None. Only an absolute path counts (a relative one would need the
+    folder of the process, which is not read), only before `--`, only when the command is `codex exec` (also `node …/codex.js exec`), and only when there is exactly one."""
+    words = [os.fsdecode(a) for a in argv]
+    start = next((i for i, a in enumerate(words[:2]) if os.path.basename(a) in ('codex', 'codex.js')), None)
+    if start is None or words[start + 1:start + 2] != ['exec']:
+        return None
+    found, i = [], start + 2
+    while i < len(words):
+        w = words[i]
+        if w == '--':
+            break
+        if w in ('-o', '--output-last-message'):
+            if i + 1 >= len(words):
+                return None
+            found.append(words[i + 1])
+            i += 2
+        elif w.startswith('--output-last-message='):
+            found.append(w.split('=', 1)[1])
+            i += 1
+        else:
+            i += 2 if w in EXEC_VALUE_OPTS else 1
+    if len(found) != 1:
+        return None
+    path = found[0]
+    if not path or len(path) > EXEC_OUT_MAX or '\0' in path or not os.path.isabs(path):
+        return None
+    try:
+        path.encode('utf-8')                                          # bytes that are no text (a lone surrogate after fsdecode) would break whatever shows the path
+    except UnicodeEncodeError:
+        return None
+    return os.path.normpath(path)
+
+
 _UNREAD = object()
 
 
@@ -420,6 +461,8 @@ class Lineage:
         self.cli = {}
         self.cx = {}
         self.cx_info = {}
+        self.live_out_held = set() # Codex exec thread ids whose live processes disagree about `-o` (two processes with its transcript open, not all saying the same file): a plan made from one of them is withdrawn
+        self.live_out = {}         # Codex exec thread id -> the absolute path its live process was told to write its last message to (from its command line). Memory only: it is never saved, and links nothing
         self.codex_free = {}              # child id -> True when its process's environment was read and nothing can have come from a Codex shell (see codex_free()), False when it was read and might; not kept when the process was not read
         self.pending = {}                 # child id -> {kind (cli|cx), claude, codex: (root, node), ts, cwd}: both providers' environments name a parent and the chain does not say yet which is the direct one (or `conflict`: [(tree, node)], or `unknown`: (thread id,) in place of both)
         self.version = 0
@@ -596,6 +639,7 @@ class Lineage:
                 self.cli[csid] = {'sid': psid, 'ts': s['ts'], 'cwd': s['cwd'], 'rule': got['rule'], 'orig': got['rule'], 'seen': now, 'pk': got['pk'], 'node': got['node'], 'exact': got['exact']}
                 changed = True
         livecx, self.live_threads = {}, set()
+        outs = {}                                                         # exec thread id -> {pid: the -o of that process}
         for it in procs.codex_pids(CODEX_SESSIONS) or []:
             got, tried = None, False
             for path in it['fds']:
@@ -605,6 +649,7 @@ class Lineage:
                 e = codex_get(tid) if tid else None
                 # only exec threads started by an agent (the same targets as cx_link): not a TUI or desktop the user opened, nor a sub-agent or review thread
                 if e and e['origin'] == 'exec' and not e['guardian'] and os.path.normpath(e['path']) == os.path.normpath(path):
+                    outs.setdefault(tid, {})[it['pid']] = exec_out(it['argv'])
                     if not tried:
                         env = procs.env_values(it['pid'], ENV_NAMES)
                         tried, got = True, parent_claim(it['pid'], None, sess, sids, cxp, codex_get, codex_root, env)
@@ -613,6 +658,8 @@ class Lineage:
                         pending[tid] = dict(_held(got), kind='cx', ts=None, cwd=None)
                     elif got and got['tree'] != tid and (got['pk'] == 'claude' or codex_get(got['tree'])):
                         livecx.setdefault(tid, {})[got['tree']] = got
+        self.live_out = {tid: next(iter(set(v.values()))) for tid, v in outs.items() if len(set(v.values())) == 1 and None not in v.values()}      # two processes with the rollout open and different words: none
+        self.live_out_held = {tid for tid, v in outs.items() if len(v) > 1 and len(set(v.values())) > 1}                                          # ... which is a conflict, not an absence
         for tid, parents in livecx.items():
             cur = self.cx.get(tid)
             if cur in parents:

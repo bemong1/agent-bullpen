@@ -20,6 +20,10 @@ Rules that the code below keeps:
     overlap and hold it as any two live agents do), and an agent whose process cannot be seen is not over. What an instruction only shows is not told: a code fence, a Markdown block quote, an earlier instruction that is said not to be
     carried out, and the write words of a text that forbids writing anything are quoted (`dead_spans`), for a path, a marker and a guide alike; a write that succeeded stays a
     seat whatever the instruction quotes.
+  - The orchestrator's own successful writes name where to look, never who sits where: a guide it wrote (brief.md, README.md, index.md), a report under a round folder or a round
+    folder it made (`listing_hint`) puts that folder on the page's list when the disk says it is a debate of the shape `written_debate` allows (a guide with exact round folders, or a
+    brief.md that declares two result files or more) and it is not the top of a repository, `docs` of one, what the tools keep (~/.claude, ~/.codex), or this program's own repository.
+    It makes no seat, no room and no member (the orchestrator is no agent of the debate); the name of a file alone settles nothing.
   - The spelling of a round folder (r01, round1) and of a file (A.md, a.md, A_flow.md) is kept as written; physically different files are never merged. The output file of
     a launch command is compared with the report the instruction names by its whole path, and one agent has one file of a seat.
   - A review with no round folder is a seat only for the reviewers and result files its guide declares; with no declaration it is a title and a
@@ -1044,6 +1048,7 @@ class Judgement:
     worked: Dict[str, Set[str]] = field(default_factory=dict)
     units: Dict[str, Unit] = field(default_factory=dict)
     listed: Dict[str, None] = field(default_factory=dict)
+    hinted: Dict[str, None] = field(default_factory=dict)                            # the listed folders that are listed only because the orchestrator wrote there (no agent, no walk): the list shows them behind the debates that have agents
     unit_ts: Dict[str, float] = field(default_factory=dict)
     diag: List[dict] = field(default_factory=list)
     folders: Dict[tuple, Dict[str, str]] = field(default_factory=dict)
@@ -1441,9 +1446,54 @@ def _seat_rooms(rooms, by_id, works, cat, jd):
             jd.room_files[(room.folder, seat)] = path
 
 
-def assign(agents, cat, statuses=None, extra_units=(), tops_of=None):
+def listing_hint(path, is_dir=False):
+    """The folder an orchestrator's own successful write says to look at, or None. `path` is absolute. A guide written (`<D>/brief.md`, `README.md`, `index.md`), a report under a
+    round folder (`<D>/<r|round N>/<x>.md`) or a round folder made (`<D>/<r|round N>`, `is_dir`) is for D. Nothing else is: not a plan, a note or a closing document, not an
+    arbitrary folder, and no folder above D is looked at. The name settles nothing: `written_debate` asks the disk."""
+    if not path or not os.path.isabs(path):
+        return None
+    path = os.path.normpath(path)
+    name = os.path.basename(path)
+    if is_dir:
+        return os.path.dirname(path) if round_of(name) is not None else None
+    if name in GUIDE_NAMES:
+        return os.path.dirname(path)
+    rep = report_of_path(path)
+    return rep[0] if rep else None
+
+
+_OWN_TOP = []
+
+
+def own_top():
+    """The top of the repository this program runs from (a checkout), or None (an installed copy has none). Tests of the program keep their fixtures there."""
+    if not _OWN_TOP:
+        _OWN_TOP.append(repo_top(os.path.dirname(os.path.abspath(__file__))))
+    return _OWN_TOP[0]
+
+
+def written_debate(u):
+    """Whether the folder `u` (a Unit) that the orchestrator wrote into may be listed as a debate: its shape is a guide with exact round folders on disk, or a brief.md that declares
+    two result files or more (a flat review: `declared_reports`), and it is not one of the places a guide is a document of its own: a folder that is too broad, what the tools
+    keep (`STATE_DIRS`), this program's own repository, and, for a README.md or an index.md, the top of a repository or its `docs`. A brief.md alone is not a debate here, whatever
+    its text says of rounds."""
+    d = u.path
+    if too_broad(d) or d.startswith(STATE_DIRS):
+        return False
+    own = own_top()
+    if own and (d == own or d.startswith(own + os.sep)):
+        return False
+    guide = os.path.basename(u.brief) if u.brief else None
+    if not ((u.rounds and guide) or (u.kind == 'flat' and guide == 'brief.md' and len(u.declared_reports) >= 2)):
+        return False
+    return guide == 'brief.md' or not _is_common(d)
+
+
+def assign(agents, cat, statuses=None, extra_units=(), tops_of=None, hinted=None):
     """Who sits where. `agents` are AgentFacts, `cat` the Catalog, `statuses` {agent id: status} ('running', 'done', 'interrupted' ...), `extra_units` the folders a walk
-    of the repository found, `tops_of` a function from a working folder to the folders above it a relative path may be meant from (the git top).
+    of the repository found, `tops_of` a function from a working folder to the folders above it a relative path may be meant from (the git top), `hinted` {folder: time of
+    the orchestrator's last successful write there} (listing_hint): the folders that pass `written_debate` are listed, and only listed (`listed`, `units`, `unit_ts` with the
+    later of the two times); no seat, member, room or agent unit comes from them.
     Returns a Judgement. Pure with respect to the agents: the only reads are the debate folders themselves."""
     statuses = statuses or {}
     tops_of = tops_of or (lambda cwd: ())
@@ -1483,6 +1533,14 @@ def assign(agents, cat, statuses=None, extra_units=(), tops_of=None):
         if u:
             jd.units.setdefault(u.path, u)
             jd.unit_ts.setdefault(u.path, 0)
+            jd.listed.setdefault(u.path)
+    for p, ts in (hinted or {}).items():
+        u = cat.unit_at(p)
+        if u and written_debate(u):
+            if u.path not in jd.listed:
+                jd.hinted.setdefault(u.path)
+            jd.units.setdefault(u.path, u)
+            jd.unit_ts[u.path] = max(jd.unit_ts.get(u.path, 0), ts or 0)
             jd.listed.setdefault(u.path)
     _settle(agents, works, claims, statuses, jd, cat)
     return jd

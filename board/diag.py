@@ -72,7 +72,7 @@ PARAMS = {
     'stray_notice': {'count': _count},
     'proc_unknown': {},
     'cache_error': {'what': _one_of('write', 'untrusted'), 'error': _shaped(r'[A-Za-z_][A-Za-z0-9_]{0,39}')},
-    'listing_capped': {},
+    'listing_capped': {'detail': _one_of('writes')},
     'evidence_conflict': {'other': _TREE},
     'content_author_differs': {'other': _TREE},
     'content_only': {},

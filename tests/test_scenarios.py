@@ -350,7 +350,7 @@ class Selection(unittest.TestCase):
     def test_count_and_uniqueness(self):
         ids = [c.id for c in self.cases]
         self.assertEqual(len(ids), len(set(ids)))
-        self.assertTrue(700 <= len(ids) <= 3000, len(ids))
+        self.assertTrue(700 <= len(ids) <= 3300, len(ids))
 
     def test_the_cover_is_deterministic(self):
         names = run.PAIR_AXES['sta']
@@ -2244,6 +2244,103 @@ class CodexOrchestratorScenes(unittest.TestCase):
         _, b = self.build(topic='talk', subj='cl', look='live')
         self.assertFalse(os.path.exists(os.path.join(b.work, 'repo', 'talk', 'r1')))
 
+    def test_a_codex_exec_child_has_the_dash_o_of_its_command_in_its_own_arguments(self):
+        W = lambda b, *p: os.path.join(b.work, 'repo', *p)                            # noqa: E731
+        for topic, flag in (('talk', lambda b: W(b, 'talk', 'r1', 'B.md')), ('talk_rel', lambda b: os.path.join('talk', 'r1', 'B.md')), ('talk_aux', lambda b: W(b, 'talk', 'r1', 'B_last.md'))):
+            _, b = self.build(topic=topic, subj='cx', look='live')
+            argv = self.kid(b)['argv']
+            self.assertEqual(argv[argv.index('-o'):argv.index('-o') + 2], ['-o', flag(b)], topic)           # the process has what the shell made of the call
+            self.assertTrue(argv[-1].startswith(b.ids['child_text']), topic)                                 # the instruction is the last argument
+            self.assertEqual('r1/B.md' in argv[-1], topic == 'talk_aux', topic)                               # only `talk_aux` is told the path
+            _, b = self.build(topic=topic, subj='cx', look='ended')
+            (x,) = self.commands(b.paths['top'])
+            self.assertIn(' -o %s ' % flag(b), x['command'][2], topic)
+        for subj in ('cl', 'cx'):
+            _, b = self.build(subj=subj, look='live')
+            self.assertNotIn('-o', (self.kid(b) or {'argv': []})['argv'])               # no report to tell: no `-o`
+
+    def test_a_relative_dash_o_names_a_file_below_the_folder_the_call_started_in(self):
+        _, b = self.build(topic='talk_rel', subj='cx', look='ended')
+        self.assertTrue(os.path.isfile(os.path.join(b.work, 'repo', 'talk', 'r1', 'B.md')))
+        _, b = self.build(topic='talk_rel', subj='cx', look='live')
+        self.assertNotIn('r1', self.kid(b)['argv'][-1])                                       # the instruction has no path either
+        t = self.truth(topic='talk_rel', subj='cx', look='live').subjects['child']
+        self.assertEqual((t['unit'], t['seat'], t['cell']), ('talk', 'B', 'writing'))
+
+    def test_the_instruction_names_the_report_and_dash_o_is_another_file_of_the_round(self):
+        W = os.path.join
+        _, b = self.build(topic='talk_aux', subj='cx', look='ended')
+        folder = W(b.work, 'repo', 'talk', 'r1')
+        (x,) = self.commands(b.paths['top'])
+        self.assertIn('Write your report to %s.' % W(folder, 'B.md'), x['command'][2])
+        self.assertIn(' -o %s ' % W(folder, 'B_last.md'), x['command'][2])
+        changes = [d['payload']['item'] for d in _read_lines(b.paths['child']) if d['type'] == 'event_msg' and d['payload'].get('type') == 'item_completed' and d['payload']['item']['type'] == 'FileChange']
+        self.assertEqual([list(c['changes']) for c in changes], [[W(folder, 'B.md')]])          # the run writes the report with a patch
+        self.assertEqual(sorted(os.listdir(folder)), ['B.md', 'B_last.md'])
+        t = self.truth(topic='talk_aux', subj='cx', look='live')
+        self.assertEqual(t.subjects['child']['placements'], {'talk|1|B|r1/B'})              # `-o` names the last message: it seats nobody and makes no second place
+        self.assertEqual(t.subjects['child']['seat'], 'B')
+        _, b = self.build(topic='talk_aux', subj='cx', look='live')
+        argv = self.kid(b)['argv']
+        self.assertEqual(argv[argv.index('-o') + 1], W(b.work, 'repo', 'talk', 'r1', 'B_last.md'))
+
+    def test_a_codex_shell_redirects_the_output_of_a_claude_run_to_the_report_and_the_instruction_has_no_path(self):
+        for how in ('fg', 'detach'):
+            _, b = self.build(topic='talk_redir', subj='cl', look='ended', how=how)
+            (x,) = [c for c in self.commands(b.paths['top']) if 'claude -p' in c['command'][2]]
+            self.assertIn(' > talk/r1/A.md', x['command'][2], how)
+            first = _read_lines(b.paths['child'])[0]['message']['content']
+            self.assertNotIn('r1/', first)
+            self.assertNotIn('Write', ' '.join(d['message']['content'][-1].get('name', '') for d in _read_lines(b.paths['child']) if d['type'] == 'assistant' and isinstance(d['message']['content'][-1], dict)))
+            path = os.path.join(b.work, 'repo', 'talk', 'r1', 'A.md')
+            with open(path) as f:
+                self.assertIn('Findings of A', f.read(), how)                                 # the shell, not the run, wrote it
+        _, b = self.build(topic='talk_redir', subj='cl', look='live', how='fg')
+        self.assertEqual(os.path.getsize(os.path.join(b.work, 'repo', 'talk', 'r1', 'A.md')), 0)     # created at the launch, filled when the run ends
+        t = self.truth(topic='talk_redir', subj='cl', look='live').subjects['child']
+        self.assertEqual((t['unit'], t['seat'], t['cell']), ('talk', 'A', 'writing'))
+
+    def test_the_new_kinds_of_participant_fold_to_the_ones_that_can_exist(self):
+        n = lambda **v: axes.normalize(Case('cxo', v)).v                                   # noqa: E731
+        self.assertEqual(n(topic='talk_rel', subj='cl')['topic'], 'talk')                   # `-o` is an option of `codex exec`
+        self.assertEqual(n(topic='talk_aux', subj='cl')['topic'], 'talk')
+        self.assertEqual(n(topic='talk_redir', subj='cx')['topic'], 'talk')                 # the redirect is of a `claude -p` run's output
+        for topic, subj in (('talk_rel', 'cx'), ('talk_aux', 'cx'), ('talk_redir', 'cl')):
+            self.assertEqual(n(topic=topic, subj=subj)['topic'], topic)
+            self.assertEqual(n(topic=topic, subj=subj, how='bg')['topic'], 'none')           # a `&` call leaves no child
+            self.assertEqual(n(topic=topic, subj=subj, host='sub')['topic'], 'none')
+        self.assertEqual(n(topic='talk', os='mac')['os'], 'mac')
+        for off in (dict(look='ended'), dict(how='detach'), dict(env='none'), dict(topic='none'), dict(lure='relay'), dict(chain='cx>cx')):
+            self.assertEqual(n(**dict(dict(topic='talk', os='mac'), **off))['os'], 'linux', off)       # macOS only where a running participant's arguments would have told its report
+
+    def test_macos_has_no_arguments_to_read_so_only_the_instruction_can_seat_a_running_participant(self):
+        for subj in ('cl', 'cx'):
+            _, b = self.build(topic='talk', subj=subj, look='live', os='mac')
+            self.assertEqual(b.case.v['os'], 'mac')
+            t = oracle.truth(b.case).subjects['child']
+            self.assertEqual((t['unit'], t['seat'], t['cell']), ('talk', 'B' if subj == 'cx' else 'A', 'writing'))       # the truth is the same as on Linux: the world has not changed
+        ids = {c.id for c in run.select()}
+        for subj, top in itertools.product(('cl', 'cx'), ('cx_tui', 'cx_exec')):
+            self.assertIn(axes.normalize(Case('cxo', dict(topic='talk', subj=subj, how='fg', look='live', top=top, env='codex', os='mac'))).id, ids)
+
+    def test_the_new_participants_are_in_the_selection_and_the_reason_says_where_the_seat_stays_open(self):
+        ids = {c.id for c in run.select()}
+        for topic, subj in (('talk_rel', 'cx'), ('talk_aux', 'cx'), ('talk_redir', 'cl')):
+            for how, look, top in itertools.product(('fg', 'detach'), AXES['look'], ('cx_tui', 'cx_exec')):
+                self.assertIn(axes.normalize(Case('cxo', dict(topic=topic, subj=subj, how=how, look=look, top=top))).id, ids)
+        text = run.REASONS['X-DEBATE'][1]
+        for words in ('macOS', '`>` redirect', 'relative `-o`'):
+            self.assertIn(words, text)
+        with open(os.path.join(REPO, 'tests', 'scenarios_xfail.json')) as f:
+            doc = json.load(f)
+        for cid, cells in doc['cells'].items():
+            if cid.startswith('cxo:') and ('topic=talk_rel' in cid or 'topic=talk_redir' in cid):
+                self.assertEqual({r[3] for r in cells.values()}, {'X-DEBATE'}, cid)
+            if cid.startswith('cxo:') and 'os=mac' in cid:
+                self.assertEqual({r[3] for k, r in cells.items() if k.split('.')[1] in ('unit', 'round', 'seat', 'cell', 'role', 'placements')}, {'X-DEBATE'}, cid)
+            if cid.startswith('cxo:') and 'topic=talk_aux' in cid:
+                self.fail('a participant whose `-o` is another file has its seat from the instruction: no red cell is expected (%s)' % cid)
+
     def test_a_claude_sub_agent_of_a_claude_run_below_a_codex_page(self):
         _, b = self.build(chain='cx>cl>sub', look='live')
         meta = glob_files(os.path.dirname(b.paths['mid']), 'agent-*.meta.json')
@@ -3166,6 +3263,285 @@ class ReviewShapes(unittest.TestCase):
             self.assertEqual(reason('sta', 'orch', 'orch_state', 'idle', 'working', skind='main', life='running', **shape), want, shape)
         for r in ('R-ROOM-TIMING', 'R-ROOM-CODE', 'R-ROOM-CITE', 'R-ROOM-MSG-FAIL', 'B-CITE', 'S-ORCH-DEAD', 'S-ORCH-COMMANDS', 'S-ORCH-SDK-END'):
             self.assertIn(r, run.REASONS)
+
+
+class OrchestratorWriteScenes(unittest.TestCase):
+    """The `owr` bundle: the orchestrator makes a folder that may be a debate (a tool, a patch, a command, only a `mkdir`, an attempt that failed, words that only name it); the
+    scenes hold exactly that in the records and on disk, and the oracle lists the folder as its rule says."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix='scen-owr-')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def build(self, **v):
+        c = axes.normalize(Case('owr', v))
+        return c, build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+
+    def truth(self, **v):
+        return oracle.truth(axes.normalize(Case('owr', v)))
+
+    def calls(self, path, name):
+        """The tool calls of a Claude record, with whether the result came back as an error: [(input, is_error)]."""
+        lines = _read_lines(path)
+        results = {c['tool_use_id']: c['is_error'] for d in lines if d['type'] == 'user' and isinstance(d['message']['content'], list)
+                   for c in d['message']['content'] if c.get('type') == 'tool_result'}
+        return [(d['message']['content'][-1]['input'], results.get(d['message']['content'][-1]['id'])) for d in lines
+                if d['type'] == 'assistant' and d['message']['content'][-1].get('name') == name]
+
+    def items(self, path, kind):
+        return [d['payload']['item'] for d in _read_lines(path) if d['type'] == 'event_msg' and d['payload'].get('type') == 'item_completed' and d['payload']['item']['type'] == kind]
+
+    def unit(self, b):
+        return os.path.join(b.home, axes.OWR_SITE_REL[b.case.v['dsite']])
+
+    def test_the_id_and_the_folds(self):
+        self.assertEqual(Case('owr', {}).id, 'owr:top=claude;ow=tool;dshape=brief_r1;dsite=plain;kid=none;copy=none')
+        n = lambda **v: axes.normalize(Case('owr', v)).v                                 # noqa: E731
+        self.assertEqual(n(top='cx_tui', ow='tool')['ow'], 'patch')                       # a patch is Codex's tool, the Write tool Claude's
+        self.assertEqual(n(top='cx_exec', ow='tool')['ow'], 'patch')
+        self.assertEqual(n(top='claude', ow='patch')['ow'], 'tool')
+        self.assertEqual(n(copy='worktree', dsite='plain')['copy'], 'none')               # the copy is of a folder of the repository
+        self.assertEqual(n(copy='worktree', dsite='repo')['copy'], 'worktree')
+        self.assertEqual(n(copy='link')['copy'], 'none')
+        self.assertEqual(n(kid='seated', dshape='brief_only')['kid'], 'none')             # a participant is told a report in a round folder
+        for site in ('state', 'top', 'docs'):
+            self.assertEqual(n(kid='seated', dsite=site)['kid'], 'none', site)
+        self.assertEqual(n(kid='seated', dsite='scratch', dshape='readme_r1')['kid'], 'seated')
+        self.assertEqual(n(kid='unlinked', dsite='state')['kid'], 'none')
+        for c in (c for c in run.select() if c.bundle == 'owr'):
+            self.assertEqual(Case.from_id(c.id).id, c.id)
+            self.assertEqual(axes.normalize(c).id, c.id)
+
+    def test_the_selection_has_every_write_of_every_shape_in_a_plain_and_a_scratch_folder_and_a_twin_of_each_listing_by_a_write(self):
+        cases = [c for c in run.select() if c.bundle == 'owr']
+        ids = {c.id for c in cases}
+        self.assertTrue(120 <= len(ids) <= 200, len(ids))
+        seen = {(c.v['ow'], c.v['dshape'], c.v['dsite']) for c in cases}
+        for site in ('plain', 'scratch'):
+            self.assertEqual({(o, sh) for o, sh, st in seen if st == site} >= set(itertools.product(AXES['ow'], AXES['dshape'])), True, site)      # the whole product
+        for axis, values in (('top', run.OWR_TOPS), ('ow', AXES['ow']), ('dshape', AXES['dshape']), ('dsite', AXES['dsite']), ('kid', AXES['kid']), ('copy', ('none', 'worktree'))):
+            self.assertEqual({c.v[axis] for c in cases}, set(values), axis)                  # every value of every axis is there
+        for c in cases:
+            v = c.v
+            if axes.owr_listed(v) and not axes.owr_walked(v) and v['kid'] != 'seated':
+                t = run.owr_twin_of(c)
+                self.assertIn(t.id, ids, c.id)                                             # a case that lists a folder by a write has a twin where the write failed or was only words
+                self.assertIn(t.v['ow'], ('failed', 'words'))
+                self.assertEqual({k: x for k, x in t.v.items() if k != 'ow'}, {k: x for k, x in v.items() if k != 'ow'})
+                self.assertFalse(axes.owr_listed(t.v) and not axes.owr_walked(t.v))
+            else:
+                self.assertIsNone(run.owr_twin_of(c))
+        self.assertEqual([c.id for c in run.owr_shapes()], [c.id for c in run.owr_shapes()])       # deterministic
+
+    def test_a_claude_orchestrator_writes_with_its_tool_a_command_or_words(self):
+        for shape in ('brief_r1', 'declared2'):
+            _, b = self.build(top='claude', ow='tool', dshape=shape)
+            ((inp, err),) = self.calls(b.paths['orch'], 'Write')
+            self.assertEqual((inp['file_path'], err), (os.path.join(self.unit(b), axes.OWR_GUIDE[shape]), False))
+            self.assertEqual(self.calls(b.paths['orch'], 'Bash'), [])
+        _, b = self.build(top='claude', ow='failed', dshape='brief_r1')
+        ((inp, err),) = self.calls(b.paths['orch'], 'Write')
+        self.assertTrue(err)                                                                 # the Write came back as an error
+        self.assertTrue(all(e for _, e in self.calls(b.paths['orch'], 'Bash')))              # and so did the `mkdir`
+        _, b = self.build(top='claude', ow='redirect', dshape='brief_r1')
+        ((inp, err),) = self.calls(b.paths['orch'], 'Bash')
+        self.assertIn("mkdir -p %s && cat > %s <<'EOF'" % (os.path.join(self.unit(b), 'r1'), os.path.join(self.unit(b), 'brief.md')), inp['command'])
+        self.assertFalse(err)
+        _, b = self.build(top='claude', ow='redirect', dshape='declared2')
+        ((inp, _),) = self.calls(b.paths['orch'], 'Bash')
+        self.assertNotIn('mkdir', inp['command'])                                            # no round folder to make
+        _, b = self.build(top='claude', ow='mkdir_only', dshape='readme_r1')
+        ((inp, _),) = self.calls(b.paths['orch'], 'Bash')
+        self.assertEqual(inp['command'], 'mkdir -p %s' % os.path.join(self.unit(b), 'r1'))
+        _, b = self.build(top='claude', ow='mkdir_only', dshape='brief_only')
+        ((inp, _),) = self.calls(b.paths['orch'], 'Bash')
+        self.assertEqual(inp['command'], 'mkdir -p %s' % self.unit(b))                       # the folder itself, no round folder
+        _, b = self.build(top='claude', ow='words', dshape='brief_r1')
+        ((inp, err),) = self.calls(b.paths['orch'], 'Bash')
+        self.assertTrue(inp['command'].startswith('echo "mkdir -p '))
+        self.assertEqual((self.calls(b.paths['orch'], 'Write'), err), ([], False))
+
+    def test_a_codex_orchestrator_writes_with_a_patch_a_command_or_words(self):
+        for top in ('cx_tui', 'cx_exec'):
+            _, b = self.build(top=top, ow='patch', dshape='brief_r1')
+            (fc,) = self.items(b.paths['top'], 'FileChange')
+            self.assertEqual(list(fc['changes']), [os.path.join(self.unit(b), 'brief.md')])
+            self.assertEqual((fc['status'], self.items(b.paths['top'], 'CommandExecution')), ('completed', []))
+            _, b = self.build(top=top, ow='failed', dshape='brief_r1')
+            self.assertEqual(self.items(b.paths['top'], 'FileChange'), [])                   # a patch that failed leaves no FileChange
+            cmds = self.items(b.paths['top'], 'CommandExecution')
+            self.assertEqual({(c['status'], c['exit_code']) for c in cmds}, {('failed', 1)})
+            _, b = self.build(top=top, ow='redirect', dshape='readme_r1')
+            (c,) = self.items(b.paths['top'], 'CommandExecution')
+            self.assertEqual((c['status'], c['exit_code']), ('completed', 0))
+            self.assertIn("cat > %s <<'EOF'" % os.path.join(self.unit(b), 'README.md'), c['command'][2])
+            _, b = self.build(top=top, ow='mkdir_only', dshape='declared2')
+            (c,) = self.items(b.paths['top'], 'CommandExecution')
+            self.assertEqual(c['command'][2], 'mkdir -p %s' % os.path.join(self.unit(b), 'r1'))     # a brief that declares two results gets its round folder
+            _, b = self.build(top=top, ow='words', dshape='brief_r1')
+            (c,) = self.items(b.paths['top'], 'CommandExecution')
+            self.assertTrue(c['command'][2].startswith('echo "mkdir -p '))
+            self.assertEqual(self.items(b.paths['top'], 'FileChange'), [])
+
+    def test_the_folder_is_on_disk_as_the_shape_says_whoever_made_it(self):
+        want = {'brief_r1': ('brief.md', True), 'readme_r1': ('README.md', True), 'brief_only': ('brief.md', False), 'declared2': ('brief.md', False),
+                'declared1': ('brief.md', False), 'notes': ('README.md', False)}
+        for shape, (guide, rounds) in want.items():
+            for ow in ('failed', 'words', 'tool'):
+                _, b = self.build(ow=ow, dshape=shape)
+                folder = self.unit(b)
+                self.assertTrue(os.path.isfile(os.path.join(folder, guide)), (shape, ow))
+                self.assertEqual(os.path.isdir(os.path.join(folder, 'r1')), rounds, (shape, ow))
+        _, b = self.build(ow='mkdir_only', dshape='declared2')
+        self.assertTrue(os.path.isdir(os.path.join(self.unit(b), 'r1')))                     # the orchestrator made it
+        _, b = self.build(ow='mkdir_only', dshape='declared1')
+        self.assertFalse(os.path.isdir(os.path.join(self.unit(b), 'r1')))
+        with open(os.path.join(self.build(dshape='declared2')[1].home, axes.OWR_SITE_REL['plain'], 'brief.md')) as f:
+            self.assertEqual(len(re.findall(r'`\w+\.md` \(reviewer', f.read())), 2)
+        for site, rel in axes.OWR_SITE_REL.items():
+            _, b = self.build(dsite=site)
+            self.assertTrue(os.path.isfile(os.path.join(b.home, rel, 'brief.md')), site)
+        _, b = self.build(dsite='state')
+        self.assertTrue(self.unit(b).startswith(b.claude + os.sep))                         # under the agent's own state folder
+        for site in ('plain', 'scratch', 'state'):
+            _, b = self.build(dsite=site)
+            top = self.unit(b)
+            while top != b.home:                                                             # no repository above a folder that is no part of one
+                self.assertFalse(os.path.exists(os.path.join(top, '.git')), site)
+                top = os.path.dirname(top)
+
+    def test_the_run_beside_the_folder(self):
+        for top in ('claude', 'cx_tui'):
+            c, b = self.build(top=top, ow='words', kid='seated')
+            rpath = os.path.join(self.unit(b), 'r1', 'A.md')
+            self.assertTrue(b.ids['kid_text'].endswith('Write your report to %s.' % rpath))
+            first = _read_lines(b.paths['kid'])[0]['message']['content']
+            self.assertEqual(first, b.ids['kid_text'])                                      # the run was told where to write
+            writes = [d['message']['content'][-1]['input']['file_path'] for d in _read_lines(b.paths['kid']) if d['type'] == 'assistant' and d['message']['content'][-1].get('name') == 'Write']
+            self.assertEqual(writes, [rpath])
+            if top == 'claude':
+                launch = [i['command'] for i, _ in self.calls(b.paths['orch'], 'Bash') if 'claude -p' in i['command']]
+            else:
+                launch = [x['command'][2] for x in self.items(b.paths['top'], 'CommandExecution') if 'claude -p' in x['command'][2]]
+            self.assertEqual(len(launch), 1, top)
+            self.assertIn(b.ids['kid_text'], launch[0])                                     # the launching call carries the words: a certain link
+            self.assertFalse(launch[0].rstrip().endswith('&'))
+            _, b = self.build(top=top, ow='words', kid='died')
+            self.assertNotIn('kid', b.paths)                                                # a call that ends with `&` leaves no run
+            launch = [i['command'] for i, _ in self.calls(b.paths['orch'], 'Bash') if 'claude -p' in i['command']] if top == 'claude' else \
+                [x['command'][2] for x in self.items(b.paths['top'], 'CommandExecution') if 'claude -p' in x['command'][2]]
+            self.assertTrue(launch and launch[0].rstrip().endswith('&'), top)
+            _, b = self.build(top=top, ow='words', kid='unlinked')
+            self.assertEqual(_read_lines(b.paths['kid'])[0]['message']['content'].split(' Write your')[0], b.ids['kid_text'])
+            bash = [i['command'] for i, _ in self.calls(b.paths['orch'], 'Bash')] if top == 'claude' else [x['command'][2] for x in self.items(b.paths['top'], 'CommandExecution')]
+            self.assertFalse([x for x in bash if b.ids['kid_text'] in x], top)             # nobody started it: no call has its words
+            self.assertTrue(os.path.isfile(os.path.join(self.unit(b), 'r1', 'B.md')))
+        _, b = self.build(ow='words', kid='unlinked', dshape='declared2')
+        self.assertFalse(os.path.exists(os.path.join(self.unit(b), 'r1')))                  # nothing to write a report into
+
+    def test_a_copy_in_a_linked_worktree_where_another_agent_works(self):
+        for top in ('claude', 'cx_tui', 'cx_exec'):
+            _, b = self.build(top=top, ow='words', dsite='repo', copy='worktree')
+            wt = os.path.join(b.work, 'wt')
+            with open(os.path.join(wt, '.git')) as f:
+                self.assertTrue(f.read().startswith('gitdir: %s' % os.path.join(b.work, 'repo', '.git', 'worktrees')))
+            for name in ('brief.md',):
+                with open(os.path.join(wt, 'docs', 'talk', name)) as f, open(os.path.join(self.unit(b), name)) as g:
+                    self.assertEqual(f.read(), g.read())
+            self.assertTrue(os.path.isdir(os.path.join(wt, 'docs', 'talk', 'r1')))
+            self.assertEqual('work/wt/docs/talk', oracle.OWR_COPY_REL)
+            if top == 'claude':
+                cwds = {d['cwd'] for p in glob_files(os.path.dirname(b.paths['orch']), 'agent-*.jsonl') for d in _read_lines(p)}
+            else:
+                cwds = {d['payload'].get('cwd') for p in glob_rollouts(b) for d in _read_lines(p) if d['type'] == 'session_meta'} - {None}
+            self.assertIn(wt, cwds, top)                                                      # another agent of the page works in the worktree
+            accepted = oracle.truth(axes.normalize(Case('owr', dict(top=top, dsite='repo', copy='worktree')))).accepted[('listing', 'units')]
+            self.assertEqual(accepted, {frozenset(['work/wt/docs/talk'])})                   # the folder of the page or its copy: one debate
+
+    def test_the_truth_lists_a_folder_by_the_orchestrators_write_and_the_disk_and_by_nothing_else(self):
+        def expected(ow, shape, site, kid):
+            walked = site in ('repo', 'top', 'docs') and shape != 'notes'                     # a walk of the repository lists what is there, a README of notes confirms nothing
+            by_write = ow in ('tool', 'patch', 'redirect', 'mkdir_only') and shape in ('brief_r1', 'readme_r1', 'declared2') and site != 'state'
+            return walked or kid == 'seated' or by_write
+        n = 0
+        for ow, shape, site, kid in itertools.product(AXES['ow'], AXES['dshape'], AXES['dsite'], AXES['kid']):
+            for top in ('claude', 'cx_tui'):
+                c = axes.normalize(Case('owr', dict(top=top, ow=ow, dshape=shape, dsite=site, kid=kid)))
+                v = c.v
+                units = oracle.truth(c).subjects['listing']['units']
+                want = frozenset([axes.OWR_SITE_REL[site]]) if expected(v['ow'], shape, site, v['kid']) else frozenset()
+                self.assertEqual(units, want, c.id)
+                n += 1
+        self.assertGreater(n, 800)
+        self.assertEqual(self.truth(ow='mkdir_only', dshape='brief_only').subjects['listing']['units'], frozenset())       # `mkdir` of the folder itself names nothing
+        self.assertEqual(self.truth(ow='tool', dshape='brief_only').subjects['listing']['units'], frozenset())           # a brief.md alone is a title, not a debate
+        self.assertEqual(self.truth(ow='tool', dshape='declared1').subjects['listing']['units'], frozenset())
+        self.assertEqual(self.truth(ow='tool', dshape='notes').subjects['listing']['units'], frozenset())
+        self.assertEqual(self.truth(ow='tool', dshape='declared2').subjects['listing']['units'], frozenset(['work/plain/talk']))
+        self.assertEqual(self.truth(ow='failed', dshape='brief_r1').subjects['listing']['units'], frozenset())
+        self.assertEqual(self.truth(ow='tool', dshape='brief_r1', dsite='state').subjects['listing']['units'], frozenset())
+        self.assertEqual(self.truth(ow='failed', dshape='brief_only', dsite='repo').subjects['listing']['units'], frozenset(['work/repo/docs/talk']))      # the walk, whatever the orchestrator did
+        self.assertEqual(self.truth(ow='words', dshape='brief_r1', dsite='top').subjects['listing']['units'], frozenset(['work/repo']))
+        self.assertEqual(self.truth(ow='words', dshape='readme_r1', dsite='docs').subjects['listing']['units'], frozenset(['work/repo/docs']))
+
+    def test_the_orchestrator_never_sits_and_the_seat_of_a_participant_does_not_depend_on_the_hint(self):
+        for ow, shape, site, kid, top in itertools.product(AXES['ow'], AXES['dshape'], AXES['dsite'], AXES['kid'], ('claude', 'cx_exec')):
+            c = axes.normalize(Case('owr', dict(top=top, ow=ow, dshape=shape, dsite=site, kid=kid)))
+            t = oracle.truth(c).subjects
+            self.assertEqual(t['orch']['rooms'], frozenset(), c.id)                         # no room: a write names a folder, no person
+            self.assertEqual(t['orch']['cells'], frozenset(['%s|1|A|kid' % axes.OWR_SITE_REL[site]]) if c.v['kid'] == 'seated' else frozenset(), c.id)    # no cell is the orchestrator's
+        seated = [{k: x for k, x in oracle.truth(axes.normalize(Case('owr', dict(top='claude', ow=ow, dshape='brief_r1', kid='seated')))).subjects['kid'].items()} for ow in ('tool', 'redirect', 'mkdir_only', 'failed', 'words')]
+        self.assertTrue(all(x == seated[0] for x in seated))
+        self.assertEqual((seated[0]['unit'], seated[0]['round'], seated[0]['seat'], seated[0]['role'], seated[0]['cell']), ('work/plain/talk', 1, 'A', 'writer', 'done'))
+        self.assertEqual(seated[0]['placements'], {'work/plain/talk|1|A|r1/A'})
+        for kid in ('died', 'none'):
+            self.assertNotIn('kid', self.truth(kid=kid).subjects)
+        self.assertEqual(self.truth(kid='unlinked').subjects['kid'], {'seat': None, 'role': 'none', 'placements': frozenset()})      # a record nobody started seats nobody, the folder listed or not
+
+    def test_the_board_is_read_with_the_state_folders_of_the_case(self):
+        seen = []
+        real = observe.read_owr
+
+        def spy(b, obs, objs):
+            from board import units
+            seen.append((units.STATE_DIRS, b.home))
+            return real(b, obs, objs)
+        c = axes.normalize(Case('owr', dict(dsite='state')))
+        with tempfile.TemporaryDirectory(prefix='scen-owr-state-') as root, mock.patch.object(observe, 'read_owr', spy):
+            run.run_case(c, root)
+        ((dirs, home),) = seen
+        self.assertEqual(dirs, (os.path.join(home, '.claude') + os.sep, os.path.join(home, '.codex') + os.sep))
+        from board import units
+        self.assertNotIn(home, ''.join(units.STATE_DIRS))                                    # and they are put back
+
+    def test_a_folder_the_orchestrator_names_is_read_from_the_pages_debate_list(self):
+        c = axes.normalize(Case('owr', dict(ow='words', dshape='brief_r1', dsite='repo', kid='seated')))
+        with tempfile.TemporaryDirectory(prefix='scen-owr-read-') as root:
+            cells = run.run_case(c, root)
+        self.assertEqual({(x.role, x.field): x.result for x in cells},
+                         {('listing', 'units'): 'pass', ('orch', 'rooms'): 'pass', ('orch', 'cells'): 'pass', ('kid', 'unit'): 'pass', ('kid', 'round'): 'pass', ('kid', 'seat'): 'pass',
+                          ('kid', 'role'): 'pass', ('kid', 'placements'): 'pass', ('kid', 'cell'): 'pass'})
+        got = {(x.role, x.field): x.gs for x in cells}
+        self.assertEqual(got[('orch', 'cells')], ['work/repo/docs/talk|1|A|kid'])
+        self.assertEqual(got[('listing', 'units')], ['work/repo/docs/talk'])
+
+    def test_the_red_cells_are_only_folders_that_nothing_but_the_orchestrators_write_names(self):
+        with open(os.path.join(REPO, 'tests', 'scenarios_xfail.json')) as f:
+            doc = json.load(f)
+        for cid, cells in doc['cells'].items():
+            if not cid.startswith('owr:'):
+                continue
+            v = Case.from_id(cid).v
+            self.assertTrue(axes.owr_listed(v) and not axes.owr_walked(v) and v['kid'] != 'seated', cid)
+            self.assertEqual(set(cells), {'listing.units'}, cid)
+            self.assertEqual({r[3] for r in cells.values()}, {'O-HINT'}, cid)
+
+    def test_the_diagnostics_asked_for_are_a_capped_list_only(self):
+        self.assertEqual(oracle.diag_scope(axes.normalize(Case('owr', {}))), frozenset(['listing_capped']))
 
 
 class StrictXfail(unittest.TestCase):

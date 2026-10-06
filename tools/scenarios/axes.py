@@ -104,10 +104,15 @@ AXES = OrderedDict([
     ('substate', ('running', 'done', 'int_mid', 'int_after', 'parent_gone')),    # a native sub-agent: working, finished, interrupted while it worked, interrupted after it finished, its parent's process gone while it was open
     ('guard', ('none', 'one')),                               # an approval-review thread beside the team
     ('rec', ('end', 'lost', 'late')),                         # the record of the command the child was started by: written when its process ended, never (the turn ended first), or 135 s after the child started (a long run)
-    ('topic', ('none', 'talk')),                              # the child is a participant of a debate folder (talk/r1/<letter>.md) of the repository
+    ('topic', ('none', 'talk', 'talk_rel', 'talk_aux', 'talk_redir')),    # the child is a participant of a debate folder (talk/r1/<letter>.md) of the repository: `talk` (a `claude -p` run is told its report path, a `codex exec` run has it only in `-o`), `talk_rel` (`-o` is a relative path), `talk_aux` (the instruction names r1/B.md and `-o` is another file of the round), `talk_redir` (a Codex shell starts `claude -p ... > r1/A.md` and the instruction has no path)
     ('parts', ('ab', 'a', 'b')),                              # which participants are run twice: the `claude -p` one (A) and the `codex exec` one (B), or one of them
     ('stop', ('cost', 'cut')),                                # how the first runs stop: `claude -p` closes its record with `cost-state` and no end of turn, `codex exec` writes `turn_aborted`; or the record is just cut off (the process was killed)
     ('edge', ('sure', 'guess')),                              # below Claude > codex exec: the link of the codex exec run to the Claude session is proven (its text is in the call), or only guessed (the call reads its text from a file)
+    # --- the orchestrator's own writes (`owr`; `top` and `copy` are the axes above) ---
+    ('ow', ('tool', 'patch', 'redirect', 'mkdir_only', 'failed', 'words')),      # what the orchestrator did to make the folder: the Write tool (Claude), a patch (Codex), a shell redirect with a heredoc (and the `mkdir` of the round folder), only the `mkdir` of the round folder (the guide is a person's), an attempt that failed (the files are somebody else's), words that only say it (`echo "mkdir -p ..."`; the files are somebody else's)
+    ('dshape', ('brief_r1', 'readme_r1', 'brief_only', 'declared2', 'declared1', 'notes')),    # what the folder holds: a brief.md and a round folder, a README.md and a round folder, a lone brief.md, a brief.md that declares two result files, one result file, a README.md of notes and nothing else
+    ('dsite', ('repo', 'plain', 'scratch', 'state', 'top', 'docs')),             # where the folder is: below a repository's docs, in a plain folder outside any repository, in a scratch folder, under the agent's own state folder (~/.claude), at the top of the repository, at its docs folder
+    ('kid', ('none', 'died', 'unlinked', 'seated')),          # a `claude -p` run beside the folder: none; started with `&` (it left no record); a record nobody started (no link to the page); started by the orchestrator, told its report path and written it (a participant of the page)
 ])
 
 BUNDLES = OrderedDict([
@@ -118,6 +123,7 @@ BUNDLES = OrderedDict([
     ('room', ('guide', 'shape', 'talk', 'trees', 'people', 'word', 'lang', 'seatmark', 'fname', 'proof', 'phase', 'site', 'ref', 'rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy')),
     ('cxo', ('top', 'chain', 'subj', 'host', 'env', 'how', 'look', 'lure', 'substate', 'guard', 'rec', 'topic', 'edge', 'os')),
     ('rer', ('parts', 'stop')),
+    ('owr', ('top', 'ow', 'dshape', 'dsite', 'kid', 'copy')),
 ])
 
 # Axes that were added after the first case ids were fixed. A case id names them only when they differ from the baseline, so the ids of every earlier case
@@ -138,9 +144,11 @@ BASE = {
     'skind': 'cli', 'life': 'running', 'flaw': 'none', 'at': 'live', 'os': 'linux', 'entry': 'cli', 'tail': 'mid', 'process': 'there',
     'top': 'cx_tui', 'chain': 'one', 'subj': 'cl', 'host': 'main', 'env': 'codex', 'how': 'fg', 'look': 'live', 'lure': 'none', 'substate': 'running', 'guard': 'none', 'rec': 'end',
     'topic': 'none', 'edge': 'sure', 'parts': 'ab', 'stop': 'cost',
+    'ow': 'tool', 'dshape': 'brief_r1', 'dsite': 'plain', 'kid': 'none',
 }
 # a bundle may sit on a different baseline than the global one (the debate bundle's agent is not yet running unless asked)
 BUNDLE_BASE = {
+    'owr': {'top': 'claude'},
     'deb': {'life': 'running'},
     'cpl': {'life': 'running', 'rpath': 'abs', 'fstate': 'none'},
 }
@@ -218,6 +226,7 @@ CPL_LIFE = ('running', 'normal_end', 'limit_exit', 'time_limit_kill', 'taskstop_
 # ---------------------------------------------------------------------------------------------------------------------
 CXO_RELAYS = ('relay', 'relay_py', 'relay_script', 'relay_pyfile', 'relay_xargs', 'relay_ssh', 'relay_kube', 'relay_curl')     # sessions that only pass the instruction on
 CXO_TWINS = ('twin_orch', 'twin_out')
+CXO_TALKS = ('talk', 'talk_rel', 'talk_aux', 'talk_redir')               # the child is a participant of a debate folder
 CXO_OWN_LAUNCHES = ('launch_tmux', 'launch_xargs', 'launch_pyfile')      # a Claude session that starts the child itself, through a wrapper that is a launch
 CXO_PINS = ('pin_unknown', 'pin_stale_claude', 'stale_turn')            # the names in the environment of the child cannot be checked: the thread is unknown, was a Claude session that is no launcher now, or was a turn ago
 CXO_SUBSTATES_END = ('parent_gone',)
@@ -393,7 +402,7 @@ def normalize(case):
     """The case with impossible combinations folded (to a fixed point: a fold may enable another). The folded case has the same id as an existing one."""
     v = dict(case.v)
     b = case.bundle
-    fold = {'aff': _aff, 'deb': _deb, 'sta': _sta, 'cpl': _cpl, 'room': _room, 'cxo': _cxo, 'rer': _rer}[b]
+    fold = {'aff': _aff, 'deb': _deb, 'sta': _sta, 'cpl': _cpl, 'room': _room, 'cxo': _cxo, 'rer': _rer, 'owr': _owr}[b]
     for _ in range(6):
         before = dict(v)
         fold(v)
@@ -871,12 +880,71 @@ def _cxo(v):
         v['rec'] = 'end'                         # a record that comes late matters where nothing else linked the child before it: no environment, a foreground call, a run that is over
     if v['topic'] != 'none' and (chain != 'one' or v['subj'] not in ('cl', 'cx') or v['host'] != 'main' or v['lure'] != 'none' or v['how'] == 'bg'):
         v['topic'] = 'none'
+    if v['topic'] in ('talk_rel', 'talk_aux') and v['subj'] != 'cx':
+        v['topic'] = 'talk'                      # `-o` is a `codex exec` option
+    if v['topic'] == 'talk_redir' and v['subj'] != 'cl':
+        v['topic'] = 'talk'                      # the redirect is of a `claude -p` run's output
     if v['top'] == 'claude':
         v['guard'] = 'none'
     if v['os'] != 'linux':
         # macOS: `ps` does not say which file a process holds open, so a Codex process cannot be told from another program. It matters where both providers' names are in
-        # the environment of a grandchild and the chain is read from the process table
-        v['os'] = 'mac' if (chain == 'cl>cx>cl' and v['env'] == 'both' and v['look'] == 'live' and v['edge'] == 'sure') else 'linux'
+        # the environment of a grandchild and the chain is read from the process table, and where a running participant's report is known from the arguments of its process
+        both = chain == 'cl>cx>cl' and v['env'] == 'both' and v['look'] == 'live' and v['edge'] == 'sure'
+        talk = chain == 'one' and v['topic'] in CXO_TALKS and v['look'] == 'live' and v['how'] == 'fg' and v['env'] == 'codex' and v['lure'] == 'none'      # a running participant: its argv would say its report
+        v['os'] = 'mac' if (both or talk) else 'linux'
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The orchestrator's own writes: which folder the page lists
+# ---------------------------------------------------------------------------------------------------------------------
+OWR_ROUNDED = ('brief_r1', 'readme_r1')                  # shapes that have a round folder (r1/) on disk
+OWR_FLAT = ('brief_only', 'declared2', 'declared1')      # shapes that are a lone brief.md
+OWR_DEBATE = ('brief_r1', 'readme_r1', 'declared2')      # shapes that are a debate folder: a guide and a round folder, or a brief.md that declares two result files
+OWR_GUIDE = {'brief_r1': 'brief.md', 'readme_r1': 'README.md', 'brief_only': 'brief.md', 'declared2': 'brief.md', 'declared1': 'brief.md', 'notes': 'README.md'}
+OWR_REPO_SITES = ('repo', 'top', 'docs')                 # sites inside the repository the page works in
+OWR_SITE_REL = {'repo': 'work/repo/docs/talk', 'plain': 'work/plain/talk', 'scratch': 'scratch/talk', 'state': '.claude/plans/talk', 'top': 'work/repo', 'docs': 'work/repo/docs'}   # the folder, below the case's HOME
+OWR_WRITERS = ('tool', 'patch', 'redirect', 'mkdir_only')    # what the orchestrator does that can name the folder
+
+
+def owr_rounds_on_disk(v):
+    """Whether the folder has a round folder when the board looks: the shape's own, or the one the orchestrator makes with `mkdir` of the round folder of a debate shape."""
+    return v['dshape'] in OWR_ROUNDED or (v['ow'] == 'mkdir_only' and v['dshape'] in OWR_DEBATE)
+
+
+def owr_is_debate(v):
+    """The folder is a debate folder on disk: a guide and a round folder, or a brief.md that declares two result files."""
+    return owr_rounds_on_disk(v) or v['dshape'] == 'declared2'
+
+
+def owr_named_by_write(v):
+    """The orchestrator's successful write names the folder: a guide it wrote, or the round folder it made (the `mkdir` of any other folder names nothing)."""
+    if v['ow'] not in OWR_WRITERS:
+        return False
+    return v['dshape'] in OWR_DEBATE if v['ow'] == 'mkdir_only' else True
+
+
+def owr_walked(v):
+    """The folder is one a walk of the repository lists: a debate folder, or a lone brief.md (a title). A README.md alone confirms nothing."""
+    return v['dsite'] in OWR_REPO_SITES and (owr_rounds_on_disk(v) or v['dshape'] in OWR_FLAT)
+
+
+def owr_listed(v):
+    """Whether the page lists the folder: the walk of the repository, the child that is seated in it, or the orchestrator's own write when the folder is a debate on disk
+    and is not under the agent's state folder."""
+    return owr_walked(v) or v['kid'] == 'seated' or (owr_named_by_write(v) and owr_is_debate(v) and v['dsite'] != 'state')
+
+
+def _owr(v):
+    if v['top'] == 'claude' and v['ow'] == 'patch':
+        v['ow'] = 'tool'                         # a patch is Codex's tool, the Write tool Claude's
+    elif v['top'] != 'claude' and v['ow'] == 'tool':
+        v['ow'] = 'patch'
+    if v['copy'] != 'worktree' or v['dsite'] != 'repo':
+        v['copy'] = 'none'                       # the copy is of a folder of the repository, in a worktree where another agent works
+    if v['kid'] == 'seated' and (v['dshape'] not in OWR_ROUNDED or v['dsite'] in ('state', 'top', 'docs')):
+        v['kid'] = 'none'                        # a participant is told a report path in a round folder, below a folder that is no top or docs of the repository and no state folder
+    if v['kid'] == 'unlinked' and v['dsite'] == 'state':
+        v['kid'] = 'none'
 
 
 # ---------------------------------------------------------------------------------------------------------------------

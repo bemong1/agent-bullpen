@@ -2466,6 +2466,104 @@ class PythonFilesAreReadAsCode(CliFixture):
         o = self.owner_of_child(cmd)
         self.assertFalse(o is not None and o['certain'], o)                                            # a guess at most
 
+    # ---- a python file run by its path (`./relay.py`, `$R/relay.py`, an absolute path): its shebang says python, so it is read as code like `python3 relay.py` ----
+    def script(self, name, text, mode=0o755):
+        path = os.path.join(os.path.realpath(self.tmp.name), name)
+        with open(path, 'w') as fh:
+            fh.write(text)
+        os.chmod(path, mode)
+        link._SCRIPTS.clear()
+        link._PY_TOOLS.clear()
+        return path
+
+    RELAY_BODY = 'import subprocess, sys\nsubprocess.run(["tmux", "send-keys", "-t", "w", "claude -p " + sys.argv[1], "Enter"])\n'
+    LAUNCH_BODY = 'import subprocess, sys\nsubprocess.run(["claude", "-p", sys.argv[1]])\n'
+    MENTION_BODY = '# Hands the instruction to claude -p\nimport subprocess, sys\nsubprocess.run([sys.argv[2], sys.argv[1]])\n'
+
+    def forms(self, path):
+        """The ways to run a file by its path: absolute, relative to the folder the command runs in, and by a variable the command sets."""
+        d, n = os.path.split(path)
+        return (('absolute', '%s "x"' % path, '/w'), ('relative', './%s "x"' % n, d), ('variable', 'R=%s; $R/%s "x"' % (d, n), '/w'))
+
+    def test_a_python_file_with_a_python_shebang_is_read_as_code_whatever_the_way_it_is_run(self):
+        for shebang in ('#!/usr/bin/env python3\n', '#!/usr/bin/python3\n', '#!/usr/bin/python3.11\n', '#!/usr/bin/env -S python3 -u\n', '#!python\n'):
+            relay = self.script('relay.py', shebang + self.RELAY_BODY)
+            launch = self.script('launch.py', shebang + self.LAUNCH_BODY)
+            mention = self.script('mention.py', shebang + self.MENTION_BODY)
+            codex = self.script('codex.py', shebang + self.LAUNCH_BODY.replace('["claude", "-p", sys.argv[1]]', '["codex", "exec", sys.argv[1]]'))
+            for way, cmd, cwd in self.forms(relay):
+                with self.subTest(shebang=shebang.strip(), way=way):
+                    self.assertEqual(link.launch_kinds(cmd, cwd), self.NONE, 'relay')                                              # it only types the words into a window
+                    self.assertEqual(link.launch_kinds(cmd.replace('relay.py', 'launch.py'), cwd), (frozenset({'claude'}), frozenset()), 'launcher')
+                    self.assertEqual(link.launch_kinds(cmd.replace('relay.py', 'mention.py'), cwd), (frozenset(), frozenset({'claude'})), 'mention')
+                    self.assertEqual(link.launch_kinds(cmd.replace('relay.py', 'codex.py'), cwd), (frozenset({'codex'}), frozenset()), 'codex')
+
+    def test_a_shebang_python_relay_is_nobodys_launcher_and_a_shebang_python_launcher_is_the_certain_parent(self):
+        relay = self.script('relay.py', '#!/usr/bin/env python3\n' + self.RELAY_BODY)
+        self.assertIsNone(self.owner_of_child('%s "%s"' % (relay, TEXT)))
+        self.setUp()
+        launch = self.script('launch.py', '#!/usr/bin/env python3\n' + self.LAUNCH_BODY)
+        o = self.owner_of_child('%s "%s"' % (launch, TEXT))
+        self.assertEqual((o['sid'], o['rule'], o['certain']), (self.PARENT, 'content', True))
+        self.setUp()
+        mention = self.script('mention.py', '#!/usr/bin/env python3\n' + self.MENTION_BODY)
+        o = self.owner_of_child('%s "%s"' % (mention, TEXT))
+        self.assertFalse(o is not None and o['certain'], o)                                                                   # a guess at most
+
+    SHEBANGS = (   # (the first line, is it run by python, is it run by a shell)
+        ('#!/usr/bin/env python3', True, False), ('#!/usr/bin/python3', True, False), ('#!/usr/bin/python3.11', True, False), ('#!python', True, False),
+        ('#!/usr/bin/env -S python3 -u', True, False), ('#!/usr/bin/env -S -C /tmp python3 -u', True, False), ('#!/usr/bin/env -S FOO=1 python3', True, False),
+        ('#!/usr/bin/env -S --unset=X python3', True, False), ('#!/usr/bin/env -S -uX python3', True, False), ('#!/usr/bin/python3 -u', True, False),
+        # `python3` is the name `-u` unsets here and what runs is `true`
+        ('#!/usr/bin/env -S -u python3 true', False, False), ('#!/usr/bin/env -u python3 true', False, False), ('#!/usr/bin/env -S -C python3 true', False, False),
+        ('#!/usr/bin/env -S -a python3 true', False, False), ('#!/usr/bin/env -S -u X -u Y true python3', False, False),
+        # what is not known, or not read the same way by every system: no launch is counted
+        ('#!/usr/bin/env -S -P /x python3', False, False), ('#!/usr/bin/env -S -0 python3', False, False), ('#!/usr/bin/env -iv python3', False, False),
+        ('#!/usr/bin/env -S python3 -c "x"', False, False), ('#!/usr/bin/env -S python3 -m http.server', False, False), ('#!/usr/bin/env -S python3 "a b"', False, False),
+        ('#!/usr/bin/env python3 -u', False, False), ('#!/usr/bin/env FOO=1 python3', False, False), ('#!/usr/bin/python3 -c print(1)', False, False), ('#!/usr/bin/python3 true', False, False),
+        ('#!/usr/bin/python3 -u -O', False, False), ('#!/usr/bin/env', False, False), ('#!/usr/bin/env -S', False, False), ('#!', False, False),
+        # shells, and files with no line
+        ('#!/bin/bash', False, True), ('#!/bin/bash -e', False, True), ('#!/usr/bin/env bash', False, True), ('#!/usr/bin/env -S bash -e', False, True), ('#!/usr/bin/env -i bash', False, True),
+        ('#!/usr/bin/env -S -u bash true', False, False), ('#!/usr/bin/env node', False, False), ('import os', False, True))
+
+    def test_the_shebang_is_read_with_the_options_of_env_and_what_they_take(self):
+        for first, py, sh in self.SHEBANGS:
+            with self.subTest(first):
+                self.assertEqual((link._python_shebang(first + '\n'), link._shell_shebang(first + '\n')), (py, sh))
+
+    def test_a_file_whose_shebang_runs_something_else_is_no_launcher(self):
+        """The reviewed case: `env -S -u python3 true` runs `true`, so the python code in the file never runs and its `subprocess.run(["claude", ...])` is no launch, and no certain parent."""
+        launch = self.script('launch.py', '#!/usr/bin/env -S -u python3 true\n' + self.LAUNCH_BODY)
+        for way, cmd, cwd in self.forms(launch):
+            with self.subTest(way=way):
+                self.assertEqual(link.launch_kinds(cmd, cwd), self.NONE)
+        o = self.owner_of_child('%s "%s"' % (launch, TEXT))
+        self.assertIsNone(o)
+        for first in ('#!/usr/bin/env python3', '#!/usr/bin/env -S python3 -u', '#!/usr/bin/python3'):                               # the ordinary forms still count
+            self.setUp()
+            launch = self.script('launch.py', first + '\n' + self.LAUNCH_BODY)
+            o = self.owner_of_child('%s "%s"' % (launch, TEXT))
+            self.assertEqual((o['sid'], o['rule'], o['certain']), (self.PARENT, 'content', True), first)
+
+    def test_the_same_for_a_shell_script_whose_env_runs_something_else(self):
+        script = self.script('run.sh', '#!/usr/bin/env -S -u bash true\nclaude -p "$1"\n')
+        self.assertEqual(link.launch_kinds('%s "x"' % script, '/w'), self.NONE)
+        script = self.script('run.sh', '#!/usr/bin/env -S bash -e\nclaude -p "$1"\n')
+        self.assertEqual(link.launch_kinds('%s "x"' % script, '/w'), (frozenset({'claude'}), frozenset()))
+
+    def test_a_python_file_without_a_shebang_or_for_a_shell_is_read_as_before(self):
+        for name, body, want in (('launch_nosb.py', self.LAUNCH_BODY, self.NONE), ('relay_nosb.py', self.RELAY_BODY, self.NONE), ('mention_nosb.py', self.MENTION_BODY, self.NONE),
+                                 ('shell.py', '#!/bin/bash\nclaude -p "$1"\n', (frozenset({'claude'}), frozenset())),                 # a shell file is a shell script, whatever its name
+                                 ('node.py', '#!/usr/bin/env node\nrequire("child_process").spawn("claude", ["-p", "x"])\n', self.NONE)):
+            path = self.script(name, body)
+            for way, cmd, cwd in self.forms(path):
+                with self.subTest(name=name, way=way):
+                    self.assertEqual(link.launch_kinds(cmd, cwd), want)
+
+    def test_a_python_file_that_cannot_be_read_by_its_path_stays_unread(self):
+        self.assertEqual(link.launch_kinds('/nonexistent/dir/relay.py "x"', '/w'), self.NONE)
+        self.assertEqual(link.launch_kinds('$R/relay.py "x"', '/w'), self.NONE)                                                   # a variable the command does not set
+
     def test_a_python_file_that_cannot_be_read_is_assumed_as_before(self):
         self.assertEqual(link.launch_kinds('python3 /nonexistent/dir/relay.py "x"', '/w'), (frozenset(), link.BOTH_TOOLS))
 

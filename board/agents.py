@@ -67,20 +67,99 @@ ASSIGN_WORD_RE = re.compile(r'[A-Za-z_]\w*=')
 SHELL_MOVES_MAX = 64
 
 
-def shell_writes(cmd, cwd):
-    """The markdown files a Bash command writes with the shell itself: a redirect of standard output (`> f`, `>> f`, `&> f`, `cat > f <<EOF`) or `tee f`, as absolute normalised
-    paths in the order they come. The command is read the way board/link.py reads a launching command: text in quotes, in heredoc bodies and in comments does nothing, a `cd`
-    before the redirect moves the folder, and a variable counts only when the command itself gives it one value. What cannot be told (a path with a variable or a substitution
-    in it, a relative path with no known folder, a file with two possible names) is left out. `cwd` is the folder the call ran in."""
-    if '.md' not in cmd or ('>' not in cmd and 'tee' not in cmd):
-        return []
+SURE_BEFORE = frozenset(('cd', 'pushd', 'popd', 'mkdir', 'export', 'set'))     # a command after which `&&` leaves the next one as sure as it was: it only moves, or makes what the next one needs
+FLOW_OP_RE = re.compile(r'&&|\|\||\|&|;;|;|&|\||\n|\)')
+COMPOUND_OPEN = {'if': 'if', 'while': 'loop', 'until': 'loop', 'case': 'case', 'for': 'for', 'select': 'for'}
+COMPOUND_CLOSE = {'fi': ('if',), 'done': ('loop', 'for'), 'esac': ('case',), '}': ('group', 'func')}
+BODY_OPEN = {'then': ('if',), 'elif': ('if',), 'else': ('if',), 'do': ('loop', 'for')}
+LEAVES = {'exit': 4, 'exec': 4, 'return': 2, 'break': 1, 'continue': 1}        # after one of these the commands that follow in the list may not run: 4 it leaves the shell, 2 the function, 1 the pass of the loop
+STOPS_AT = {'loop': 1, 'for': 1, 'func': 3, 'sub': 7}                             # the frames the bits of LEAVES stop at: a `break` leaves a loop, a `return` a function, `exit` a subshell (a function that exits is not told from the shell)
+
+
+L_KEYWORDS = frozenset(('if', 'then', 'elif', 'else', 'fi', 'while', 'until', 'do', 'done', 'case', 'esac', 'for', 'select', 'in', '!', '{', '}'))
+
+
+class _Flow(object):
+    """What the shell text read so far says of the next command: whether it is run whatever the commands before it did (`sure`). The text is read as lists of commands
+    (`;` a new line a lone `&` start the list again) inside the frames a compound command makes: `{ }` and a function, `( )`, `if`, a loop, `case`. A frame that is not
+    sure to run (after `||`, after `&&` that depends on a command that decides something, the body of a function, of `if`, `while`, `case`, or of a `for` over nothing or over a
+    list that may be empty) keeps every command in it not sure to its end, however the list inside restarts. A command that leaves the shell or the pass of a loop makes the rest of
+    its frame not sure, and the frames around it. What cannot be read (a `}` with no `{`, a brace that is a word of a command, `for ((`) makes everything after it not sure."""
+
+    def __init__(self):
+        self.chain_ok = self.prev_safe = True              # chain_ok: this and-or list so far runs its next command; prev_safe: the command before it is one of SURE_BEFORE
+        self.frames = [{'kind': 'root', 'base': True, 'body': True, 'dead': 0, 'saved': True}]       # base: the list inside starts as sure as this; dead: bits of LEAVES, a command in this frame left
+        self.func_next = False                             # the next frame is the body of a function
+        self.poisoned = False
+
+    def sure(self):
+        return self.chain_ok and not self.poisoned
+
+    def op(self, op):
+        if op == '&&':
+            self.chain_ok = self.chain_ok and self.prev_safe
+        elif op == '||':
+            self.chain_ok = False
+        elif op == ')':
+            self.close_paren()
+        elif op not in ('|', '|&'):                         # `;` `;;` a new line `&`: the list starts again, as sure as the frame it is in
+            top = self.frames[-1]
+            self.chain_ok, self.prev_safe = top['base'] and not top['dead'], True
+
+    def open(self, kind, body=False, runs=True):
+        """A frame whose first list is as sure as the command that opens it (and not sure at all when `runs` is false: the commands of a `case` are in its branches); `body`: whether
+        its body is sure when it comes (after `then`, `do`). A group that follows the head of a function is the body of that function."""
+        base = self.chain_ok and runs and not self.func_next
+        if self.func_next and kind == 'group':
+            kind = 'func'
+        self.func_next = False
+        self.frames.append({'kind': kind, 'base': base, 'body': base and body, 'dead': 0, 'saved': self.chain_ok})
+        self.chain_ok = base
+
+    def close(self, kinds):
+        top = self.frames[-1]
+        if top['kind'] not in kinds:
+            self.poisoned = True
+            return
+        self.frames.pop()
+        outer = self.frames[-1]
+        outer['dead'] |= top['dead'] & ~STOPS_AT.get(top['kind'], 0)
+        self.chain_ok, self.prev_safe = top['saved'] and not outer['dead'], False
+
+    def close_paren(self):
+        if self.frames[-1]['kind'] != 'case':               # in a `case` the `)` ends a pattern
+            self.close(('sub',))
+
+    def body(self, word):
+        top = self.frames[-1]
+        if top['kind'] not in BODY_OPEN[word]:
+            self.poisoned = True
+            return
+        top['base'] = top['body'] and not top['dead']
+        self.chain_ok = self.chain_ok and top['base']
+
+    def leaves(self, bit):
+        self.frames[-1]['dead'] |= bit
+        self.chain_ok = False
+
+
+def _list_runs(code, text, toks, at):
+    """Whether the loop `for NAME in WORDS` that starts at toks[at] surely has a word to go over: a word that is no variable, no substitution (a quote around one is no help)."""
+    if at + 2 >= len(toks) or code[toks[at + 2][0]:toks[at + 2][1]] != 'in':
+        return False                                       # `for x; do` goes over the arguments
+    return any('$' not in text[a:b] and '`' not in text[a:b] for a, b in toks[at + 3:])
+
+
+def _commands_of(code, sure_only=False, text=None):
+    """The simple commands of masked shell code in order, as `(token ranges, sure)`: `sure` says that the command is run whatever the ones before it said. It is not when it comes after
+    `||`, after `&&` that follows anything but a command that only moves or makes folders (`cd x && mkdir r1` is as sure as `mkdir r1`; `test -d x && mkdir r1` is not), inside the
+    branch of an `if`, a `case` or a `while`, inside a group, a subshell or a function body that is not sure itself (`true || { true; mkdir r1; }`: the `;` starts the list again
+    inside the group only), after a command that leaves the shell (`exit 0; mkdir r1`), or inside a loop over nothing. What the line is after `;`, a new line or a lone `&` starts
+    again. A loop over a list (`for`) runs its body. With `sure_only` the others are not given. `text` is the unmasked text (the same length as `code`)."""
     from . import link as L
-    code = L.shell_code(cmd)
-    base = os.path.normpath(cwd) if cwd and os.path.isabs(cwd) else None
-    env = assigns = None
-    moves, budget = bool(CD_WORD_RE.search(cmd)), SHELL_MOVES_MAX      # a `cd` in the command moves the folder; following it is a pass over the text before the redirect, so only so many
-    out = []
-    n, i = len(code), 0
+    text = code if text is None else text
+    n, i, prev_end = len(code), 0, 0
+    flow = _Flow()
     while i < n:
         line_end = code.find('\n', i)
         line_end = n if line_end < 0 else line_end
@@ -91,6 +170,74 @@ def shell_writes(cmd, cwd):
         i = end + 1
         if not toks:
             continue
+        for op in FLOW_OP_RE.findall(code[prev_end:toks[0][0]]):
+            flow.op(op)
+        prev_end = end
+        opened, k = 0, 0                                   # what leads the command: `(` that open subshells and keywords, in any order (`( if`, `{ (`, `then {`)
+        while k < len(toks):
+            a, b = toks[k]
+            while a < b and code[a] == '(':
+                flow.open('sub')
+                opened, a = opened + 1, a + 1
+            w = code[a:b]
+            if a == b:
+                k += 1
+            elif w not in L_KEYWORDS:
+                break
+            else:
+                if w == '{':
+                    flow.open('group')
+                elif w in COMPOUND_OPEN:
+                    if w == 'for' and k + 1 < len(toks) and code[toks[k + 1][0]] == '(':
+                        flow.poisoned = True               # `for ((` cuts the command at its `;`
+                    flow.open(COMPOUND_OPEN[w], body=w == 'for' and _list_runs(code, text, toks, k), runs=w != 'case')
+                elif w in BODY_OPEN:
+                    flow.body(w)
+                elif w in COMPOUND_CLOSE:
+                    flow.close(COMPOUND_CLOSE[w])
+                k += 1
+        words = ([(a, toks[k][1])] + toks[k + 1:]) if k < len(toks) else []
+        shape = [code[a:b] for a, b in words]
+        names = [w.rsplit('/', 1)[-1] for w in shape]
+        net = code.count('(', toks[0][0], toks[-1][1]) - code.count(')', toks[0][0], toks[-1][1]) - opened
+        flow.poisoned = flow.poisoned or net < 0 or any(w in ('{', '}') and not (w == '{' and names[0] == 'function') for w in shape)        # a brace that is a word of a command
+        sure = flow.sure()
+        if sure or not sure_only:
+            yield toks, sure
+        waiting = flow.func_next
+        for _ in range(max(net, 0)):                       # a `(`, `<(`, `$((` inside a word: the `)` that ends it comes with the commands that follow
+            flow.open('sub')
+        flow.prev_safe = bool(names) and names[0] in SURE_BEFORE
+        for name in names:                                 # the command word, after `VAR=x` and `time`, `command` ...
+            if ASSIGN_WORD_RE.match(name):
+                continue
+            if name in LEAVES:
+                flow.leaves(LEAVES[name])
+            if name not in L.CMD_PREFIXES:
+                break
+        if names[:1] == ['function'] or (code[end:end + 1] == ')' and shape and shape[-1].endswith('(')):                # `function f`, `f()`, `f ()`
+            flow.func_next = True                          # a function is only defined here: its body is the next frame (`function f {` has it in this command)
+            if '{' in shape:
+                flow.open('group')
+        elif waiting and flow.func_next:
+            flow.poisoned = True                           # a function that has no body to read
+
+
+def shell_writes(cmd, cwd, sure_only=False):
+    """The markdown files a Bash command writes with the shell itself: a redirect of standard output (`> f`, `>> f`, `&> f`, `cat > f <<EOF`) or `tee f`, as absolute normalised
+    paths in the order they come. The command is read the way board/link.py reads a launching command: text in quotes, in heredoc bodies and in comments does nothing, a `cd`
+    before the redirect moves the folder, and a variable counts only when the command itself gives it one value. What cannot be told (a path with a variable or a substitution
+    in it, a relative path with no known folder, a file with two possible names) is left out. `cwd` is the folder the call ran in. With `sure_only` a write that may not have been
+    run is left out too (after `||`, after `&&` that depends on a command that decides something, inside an `if`, a `case` or a `while`: `_commands_of`), and `tee --help`."""
+    if '.md' not in cmd or ('>' not in cmd and 'tee' not in cmd):
+        return []
+    from . import link as L
+    code = L.shell_code(cmd)
+    base = os.path.normpath(cwd) if cwd and os.path.isabs(cwd) else None
+    env = assigns = None
+    moves, budget = bool(CD_WORD_RE.search(cmd)), SHELL_MOVES_MAX      # a `cd` in the command moves the folder; following it is a pass over the text before the redirect, so only so many
+    out = []
+    for toks, _sure in _commands_of(code, sure_only, cmd):
         shape = [code[a:b] for a, b in toks]
         if not any('>' in t or t.rsplit('/', 1)[-1] == 'tee' for t in shape):        # words are read only in a command that has a redirect or a tee (a heredoc body is hundreds of lines)
             continue
@@ -113,18 +260,75 @@ def shell_writes(cmd, cwd):
                 got.setdefault(r.path_raw, []).append(r.path_resolved)
         if tee:
             options = True
-            for w in words[k + 1:]:
-                if w is None:
-                    continue
-                if options and w == '--':
-                    options = False
-                elif not (options and w.startswith('-') and len(w) > 1):
-                    got.setdefault(w, []).extend(p for p, un in L.resolve_path(w, env, here, quoted=False) if not un)
+            if not (sure_only and any(w in ('--help', '--version') for w in words[k + 1:] if w)):          # `tee --help f` prints and writes nothing
+                for w in words[k + 1:]:
+                    if w is None:
+                        continue
+                    if options and w == '--':
+                        options = False
+                    elif not (options and w.startswith('-') and len(w) > 1):
+                        got.setdefault(w, []).extend(p for p, un in L.resolve_path(w, env, here, quoted=False) if not un)
         for paths in got.values():
             found = {os.path.normpath(p) for p in paths if p}
             if len(found) == 1 and None not in paths:
                 path = found.pop()
                 if path.endswith('.md') and path not in out:
+                    out.append(path)
+    return out
+
+
+def shell_mkdirs(cmd, cwd):
+    """The folders a Bash command makes with `mkdir` (`mkdir -p talk/r1`, `cd x && mkdir r1`, `D=/a; mkdir -p "$D/r1"`), as absolute normalised paths in the order they come. Read the way
+    `shell_writes` reads a command: only where `mkdir` is the command (not an argument of `echo`, text in quotes or in a heredoc body), a `cd` before it moves the folder, a variable
+    counts only when the command itself gives it one value; the mode (`-m 700`), `-p`, `-v` and `--` are not folders. What cannot be told is left out: a word with a brace list
+    (`t/{r1,r2}`), a glob, a variable or a substitution that has no value here, a relative path with no known folder, `--help` and `--version`, and a `mkdir` that may not have been run
+    (after `||`, after `&&` that depends on a command that decides something, inside an `if`, a `case` or a `while`: `_commands_of`). `cwd` is the folder the call ran in."""
+    if 'mkdir' not in cmd:
+        return []
+    from . import link as L
+    code = L.shell_code(cmd)
+    base = os.path.normpath(cwd) if cwd and os.path.isabs(cwd) else None
+    env = assigns = None
+    moves, budget = bool(CD_WORD_RE.search(cmd)), SHELL_MOVES_MAX
+    out = []
+    for toks, _sure in _commands_of(code, True, cmd):
+        if not any(code[a:b].rsplit('/', 1)[-1] == 'mkdir' for a, b in toks):
+            continue
+        words, _reds, _stdin = L._classify(cmd, code, toks)
+        k = 0
+        while k < len(words) and words[k] and (ASSIGN_WORD_RE.match(words[k]) or words[k] in L.CMD_PREFIXES):
+            k += 1
+        if not (k < len(words) and words[k] and words[k].rsplit('/', 1)[-1] == 'mkdir'):
+            continue
+        if env is None:
+            env, assigns = L.literal_env(cmd, code), L._cmd_assigns(cmd)
+        here = base
+        if moves:
+            budget -= 1
+            here = L.shell_cwd(cmd, code, toks[0][0], assigns, base) if budget >= 0 else None
+        if any(w in ('--help', '--version') for w in words[k + 1:] if w):        # it prints and makes nothing
+            continue
+        options, take_value = True, False
+        for w in words[k + 1:]:
+            if w is None:
+                take_value = False
+                continue
+            if take_value:                                                  # the mode of `-m 700`
+                take_value = False
+                continue
+            if options and w == '--':
+                options = False
+                continue
+            if options and w.startswith('-') and len(w) > 1:
+                take_value = w in ('-m', '--mode')
+                continue
+            if any(ch in w for ch in '{}*?[`'):
+                continue
+            paths = [p for p, un in L.resolve_path(w, env, here, quoted=False)]
+            found = {os.path.normpath(p) for p in paths if p}
+            if len(found) == 1 and None not in paths:
+                path = found.pop()
+                if path not in out:
                     out.append(path)
     return out
 

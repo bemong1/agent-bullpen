@@ -77,6 +77,18 @@ def codex_ready(port, root):
     return len(st['agents']) >= 5
 
 
+def read_log(f):
+    """Everything the server has written so far to `f`, the temporary file it was given as its output. Read with `pread`: `f.seek(0)` would move the position the server writes at too
+    (the file is one open file for both), and a line it writes next would land on the text that is already there."""
+    fd, pos, chunks = f.fileno(), 0, []
+    while True:
+        chunk = os.pread(fd, 1 << 16, pos)
+        if not chunk:
+            return b''.join(chunks).decode('utf-8', 'replace')
+        chunks.append(chunk)
+        pos += len(chunk)
+
+
 def snapshot(args, out, prefix, stopped=False, codex=False):
     """Build a HOME under <out>/home[_stopped|_codex], serve it, save what the pages fetch as synth_<prefix>*.json, stop the server and the fake processes."""
     info = synth_home.build(os.path.join(out, 'home_stopped' if stopped else 'home_codex' if codex else 'home'), stopped=stopped, codex_orch=codex)
@@ -88,15 +100,13 @@ def snapshot(args, out, prefix, stopped=False, codex=False):
     try:
         end, port = time.time() + 60, None
         while time.time() < end and srv.poll() is None:
-            log.seek(0)
-            text = log.read()
+            text = read_log(log)
             if '세션 %s 읽음' % info['orch'] in text:
                 port = int(text.split('http://localhost:')[1].split('/')[0])
                 break
             time.sleep(0.1)
         if port is None:
-            log.seek(0)
-            raise SystemExit('server did not come up:\n' + log.read())
+            raise SystemExit('server did not come up:\n' + read_log(log))
         if stopped:
             end = time.time() + 60
             while time.time() < end and not stopped_ready(port, info['orch']):

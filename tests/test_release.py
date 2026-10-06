@@ -21,7 +21,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compat import cache_globals, isolated_env, patched, server, start_patches, terminal_lang  # noqa: E402
+from compat import cache_globals, isolated_env, listen_port, patched, read_output, server, start_patches, terminal_lang  # noqa: E402
 from test_preserve import codex_entry  # noqa: E402
 from test_stage1 import call  # noqa: E402
 from test_stage2 import iso  # noqa: E402
@@ -96,8 +96,7 @@ class Run:
 
     @staticmethod
     def _read(f):
-        f.seek(0)
-        return f.read()
+        return read_output(f)                          # not seek(0) and read(): that moves the position the server writes at (see compat.read_output)
 
     def out(self):
         return self._read(self._out)
@@ -105,11 +104,20 @@ class Run:
     def err(self):
         return self._read(self._err)
 
-    def port(self):
-        end = time.time() + 20                         # the address line comes a moment after the words a test waits for, when the machine is busy
-        while 'http://localhost:' not in self.out() and time.time() < end and self.p.poll() is None:
+    def port(self, timeout=60):
+        """The port in the address line of the server's output, waiting for the line (it comes a moment after the words a test waits for when the machine is busy). When the server ends or
+        the time is up without one, the test fails with everything the server printed."""
+        end = time.time() + timeout
+        while True:
+            out = self.out()
+            found = listen_port(out)
+            if found is not None:
+                return found
+            code = self.p.poll()
+            if code is not None or time.time() > end:
+                raise AssertionError('no address line in the output of the server (%s):\n--- stdout:\n%s\n--- stderr:\n%s' % (
+                    'it ended with code %s' % code if code is not None else 'none in %s s' % timeout, out, self.err()))
             time.sleep(0.05)
-        return int(self.out().split('http://localhost:')[1].split('/')[0])
 
 
 @contextlib.contextmanager
@@ -140,6 +148,54 @@ def run_server(args, home, extra_env=None, wait=('프로세스 판정',), timeou
     with live_server(args, home, extra_env, wait, timeout) as run:
         pass
     return run.out_text, run.err_text, run.code
+
+
+class ChildOutput(unittest.TestCase):
+    """What a test reads of a server's output while the server runs: the file the server writes to is read without moving the position it writes at, and the address line is waited for."""
+    PRINTS = 'import sys, time\nfor i in range(1500):\n    print("line %d" % i, flush=True)\n    if i % 25 == 0:\n        time.sleep(0.001)\n'
+
+    def child(self, code, out, err):
+        return subprocess.Popen([sys.executable, '-c', code], stdout=out, stderr=err, stdin=subprocess.DEVNULL)
+
+    def test_a_reader_that_polls_hard_loses_no_line_of_the_child(self):
+        """The old way (`seek(0)`, `read()`) moved the position the child writes at, and the next line it wrote landed on the text that was there."""
+        with tempfile.TemporaryFile('w+') as out, tempfile.TemporaryFile('w+') as err:
+            p = self.child(self.PRINTS, out, err)
+            while p.poll() is None:
+                read_output(out)
+            p.wait()
+            self.assertEqual(read_output(out).splitlines(), ['line %d' % i for i in range(1500)])
+
+    def test_the_port_is_waited_for(self):
+        with tempfile.TemporaryFile('w+') as out, tempfile.TemporaryFile('w+') as err:
+            run = Run(self.child('import time\ntime.sleep(0.4)\nprint("현황판: http://localhost:8123/", flush=True)\ntime.sleep(5)', out, err), out, err)
+            try:
+                self.assertEqual(run.port(), 8123)
+            finally:
+                run.p.kill()
+                run.p.wait()
+
+    def test_a_server_that_ends_without_an_address_fails_the_test_with_its_output(self):
+        with tempfile.TemporaryFile('w+') as out, tempfile.TemporaryFile('w+') as err:
+            run = Run(self.child('import sys\nprint("starting")\nprint("boom", file=sys.stderr)\nsys.exit(3)', out, err), out, err)
+            with self.assertRaises(AssertionError) as cm:
+                run.port()
+            msg = str(cm.exception)
+            self.assertIn('ended with code 3', msg)
+            self.assertIn('starting', msg)
+            self.assertIn('boom', msg)
+
+    def test_a_server_that_prints_no_address_in_time_fails_the_test_with_its_output(self):
+        with tempfile.TemporaryFile('w+') as out, tempfile.TemporaryFile('w+') as err:
+            run = Run(self.child('import time\nprint("starting", flush=True)\ntime.sleep(30)', out, err), out, err)
+            try:
+                with self.assertRaises(AssertionError) as cm:
+                    run.port(timeout=1)
+            finally:
+                run.p.kill()
+                run.p.wait()
+            self.assertIn('none in 1 s', str(cm.exception))
+            self.assertIn('starting', str(cm.exception))
 
 
 class FakeServer:

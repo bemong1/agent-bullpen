@@ -305,6 +305,9 @@ def build_case(case, root):
     elif bundle == 'rer':
         from .scene_rer import Rer
         Rer(b).build()
+    elif bundle == 'owr':
+        from .scene_owr import Owr
+        Owr(b).build()
     else:
         from .scene_deb import build_cpl
         build_cpl(b)

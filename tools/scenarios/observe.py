@@ -139,9 +139,11 @@ def observe(b):
                 with frozen(ph.now):                       # the cache reads the real date (a record older than a day is dropped): at the case's own time
                     links.lineage.enable_cache(os.path.join(b.cache, 'links.json'))
                 stack = contextlib.ExitStack()
-                stack.enter_context(patched(HOME=b.home, CLAUDE_HOME=b.claude, PROJECTS=b.projects, CODEX_HOME=b.codex,
-                                            CODEX_SESSIONS=os.path.join(b.codex, 'sessions'), CODEX_NAMES=os.path.join(b.codex, 'session_index.jsonl'),
-                                            CODEX=index, LINKS=links))
+                where = dict(HOME=b.home, CLAUDE_HOME=b.claude, PROJECTS=b.projects, CODEX_HOME=b.codex,
+                             CODEX_SESSIONS=os.path.join(b.codex, 'sessions'), CODEX_NAMES=os.path.join(b.codex, 'session_index.jsonl'), CODEX=index, LINKS=links)
+                if case.bundle == 'owr':                      # the agent's own state folders are the case's (the board fixes them from the real HOME when it is imported)
+                    where['STATE_DIRS'] = tuple(os.path.join(b.home, d) + os.sep for d in ('.claude', '.codex'))
+                stack.enter_context(patched(**where))
                 stack.enter_context(mock.patch.dict(os.environ, {'HOME': b.home}))
                 objs = types.SimpleNamespace(links=links, index=index, sessions={}, pages={})
             os_kind = case.v.get('os', 'linux')
@@ -185,6 +187,8 @@ def read_final(b, obs, objs):
         read_cxo(b, obs, objs)
     if bundle == 'rer':
         read_rer(b, obs, objs)
+    if bundle == 'owr':
+        read_owr(b, obs, objs)
     read_diag(b, obs, objs)
 
 
@@ -508,3 +512,21 @@ def read_rer(b, obs, objs):
         obs.set(role, 'title', a['title'] if a is not None else MISSING)
         set_places(obs, role, a, placed, readers, rel)
         obs.set('listing', 'units', frozenset(listed))
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# the orchestrator's own writes
+# ---------------------------------------------------------------------------------------------------------------------
+def read_owr(b, obs, objs):
+    """The debate folders the page lists (below the case's HOME), who sits in any of them (the participant under test, or somebody else: the orchestrator would be somebody else),
+    the rooms the page shows, and the participant's own places."""
+    s, st = open_state(b, objs)
+    rel = lambda p: os.path.relpath(p, b.home) if p else None
+    G = b.ids.get('kid')
+    a, placed, readers, listed = deb_view(st, rel, G)
+    if G:
+        set_places(obs, 'kid', a, placed, readers, rel)
+    obs.set('listing', 'units', frozenset(listed))
+    obs.set('orch', 'rooms', frozenset(rel(t['dir']) for d in st['debates'] for t in d['topics'] if t.get('room')))
+    obs.set('orch', 'cells', frozenset('%s|%s|%s|%s' % (rel(t['dir']), cell['round'], row['p'], 'kid' if cell['agent'] == G else 'other')
+                                       for d in st['debates'] for t in d['topics'] for row in t['rows'] for cell in row['cells'] if cell['agent']))

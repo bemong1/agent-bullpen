@@ -22,7 +22,7 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, 'tools'))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from compat import isolated_env, patched  # noqa: E402  (first of the board imports: it pins HOME and the cache to a throwaway folder)
+from compat import isolated_env, listen_port, patched, read_output  # noqa: E402  (first of the board imports: it pins HOME and the cache to a throwaway folder)
 import synth_home  # noqa: E402
 
 SERVER = os.path.join(ROOT, 'server.py')
@@ -101,24 +101,26 @@ def reap(procs):
 class Board:
     """server.py started on a synthetic HOME. With guard=(log path, files that must not be opened) it runs under GUARD. On close it stops only this process."""
 
-    def __init__(self, home, orch, guard=None, args=()):
+    def __init__(self, home, orch, guard=None, args=(), timeout=60):
         env = isolated_env(home, AGENT_BULLPEN_LANG='ko')      # the ready line below and the start output the tests read are Korean, whatever LANG the runner has
         cmd = [sys.executable, SERVER] if not guard else [sys.executable, '-c', GUARD, ROOT, guard[0], os.pathsep.join(guard[1])]
         self.out = tempfile.TemporaryFile('w+')
         self.p = subprocess.Popen(cmd + ['--port', '0'] + list(args), stdout=self.out, stderr=subprocess.STDOUT, env=env, cwd=ROOT, stdin=subprocess.DEVNULL)
         self.orch, self.port = orch, None
-        end = time.time() + 60
+        end = time.time() + timeout
         while time.time() < end and self.p.poll() is None and self.port is None:
-            if '세션 %s 읽음' % orch in self.text():
-                self.port = int(self.text().split('http://localhost:')[1].split('/')[0])
+            text = self.text()
+            if '세션 %s 읽음' % orch in text and listen_port(text) is not None:
+                self.port = listen_port(text)
             else:
                 time.sleep(0.05)
         if self.port is None:
-            raise AssertionError('server did not come up:\n' + self.text())
+            text, code = self.text(), self.p.poll()
+            self.close()                                         # a constructor that fails leaves nobody to stop the server
+            raise AssertionError('server did not come up (%s):\n%s' % ('it ended with code %s' % code if code is not None else 'not in %s s' % timeout, text))
 
     def text(self):
-        self.out.seek(0)
-        return self.out.read()
+        return read_output(self.out)                         # not seek(0) and read(): that moves the position the server writes at (see compat.read_output)
 
     def get(self, path, session=True, raw=False):
         if session and 'session=' not in path:
@@ -139,6 +141,42 @@ class Board:
             self.p.kill()
             self.p.wait()
         self.out.close()
+
+
+class BoardStartFailure(unittest.TestCase):
+    """A Board that does not come up says what the server printed and does not leave the server running."""
+
+    def start(self, code, **kw):
+        procs, real = [], subprocess.Popen
+
+        class Recorded(real):
+            def __init__(self, *a, **k):
+                real.__init__(self, *a, **k)
+                procs.append(self)
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(subprocess, 'Popen', Recorded), mock.patch(__name__ + '.SERVER', os.path.join(d, 'srv.py')):
+            with open(os.path.join(d, 'srv.py'), 'w') as f:
+                f.write(code)
+            try:
+                with self.assertRaises(AssertionError) as cm:
+                    Board(d, 'x', **kw)
+                self.stopped = [p.poll() is not None for p in procs]      # before the cleanup below, which kills what still runs
+            finally:
+                for p in procs:
+                    if p.poll() is None:
+                        p.kill()
+                        p.wait()
+        return str(cm.exception), procs
+
+    def test_a_server_that_ends_without_coming_up(self):
+        msg, procs = self.start('import sys\nprint("starting", flush=True)\nsys.exit(3)')
+        self.assertIn('it ended with code 3', msg)
+        self.assertIn('starting', msg)
+
+    def test_a_server_that_is_too_slow_is_stopped(self):
+        msg, procs = self.start('import time\nprint("starting", flush=True)\ntime.sleep(60)', timeout=1)
+        self.assertIn('not in 1 s', msg)
+        self.assertIn('starting', msg)
+        self.assertEqual(self.stopped, [True])                    # Board stopped the server itself
 
 
 def read(path):
@@ -1172,18 +1210,14 @@ class LinkScene(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.tmp = tempfile.TemporaryDirectory()
+        cls.tmp = tempfile.TemporaryDirectory()                  # (a cleanup as soon as a resource exists: a setUpClass that fails half way is not followed by tearDownClass)
+        cls.addClassCleanup(cls.tmp.cleanup)
         cls.info = synth_home.build(os.path.join(cls.tmp.name, 'home'), busy=True, links=True)
         cls.pids, cls.procs = start_live(cls.info)
+        cls.addClassCleanup(lambda: (synth_home.stop_live(cls.info['home'], True), reap(cls.procs)))
         cls.board = Board(cls.info['home'], cls.info['orch'])
+        cls.addClassCleanup(cls.board.close)
         cls.state = cls.board.get('/api/state')[1]
-
-    @classmethod
-    def tearDownClass(cls):
-        cls.board.close()
-        synth_home.stop_live(cls.info['home'], True)
-        reap(cls.procs)
-        cls.tmp.cleanup()
 
     def test_children_are_linked_by_a_guess_and_everything_else_stays_certain(self):
         ag = self.state['agents']

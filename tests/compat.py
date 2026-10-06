@@ -5,6 +5,7 @@ in single-file code that is server alone, in the package it is server and whiche
 import atexit
 import contextlib
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -39,6 +40,25 @@ def cache_globals(home):
     """The module globals that hold paths below the cache folder, for patched(**cache_globals(home)): the status line reading and the link record of `home`."""
     folder = os.path.join(home, '.cache', 'agent-bullpen')
     return {'STATUSLINE_STATE': os.path.join(folder, 'statusline.json'), 'LINK_CACHE': os.path.join(folder, 'links.json')}
+
+
+def read_output(f):
+    """Everything a child process has written so far to `f`, the temporary file that was handed to it as its output (`stdout=f`). It is read with `pread`: a file given to Popen is one open
+    file for both processes, so `f.seek(0)` moves the position the child writes at as well, and a line it writes between the seek and the end of the read lands on the text that is already
+    there (the address line a test waits for is overwritten). `pread` leaves the position alone."""
+    fd, pos, chunks = f.fileno(), 0, []
+    while True:
+        chunk = os.pread(fd, 1 << 16, pos)
+        if not chunk:
+            return b''.join(chunks).decode('utf-8', 'replace')
+        chunks.append(chunk)
+        pos += len(chunk)
+
+
+def listen_port(text):
+    """The port of the address line `http://localhost:PORT/` in what a server printed, or None when there is no such line (yet)."""
+    m = re.search(r'http://localhost:(\d+)/', text)
+    return int(m.group(1)) if m else None
 
 
 def holders(name):

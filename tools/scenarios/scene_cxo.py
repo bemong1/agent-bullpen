@@ -200,11 +200,15 @@ class Cxo:
         return S
 
     # ---- Codex runs ----
-    def codex_run(self, role, t0, text, finished, report=None, length=CODEX_RUN):
-        """A `codex exec` run: its rollout (root thread, source "exec"); `report` = the file `-o` writes at the end."""
+    def codex_run(self, role, t0, text, finished, report=None, length=CODEX_RUN, writes=()):
+        """A `codex exec` run: its rollout (root thread, source "exec"); `report` = the file `-o` writes at the end; `writes` = files the run writes itself with a patch."""
         r = self.root(role, 'codex_exec', t0, text)
         turn = self.turn_of(r.tid)
         r.usage(t0 + 3, turn, 1000, 80)
+        for path, content in writes:
+            if finished:
+                r.file_change(t0 + length - 2, path, content, turn)
+                self.files[path] = content
         if finished:
             r.say(t0 + length - 1, 'Finished the review.', turn, final=True)
             r.complete(t0 + length, turn, 'Finished the review.', started=t0)
@@ -292,18 +296,34 @@ class Cxo:
         kind = 'cx' if v['subj'] == 'cx' else 'cl'
         text = b.ids['child_text'] = prose(cid, 'child', 200)
         report = None
-        if v['topic'] == 'talk':
+        self.o_arg = None                                      # the `-o` of a `codex exec` child: its last message goes there
+        self.aux = None                                        # a report the child writes itself, beside the file `-o` names (`talk_aux`)
+        redirect = None                                        # the file a Codex shell's `>` writes the output of a `claude -p` child to (`talk_redir`)
+        if v['topic'] != 'none':
+            topic = v['topic']
             letter = 'B' if kind == 'cx' else 'A'
             rpath = os.path.join(W, 'talk', 'r1', letter + '.md')
             self.files[os.path.join(W, 'talk', 'brief.md')] = brief_text('r1')
             report = (rpath, 'Findings of %s: all is in order.\n' % letter)
             if kind == 'cl':
+                if topic == 'talk_redir':
+                    redirect = rpath                           # the shell writes the report: the instruction has no path
+                else:
+                    text = '%s Write your report to %s.' % (text, rpath)
+            elif topic == 'talk_aux':
                 text = '%s Write your report to %s.' % (text, rpath)
+                self.o_arg = os.path.join(W, 'talk', 'r1', 'B_last.md')
+                self.aux = report                              # B.md is the child's own file; `-o` writes another one beside it
+                report = (self.o_arg, 'The last message of B.\n')
+            else:
+                self.o_arg = os.path.join('talk', 'r1', 'B.md') if topic == 'talk_rel' else rpath
             b.meta['report'] = rpath
-        extra = ' -o %s' % report[0] if (report and kind == 'cx') else ''
+        extra = ' -o %s' % self.o_arg if self.o_arg else ''
         out = None
         if v['lure'] == 'twin_out':                            # the command redirects the output of the run to a file; the file holds the run's session id once it is over
             extra, out = ' --output-format json', os.path.join(b.scratch, 'out_x.json')
+        elif redirect:
+            out = os.path.relpath(redirect, W)                 # `> talk/r1/A.md`, from the folder the call starts in
         cmd = self.launch_cmd(kind, text, v['how'], extra, out)
         if v['lure'] in CXO_RELAYS:
             self.root_text = self.top_text(cmd)
@@ -333,15 +353,15 @@ class Cxo:
             self.codex_run('child', t0c, text, finished)
         else:
             self.call(L, tc, cmd, 'launch', child_end if v['how'] == 'fg' else None, v['how'], v['rec'])
-            if out and finished:
-                self.files[out] = out_json(b.sid('child'))
-            if out and not finished:
-                self.files[out] = ''
+            if out and v['lure'] == 'twin_out':
+                self.files[out] = out_json(b.sid('child')) if finished else ''
+            if redirect:                                       # the shell creates the file at the launch and the run's output lands in it when the run ends
+                self.files[redirect] = report[1] if finished else ''
             if v['how'] != 'bg':
                 if kind == 'cl':
-                    self.claude_run('child', W, text, t0c, finished, report=report, length=length)
+                    self.claude_run('child', W, text, t0c, finished, report=None if redirect else report, length=length)
                 else:
-                    self.codex_run('child', t0c, text, finished, report=report, length=length)
+                    self.codex_run('child', t0c, text, finished, report=report, length=length, writes=[self.aux] if self.aux else ())
         self.lookalikes(text, finished)
         self.end_host(top, L, finished, 15 if not late else 140)
         self.processes_one(top, L, kind, text, cmd, t0c, late)
@@ -414,7 +434,8 @@ class Cxo:
             if kind == 'cl':
                 alive.append(proc(302, ppid, ['claude', '-p', '--model', MODEL], env=env, session=session_file(b, 302, b.ids['child'], self.W, 'sdk-cli', t0c)))
             else:
-                alive.append(proc(302, ppid, ['codex', 'exec', '-m', CX_MODEL, text], env=env, fds=[b.paths['child']]))
+                argv = ['codex', 'exec', '-m', CX_MODEL] + (['-o', self.o_arg] if self.o_arg else []) + [text]       # the arguments as the shell made them: what the call said is what the process has
+                alive.append(proc(302, ppid, argv, env=env, fds=[b.paths['child']]))
         first = base if late else alive            # the first look of a late record: the child runs in a namespace the board cannot see into
         self.finish(top.path, first, base, t0c + (60 if late else 20), t0c + 300)
 

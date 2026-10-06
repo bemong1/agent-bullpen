@@ -23,7 +23,7 @@ from .codex_parse import (
 from .codex_index import CODEX
 from .link import LINKS, SCRIPTY_RE, _cx_expand, bash_scripts, cx_parse_call
 from .agents import (
-    Agent, CodexAgent, ForkSkip, cx_record_usage, cx_reprice, cx_rows, cx_sync_base, cx_sync_guardians, model_numbers, tool_brief,
+    Agent, CodexAgent, ForkSkip, cx_record_usage, cx_reprice, cx_rows, cx_sync_base, cx_sync_guardians, model_numbers, shell_mkdirs, shell_writes, tool_brief,
 )
 from .debates import REPORT_RE, brief_table, judge as judge_debates, read_head, writer_table
 from . import units as U
@@ -40,6 +40,9 @@ WALK_EVERY = 60           # seconds between two walks of the repository folders 
 WALK_ENABLED = False      # the server turns the background walk on (server.py main); tests and tools read only what they ask for
 _WALK_SLOT = threading.Semaphore(1)
 LATER_AFTER = 10         # seconds after the first link scan is ready: the latest the work that waits for the first picture starts, whether or not a picture was built
+ORCH_HINTS_MAX = 64      # the folders the orchestrator's own writes put on the list of debates that the page keeps (the oldest are let go: `listing_capped`)
+ORCH_PENDING_MAX = 256   # the writes of the main record that wait for their result
+HINT_WORDS_RE = re.compile(r'(?<![\w])(?:r|round)\d+(?![\w])|(?:brief|README|index)\.md')        # a shell command that says none of these cannot point the list at a folder
 USER_DUP_SEC = 120       # if the same user instruction is recorded again within this time, it counts once
 
 
@@ -315,6 +318,8 @@ class CodexLinker:
                 text = c['cmd'] if c['cmd'] is not None else CODEX.cmd_text(tid, c['item_id'])
                 if not isinstance(text, str):
                     continue                                                          # no text (not a shell command, over the limit, not kept): its time is a gap for the link index
+                if tid == self.s.id and c['status'] == 'completed' and c['exit_code'] == 0:
+                    self.s._note_orch_shell(text, c['cwd'], c['end'])                  # the page's own thread: what its shell wrote or made points the list of debates at a folder
                 scripts = bash_scripts(text, c['cwd']) if (not sub or SCRIPTY_RE.search(text)) else []       # (a sub-agent's command is read for a script only when it names one)
                 cc = cx_parse_call(c['start'], c['item_id'], {'command': text}, c['cwd'], scripts=scripts)
                 if cc and cc['id'] not in self.calls:
@@ -529,12 +534,34 @@ class CodexLinker:
         if names and not any(r.op == '-o' and r.path_raw == raw for r in a.redirects):
             a.redirects.append(Redirect(fd=1, op='-o', path_raw=raw, path_resolved=None, unresolved_vars=names))
 
-    def _set_out(self, a, t, path):
+    def _set_out(self, a, t, path, src=None):
+        """A planned -o path of a turn: a seat plan (not a link). `src` 'argv': it comes from the command line of the live process, which the command record (when it comes) replaces."""
         if path and not any(o['path'] == path for o in a.out_paths):
-            a.out_paths.append({'ts': t['start'], 'path': path})
+            a.out_paths.append(dict({'ts': t['start'], 'path': path}, **({'src': src} if src else {})))
         m = REPORT_RE.search(path or '')
         if m and not a.report_tag:
             a.report_tag = a.tag = m.group(3)
+
+    @staticmethod
+    def _drop_argv(a, t):
+        """The path taken from the command line of the process is given up for what the command record says: its entry goes, and the name it gave is worked out again from what is left."""
+        if t.get('out_src') != 'argv':
+            return
+        t['out_src'] = None
+        a.out_paths[:] = [o for o in a.out_paths if not (o.get('src') == 'argv' and o['path'] == t['out'])]
+        m = REPORT_RE.search(t['out'] or '')
+        if m and a.report_tag == m.group(3):
+            a.report_tag = next((x.group(3) for x in (REPORT_RE.search(o['path']) for o in a.out_paths) if x), '')
+
+    def _revoke_argv(self, a, t, i):
+        """A plan made from the command line of a live process is given up (the processes disagree now, or another one names another file): the path, the name it gave and the seat
+        go, and the spawn card is what it was before the plan. A file the command record named is never touched here."""
+        self._drop_argv(a, t)
+        t['out'] = t['out_state'] = None
+        ev = self._in_events.get((a.id, i))
+        if ev is not None and i == 0:
+            first = (t['user'] or '').strip().splitlines()
+            ev['title'] = trunc(first[0] if first else '', 80)
 
     def _derive(self, a):
         """Once per turn: finding the call, the planned -o path, the flow events (spawn/orch_msg, handback/notify, stop), and sha1 confirmation."""
@@ -555,10 +582,14 @@ class CodexLinker:
                     t['call'], t['bash_ts'] = c['id'], c['ts']
                     out = self._resolve_out(c, L, t['user'])
                     if out:
-                        t['out'], t['out_state'] = out, 'planned'
+                        hit_before = t['out']
+                        self._drop_argv(a, t)                                      # the record of the command wins over the command line of the process
+                        t['out'] = out
+                        if t.get('out_state') != 'confirmed' or t['out'] != hit_before:                         # (a path that the report already confirmed stays confirmed: it is written once)
+                            t['out_state'] = 'planned'
                         self._set_out(a, t, out)
                     elif L and L.get('out') and '$' in L['out']:
-                        self._unresolved_out(a, L['out'])
+                        self._unresolved_out(a, L['out'])                          # (a path the record cannot work out leaves the command line's, which is the value the shell made)
                     ev = self._in_events.get((tid, i))
                     if ev is not None:                                         # the card was made before the call was found (a command is written when it ends): it learns the call, once
                         if i == 0 and t['out']:
@@ -566,6 +597,15 @@ class CodexLinker:
                         if i == 0 and ev.get('tool_use_id') is None:
                             ev['tool_use_id'] = c['id']
                 changed = True
+            if not sub and t['end'] is None and t.get('call') is None and (a.link or {}).get('rule') in ('env', 'proc'):
+                live = LINKS.lineage.live_out.get(tid)                             # a live `codex exec` thread already linked by its environment or process: its own command line says where it writes
+                if t.get('out_src') == 'argv' and (tid in LINKS.lineage.live_out_held or (live and live != t['out'])):
+                    self._revoke_argv(a, t, i)                                     # processes that have its transcript open now disagree (or say another file): the plan made from the first is given up
+                    changed = True
+                if t['out'] is None and live:
+                    t['out'], t['out_state'], t['out_src'] = live, 'planned', 'argv'
+                    self._set_out(a, t, live, 'argv')
+                    changed = True
             if t.get('mapped') and ('in', i, tid) not in self.emitted:
                 self.emitted.add(('in', i, tid))
                 if not sub:
@@ -605,7 +645,8 @@ class CodexLinker:
                 hit = next((p for p in paths if self._sha_file(p) == t['sha']), None)
                 if hit:
                     t['out'], t['out_state'] = hit, 'confirmed'
-                    a.writes.append({'ts': t['end'], 'path': hit})
+                    if not any(w['path'] == hit and w['ts'] == t['end'] for w in a.writes):
+                        a.writes.append({'ts': t['end'], 'path': hit})
                     self._set_out(a, t, hit)
                     changed = True
                 elif now - t['end'] > 60:
@@ -684,6 +725,10 @@ class Session:
         self._orch_proc = RS.Proc(None)       # the process of the orchestrator as the last state() saw it
         self.cx_turn = RS.TurnMarks()         # a Codex thread's turn: `task_started` and what it does open it, `task_complete` and `turn_aborted` close it
         self._diag = None                     # the diagnostics of the last state() (board/diag.py)
+        self.orch_hints = {}                  # folder -> the time of the orchestrator's last successful write that points at it (units.listing_hint): the debate list looks there, nothing else
+        self.orch_hints_gen = 0               # counts the changes of orch_hints (the debate judgment is made again)
+        self.orch_hints_dropped = False       # an older folder was let go for the limit
+        self._orch_pending = collections.OrderedDict()      # tool_use id -> (time, [(path, is a folder)]) of a Write, Edit, MultiEdit or Bash of the main record that has no result yet
         self.walked_units, self.walk_capped, self.walk_gen = [], False, 0
         self._walk_thread, self._walk_at = None, time.monotonic() - WALK_EVERY + 5       # the first walk comes a few seconds after the session is opened
 
@@ -1019,6 +1064,7 @@ class Session:
                 elif b.get('type') == 'tool_use':
                     name, inp = b.get('name', ''), b.get('input') or {}
                     self._orch_tool(ts, name, tool_brief(name, inp))
+                    self._orch_pend(b, name, inp, d, ts)
                     if name == 'Bash':
                         self.codex.note_bash(d, ts, b)
                     if name == 'Agent':
@@ -1064,6 +1110,7 @@ class Session:
             for b in (c if isinstance(c, list) else []):
                 if isinstance(b, dict) and b.get('type') == 'tool_result':
                     self.codex.note_result(b.get('tool_use_id'), d, ts)
+                    self._orch_done(b.get('tool_use_id'), bool(b.get('is_error')))
                     q = self.pending_q.pop(b.get('tool_use_id'), None)
                     if q is not None:                    # the user's answer to a choice question
                         r = d.get('toolUseResult') if isinstance(d.get('toolUseResult'), dict) else {}
@@ -1102,6 +1149,70 @@ class Session:
                     self._user_say(ats, as_text(a.get('prompt')))
                 elif mode == 'task-notification':
                     self._notification(ats, as_text(a.get('prompt')))
+
+    # ---------- the orchestrator's own writes: where the list of debates looks ----------
+    @staticmethod
+    def _shell_hints(text, cwd):
+        """[(path, is a folder)] a shell command writes (a markdown file by a redirect or tee) or makes (mkdir): what `units.listing_hint` may take."""
+        if not HINT_WORDS_RE.search(text):
+            return []
+        return [(p, False) for p in shell_writes(text, cwd, True)] + [(p, True) for p in shell_mkdirs(text, cwd)]
+
+    def _orch_pend(self, b, name, inp, d, ts):
+        """A Write, Edit, MultiEdit or Bash call of the main record that could point the list at a folder waits for its result (a failed one points nowhere)."""
+        tid = b.get('id')
+        if not tid:
+            return
+        if name in ('Write', 'Edit', 'MultiEdit'):
+            got = [(inp.get('file_path'), False)]
+        elif name == 'Bash' and isinstance(inp.get('command'), str):
+            got = self._shell_hints(inp['command'], d.get('cwd') if isinstance(d.get('cwd'), str) and d.get('cwd') else self.cwd)
+        else:
+            return
+        got = [(p, isdir) for p, isdir in got if isinstance(p, str) and U.listing_hint(p, isdir)]
+        if got:
+            self._orch_pending[tid] = (ts, got)
+            while len(self._orch_pending) > ORCH_PENDING_MAX:
+                self._orch_pending.popitem(last=False)
+
+    def _orch_done(self, tid, failed):
+        """The result of a call that waited: a success puts its folders on the list (`_note_orch_write`)."""
+        got = self._orch_pending.pop(tid, None) if tid else None
+        if got and not failed:
+            for p, isdir in got[1]:
+                self._note_orch_write(p, got[0], isdir)
+
+    def _orch_item(self, ts, it):
+        """A `FileChange` of the Codex orchestrator's own thread that was completed: a file it added or changed (one it deleted points nowhere; a move counts at its new path)."""
+        changes = it.get('changes') if isinstance(it, dict) and it.get('type') == 'FileChange' and it.get('status') == 'completed' else None
+        for path, info in (changes.items() if isinstance(changes, dict) else ()):
+            kind = info.get('type') if isinstance(info, dict) else None
+            if kind == 'update' and isinstance(info.get('move_path'), str) and info['move_path']:
+                path = info['move_path']
+            elif kind not in ('add', 'update'):
+                continue
+            if isinstance(path, str):
+                self._note_orch_write(path, ts)
+
+    def _note_orch_shell(self, text, cwd, ts):
+        """A shell command of the Codex orchestrator's own thread that worked (exit 0): the folders it wrote into or made."""
+        for p, isdir in self._shell_hints(text, cwd):
+            self._note_orch_write(p, ts, isdir)
+
+    def _note_orch_write(self, path, ts, is_dir=False):
+        """A successful write of the orchestrator itself: the folder it points at (units.listing_hint) is where the list of debates looks next, once the disk says it is a debate
+        of a shape the list takes (units.written_debate). At most ORCH_HINTS_MAX folders are kept: the ones written last (by the time of the write, not by the order they were read in)."""
+        folder = U.listing_hint(path, is_dir)
+        if folder is None:
+            return
+        old = self.orch_hints.get(folder)
+        self.orch_hints[folder] = max(old or 0.0, ts or 0.0)
+        changed = old is None or self.orch_hints[folder] != old
+        while len(self.orch_hints) > ORCH_HINTS_MAX:                        # the one written longest ago goes, whatever the order the records were read in (a late result, a file change before a command)
+            self.orch_hints.pop(min(self.orch_hints, key=lambda k: (self.orch_hints[k], k)))
+            self.orch_hints_dropped, changed = True, True
+        if changed:
+            self.orch_hints_gen += 1
 
     def _agent_events(self):
         """What passed between agents: messages sent to other agents (agent_msg), reading other participants' reports (xread). The conversation of claude -p child sessions (_cli_talk) is also produced here."""
@@ -1313,9 +1424,9 @@ class Session:
         the sizes of the things its instructions, reads, writes and messages to other agents (a room of participants only is made of them) are made of. A judgment is reused while this is the same and the folders on disk are too."""
         per = tuple((a.id, a.tag, a.cwd, a.spawn_ts, a.first_ts, a.last_ts, a.spawn_prompt is not None, len(a.received), len(a.orch_msgs), len(a.reads),
                      len(a.writes), sum(1 for w in a.writes if w.get('ok') is not None), len(a.shell_writes), sum(1 for w in a.shell_writes if w.get('ok') is not None),
-                     len(a.out_paths), len(a.redirects), (a.cli or {}).get('sid'), len(a.sent), sum(1 for m in a.sent if m.get('ok') is not None))
+                     tuple(o['path'] for o in a.out_paths), len(a.redirects), (a.cli or {}).get('sid'), len(a.sent), sum(1 for m in a.sent if m.get('ok') is not None))
                     for a in self.agents.values())
-        return (tuple(sorted(statuses.items())), getattr(self, 'walk_gen', 0), getattr(self, 'cwd', ''), per)
+        return (tuple(sorted(statuses.items())), getattr(self, 'walk_gen', 0), getattr(self, 'orch_hints_gen', 0), getattr(self, 'cwd', ''), per)
 
     @staticmethod
     def _disk_signature(debates):
@@ -1520,6 +1631,8 @@ class CodexSession(Session):
                 self.cx_turn.begin()
             elif pt in ('task_complete', 'turn_aborted'):
                 self.cx_turn.end(ts)
+            elif pt == 'item_completed':
+                self._orch_item(ts, p.get('item'))
         elif typ == 'response_item':
             if pt == 'message' and p.get('role') == 'user':
                 text = codex_user_text(p)
