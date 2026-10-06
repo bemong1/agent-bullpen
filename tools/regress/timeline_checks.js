@@ -299,8 +299,11 @@ async function run(lang) {
   const N = await boot(390);
   N.el('#tlBox').clientWidth = 390;
   N.el('#tlMore').value = '7d'; N.el('#tlMore').onchange(); await sleep(40);
-  const tn = N.ticks();
-  check(L('a phone: the labels of a week do not crowd each other (at most three of them over the 250 px of the axis)'), tn.length >= 1 && tn.length <= 3, tn);
+  const tn = N.tickXs();
+  // How many fall in a week depends on the time zone (the two-day ticks are at the local midnights of the even days, three or four of them in seven days): what is checked is the room each one has,
+  // at least the 44 px the page allows a label that is a date only, and that there are some
+  const gaps = tn.slice(1).map((x, i) => x[0] - tn[i][0]);
+  check(L('a phone: the labels of a week (dates only) have 44 px each at least, whatever the time zone puts in the week'), tn.length >= 2 && tn.every(x => /\d/.test(x[1]) && !/\d:\d\d/.test(x[1])) && gaps.every(g => g >= 44), [tn, gaps]);
 
   // ---------- the rows ----------
   const many = crowded(80);
