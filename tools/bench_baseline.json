@@ -1,21 +1,21 @@
 {
  "schema": 1,
- "when": "2026-10-01T20:15:13",
+ "when": "2026-10-07T08:05:36",
  "loadavg": [
   [
-   4.24,
-   8.23,
-   10.13
+   5.65,
+   5.17,
+   4.8
   ],
   [
-   4.83,
-   7.91,
-   9.95
+   5.7,
+   5.22,
+   4.83
   ],
   [
-   5.39,
-   7.66,
-   9.77
+   6.11,
+   5.34,
+   4.88
   ]
  ],
  "python": "3.10.12",
@@ -26,33 +26,46 @@
   "mains": 100,
   "subagents": 186,
   "children": 200,
-  "bash_calls": 24766,
+  "bash_calls": 24942,
   "codex_threads": 40,
   "codex_exec_calls": 40,
-  "bytes": 396782164,
+  "bytes": 391111927,
   "busy_agents": 120,
-  "scale": 1.0
+  "scale": 1.0,
+  "shell": {
+   "files": 157,
+   "heredocs": 41,
+   "redirects": 29,
+   "tees": 30,
+   "scripts": 30,
+   "writes": 28,
+   "big_inputs": 23,
+   "reads": 36,
+   "topics": 12,
+   "shell_chars": 335411
+  }
  },
  "metrics": {
-  "background_cpu": 0.0,
-  "gzip_wall": 0.0024377969093620777,
-  "http_busy_lock_wait_p95": 1.6330741345882416e-06,
-  "http_busy_p50": 0.014778189826756716,
-  "http_busy_p95": 0.017008858965709805,
-  "http_quiet_p95": 0.017399831907823682,
-  "json_wall": 0.003983122995123267,
-  "link_scan_first_cpu": 0.514795864,
-  "ready_cpu": 0.775623042,
-  "ready_wall": 0.7757246198598295,
-  "rss_mb": 54.7734375,
-  "scan_grow_p95_cpu": 0.015371445000000206,
-  "scan_grow_p95_wall": 0.015368685824796557,
-  "scan_idle_p95_cpu": 0.008425307999999965,
-  "scan_idle_p95_wall": 0.008422571001574397,
-  "scan_sessions_p50_cpu": 0.004122418999999988,
-  "state_p50_cpu": 0.007407914999999932,
-  "state_p95_wall": 0.013669863808900118
+  "background_cpu": 0.38222210199999984,
+  "gzip_wall": 0.002879400970414281,
+  "http_busy_identity_p95": 0.02392104803584516,
+  "http_busy_lock_wait_p95": 1.6728881746530533e-06,
+  "http_busy_p50": 0.014515463029965758,
+  "http_busy_p95": 0.01795891602523625,
+  "http_quiet_p95": 0.017258622916415334,
+  "json_wall": 0.004710101056843996,
+  "link_scan_first_cpu": 0.596229416,
+  "ready_cpu": 0.9662494630000001,
+  "ready_wall": 0.9664295257534832,
+  "rss_mb": 87.4375,
+  "scan_grow_p95_cpu": 0.015130872999999934,
+  "scan_grow_p95_wall": 0.015202178852632642,
+  "scan_idle_p95_cpu": 0.01217822199999996,
+  "scan_idle_p95_wall": 0.012554333079606295,
+  "scan_sessions_p50_cpu": 0.005456918000000144,
+  "state_p50_cpu": 0.006441859000000161,
+  "state_p95_wall": 0.008003889117389917
  },
- "label": "baseline",
+ "label": "0.2.1 (27e69fe)",
  "runs": 3
 }

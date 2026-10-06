@@ -150,6 +150,31 @@ class StatusFields(unittest.TestCase):
         out, _ = strip({'debates': [{'topics': [topic]}]}, {'debates': [{'topics': [changed]}]})
         self.assertNotEqual(api_snap.norm(out), api_snap.norm({'debates': [{'topics': [topic]}]}))
 
+    def test_the_fields_of_the_debate_judged_from_structure(self):
+        cell = {'round': 1, 'state': 'done', 'path': '/r/m/r1/A.md', 'agent': 'a1', 'writer': None, 'readers': [], 'lines': 3, 'mtime': 5.0, 'planned': False}
+        new_cell = dict(cell, owner='a1', editors=[], evidence='tool', hint=None, previous=False, rdir='r1')
+        final = {'path': None, 'rel': None, 'exists': False, 'mtime': None, 'lines': 0}
+        new_final = dict(final, confirmed=False, why=['none'], candidates=[], scope='topic', table_path=None)
+        placed = [{'agent': 'a2', 'why': 'tag', 'whys': ['tag'], 'sure': True, 'live': True}]
+        topic = {'dir': '/r/m', 'key': 'm', 'title': 'T', 'kind': 'rounds', 'final': final, 'rounds': [1], 'rows': [{'p': 'A', 'role': '', 'agents': ['a1'], 'cells': [cell]}], 'docs': [], 'brief': True}
+        new_topic = dict(topic, final=new_final, closable=False, placed=placed, room_sure=True, room_why='tag', rows=[{'p': 'A', 'role': '', 'agents': ['a1'], 'cells': [new_cell]}])
+        old = {'debates': [{'root': '/r/m', 'topics': [topic], 'finals': []}], 'agents': [agent_dict()]}
+        new = {'debates': [{'root': '/r/m', 'topics': [new_topic], 'finals': [], 'sure': True, 'final': new_final, 'placed': placed}],
+               'agents': [dict(agent_dict(), placed={'unit': '/r/m', 'topic': None, 'why': 'tag', 'whys': ['tag'], 'sure': True}, launch='claude:t:-:g', room_tag={'room': 'm', 'seat': None})]}
+        out, used = strip(old, new)
+        self.assertEqual(api_snap.norm(out), api_snap.norm(old))
+        self.assertEqual(set(used), {'agent placed / launch / room_tag', 'debate sure / final / placed', 'topic closable / placed / room_sure / room_why', 'final confirmed / why / candidates / scope / table_path',
+                                     'cell owner / editors / evidence / hint / previous / rdir'})
+        agent_old = {'id': 'a1', 'spawn_prompt': 'p', 'tool_counts': [], 'ticks': [], 'writes': []}
+        out, used = strip(agent_old, dict(agent_old, write_events=[], run=1, placed=None, launch=None, room_tag=None), 'api/agent')
+        self.assertEqual(api_snap.norm(out), api_snap.norm(agent_old))
+        self.assertEqual(set(used), {'/api/agent write_events / run / placed / launch / room_tag'})
+        changed = dict(new_cell, state='draft')                                                                                      # a changed old field of a cell is still a difference
+        out, _ = strip(old, dict(new, debates=[dict(new['debates'][0], topics=[dict(new_topic, rows=[{'p': 'A', 'role': '', 'agents': ['a1'], 'cells': [changed]}])])]))
+        self.assertNotEqual(api_snap.norm(out), api_snap.norm(old))
+        out, _ = strip({'x': {'round': 1}}, {'x': {'round': 1, 'owner': 'a'}})                                                       # not a cell of a row
+        self.assertIn('owner', out['x'])
+
     def test_the_same_names_in_other_places_are_differences(self):
         for old, new in (({'x': {'tokens': {}, 'status': 'a'}}, {'x': {'tokens': {}, 'status': 'a', 'reason': None}}),                      # not an element of agents[]
                          ({'agents': [{'id': 'a'}]}, {'agents': [{'id': 'a', 'parent': None}]}),                                           # an agent without tokens/status is not the state's
@@ -257,7 +282,9 @@ class Script(unittest.TestCase):
         keys = {k for _, _, ks in api_snap.API_SNAP_ALLOW for k in ks}
         self.assertEqual(keys, {'title_i18n', 'title_is_default', 'questions', 'status', 'text_i18n', 'title_params', 'model_costs', 'error_code',      # the language work (+ the limit alert's params)
                                 'reason', 'resets_at', 'node', 'by', 'parent', 'runs', 'work_units', 'rule_class', 'incomplete', 'assumed', 'tree', 'parent_kind', 'auto', 'diag',    # the status and link work
-                                'room', 'guide', 'copies'})                                                                                                               # the work rooms, the folded copies of a debate
+                                'room', 'guide', 'copies',                                                                                                                # the work rooms, the folded copies of a debate
+                                'placed', 'launch', 'room_tag', 'write_events', 'run', 'sure', 'final', 'closable', 'room_sure', 'room_why',                                # 0.3.0: the debate judged from structure
+                                'confirmed', 'why', 'candidates', 'scope', 'table_path', 'owner', 'editors', 'evidence', 'hint', 'previous', 'rdir'})
 
     def test_raw_mode_accepts_nothing_and_the_default_mode_accepts_the_table(self):
         answers = {'A': (200, {'feed': [event()]}), 'B': (200, {'feed': [event(**NEW_EVENT)]})}      # every path answers like this (api/sessions, api/plans)

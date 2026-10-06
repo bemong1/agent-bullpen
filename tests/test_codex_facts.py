@@ -450,7 +450,7 @@ class Commands(Rollouts):
     def test_a_command_with_everything(self):
         e, cmds = self.run_of(cmd_item('ls -la /tmp', 'c1', '4242', cwd='file:///work/demo', secs=2, nanos=500000000))
         self.assertEqual(cmds, ({'thread': ROOT, 'item_id': 'c1', 'process_id': '4242', 'cmd': 'ls -la /tmp', 'cwd': '/work/demo', 'start': T0 + 1 - 2.5, 'end': T0 + 1,
-                                 'status': 'completed', 'exit_code': 0, 'offset': cmds[0]['offset']},))
+                                 'status': 'completed', 'exit_code': 0, 'offset': cmds[0]['offset'], 'exec': None},))
         self.assertEqual((e['cmds_skipped'], e['cmds_big'], e['cmds_evicted']), (0, 0, 0))
 
     def test_a_failed_command(self):

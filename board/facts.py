@@ -16,7 +16,7 @@ Fields that are not obvious:
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------------------------------------------------
 # Enumerations (tuples, so a test can check membership and a table can iterate them in a fixed order)
@@ -32,7 +32,7 @@ CERTAIN_RULES = ('subagent', 'out', 'env', 'proc', 'file', 'cache', 'content')  
 
 STATUSES = ('running', 'stalled', 'interrupted', 'done', 'failed', 'killed', 'ended', 'unknown')
 REASONS = ('limit', 'api_error', 'time_limit', 'stopped', 'exited', 'crash')       # and None
-CELLS = ('waiting', 'writing', 'draft', 'paused', 'done', 'missing')
+CELLS = ('waiting', 'writing', 'draft', 'paused', 'done', 'missing', 'previous')
 ROLES = ('writer', 'reader', 'none')
 ORCH_STATES = ('working', 'idle', 'limit_wait')
 
@@ -41,19 +41,20 @@ REDIRECT_OPS = ('>', '>>', '2>', '2>&1', '-o')
 TURN_SOURCES = ('sdk', 'system', 'user', 'legacy')
 END_KINDS = ('end_turn', 'mid_turn', 'error', 'none')
 EVIDENCE_FIELDS = ('tree', 'node', 'call', 'by', 'unit', 'seat', 'submit')
-EVIDENCE_KINDS = RULES + ('write_intent', 'own_marker', 'write_ok', 'tag', 'read', 'quote', 'negation', 'redirect', 'declared')
-UNIT_KINDS = ('rounds', 'flat')
+EVIDENCE_KINDS = RULES + ('write_ok', 'read', 'redirect', 'tool', 'shell', 'planned')
+UNIT_KINDS = ('rounds',)
 
 DIAG_STATE = ('limit_group', 'not_resumed', 'silent_live', 'torn_lines', 'multi_process', 'invisible_child', 'format_drift', 'parse_errors',
               'stray_notice', 'proc_unknown', 'cache_error', 'listing_capped')
 DIAG_AFFIL = ('evidence_conflict', 'content_author_differs', 'content_only', 'ambiguous_content', 'node_unresolved', 'orphan_launch',
-              'fingerprint_incomplete')
-DIAG_DEBATE = ('path_unresolved', 'path_ambiguous', 'alias_collision', 'seat_tie_held', 'debate_in_misc', 'declaration_missing')
+              'fingerprint_incomplete', 'path_unresolved')
+DIAG_DEBATE = ('alias_collision', 'seat_tie_held', 'launch_split', 'history_lost')
 DIAG_CODES = DIAG_STATE + DIAG_AFFIL + DIAG_DEBATE
+FINAL_WHY = ('no_report', 'open_cell', 'none', 'several', 'empty_round', 'live_participant', 'estimated_room', 'history_lost')      # why a final is not confirmed (J15), in this order
 
 # The truth fields a scenario can grade, plus the two the state bundle needs for the orchestrator.
 TRUTH_FIELDS = ('tree', 'node', 'rule_class', 'by', 'status', 'reason', 'resets_at', 'unit', 'round', 'seat', 'cell', 'role',
-                'orch_state', 'unlinked')
+                'orch_state', 'unlinked', 'placed', 'hint', 'edits')
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -83,6 +84,7 @@ class Span:
     launchy: bool = False
     cwd: Optional[str] = None
     redirects: List[Redirect] = field(default_factory=list)
+    msg_id: Optional[str] = None                      # the group the call was made in: the `message.id` of a Claude Bash line, the exec call around a Codex command (else its item id); None when not known
 
 
 @dataclass
@@ -172,3 +174,88 @@ class Artifact:
     file_ok: bool = False                             # the file exists and has content
     writer_actor: Optional[str] = None                # who wrote it (a redirect is written by the launcher, not the child)
     report_author: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Collected events (the write, read and command records the collectors keep for the debate judgment; 0.3.0)
+# ---------------------------------------------------------------------------------------------------------------------
+WRITE_KINDS = ('create', 'replace', 'update', 'append', 'unknown')
+AUTHORING = ('create', 'replace', 'unknown')        # events that made a whole file: they can make their agent the owner of a cell
+WRITE_EVIDENCE = ('tool', 'shell', 'planned')        # a cell's evidence has `tag` as well (a planned cell)
+READ_VIA = ('tool', 'codex', 'shell')
+PROOFS = ('tool', 'exit', 'window', 'sha', 'content')
+CHECKED = ('window', 'sha', 'content')               # these are sure only after the judgment's storage check F (J1)
+
+
+@dataclass(frozen=True)
+class LaunchKey:
+    """The call that launched an agent. Launched together = the same gkey(). When the key is not known the agent's launch is None, and None is in no group with anything."""
+    provider: str              # of the record the call is in: 'claude' | 'codex'
+    tree: str                  # the session (Codex: thread) id of the record the call is in
+    node: Optional[str]        # the id of the sub-agent / child thread whose record it is, None for the main record of the session
+    group: str                 # what launched together means (2.3)
+    call: str                  # the id of the call (2.3)
+
+    def gkey(self):
+        return (self.provider, self.tree, self.node, self.group)
+
+
+@dataclass(frozen=True)
+class WriteEvent:
+    agent: str                 # agent id; the orchestrator of the session is 'orch'
+    path: str                  # absolute, normpath (the judgment makes it realpath)
+    ts: float                  # the time of the call (tool_use, item); a planned event: the end of the run
+    kind: str                  # WRITE_KINDS
+    evidence: str              # WRITE_EVIDENCE
+    ok: Optional[bool]         # what the collector saw of the result: True worked, False failed, None not known. Sure is J1 (a CHECKED proof also needs F)
+    call: Optional[str] = None # the id of the call that wrote (tool_use id, Codex item id, the call that launched the turn)
+    run: Optional[int] = None  # the run the event is in: the Claude RunTracker epoch, the Codex turn n
+    proof: str = 'tool'        # PROOFS: tool (W1) · exit (a deciding place of a shell command) · window (a masked place, claude -p with the text unknown) · sha (Codex -o) · content (claude -p)
+    span: Optional[Tuple[float, float]] = None   # CHECKED only: the window the check looks in (start of the command, its end); planned: (Planned.ts, end of the run)
+    shas: Tuple[str, ...] = ()                   # sha and content only: the sha1 of the bytes expected
+
+
+@dataclass(frozen=True)
+class ReadEvent:
+    agent: str
+    path: str
+    ts: float
+    via: str                   # READ_VIA
+
+
+@dataclass(frozen=True)
+class CmdWindow:
+    """The time one command ran (for the W3 hint). Not only the ones that worked: failed, unknown and open ones are kept too (they compete)."""
+    agent: str                 # agent id | 'orch'
+    call: str
+    t0: float                  # the time of the call. Codex: end - duration, inside an exec cell the time of the exec call around it
+    t1: Optional[float]        # the end: foreground = tool_result, background = the completion notice, Codex = item_completed. None = open
+    ok: Optional[bool]
+    reads: Tuple[str, ...] = ()  # the paths the command read (the same reading as ReadEvent)
+
+
+@dataclass(frozen=True)
+class Planned:
+    """One requirement: a run named the path as its output (J6, J7)."""
+    agent: str
+    path: str                  # absolute
+    op: str                    # '-o' | '>' | '>>'
+    call: Optional[str]
+    run: Optional[int]         # the run that named the path (the Codex turn n · the epoch of the claude -p child)
+    src: str                   # 'command' | 'argv'
+    ts: float = 0.0            # the time of the call that launched the run (the turn's `bash_ts` · the time of the Span). The time of the requirement and the start of the check window
+
+
+@dataclass(frozen=True)
+class Tag:
+    room: str                  # absolute realpath
+    seat: Optional[str]        # 'name' | 'rN/name' | None
+    source: str                # 'environ' | 'command'
+    run: Optional[int] = None  # the run the value was read for: always the last run (environ = the live process, command = the command launched last). The time of a SEAT requirement = AgentFacts.run_start
+
+
+@dataclass(frozen=True)
+class Hint:
+    ts: float                  # the last time an orchestrator write pointed at that folder (today's orch_hints value)
+    calls: FrozenSet[str]      # the calls that made the write or the mkdir
+    groups: FrozenSet[tuple]   # the LaunchKey.gkey() of those calls (the message.id of the orchestrator's record, ...)

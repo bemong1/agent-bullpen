@@ -8,15 +8,13 @@ the process lineage and environment of each look. What a reader may conclude fro
 
 import os
 
-from .axes import CXO_OWN_LAUNCHES, CXO_RELAYS, CXO_TWINS, cxo_alive, digest
+from . import plan
+from .axes import CHILD_START, CLAUDE_RUN, CODEX_RUN, CXO_OWN_LAUNCHES, CXO_RELAYS, CXO_TWINS, cxo_alive, digest
 from .build import MODEL, Phase, Transcript, agent_id_of, dump, proc, prose, put, session_file
 from .cx_record import MODEL as CX_MODEL, Rollout, rollout_path, tid_of
 from .scene_aff import out_json, toolu
 from .scene_deb import brief_text
 
-CHILD_START = 2.4            # the child's first record, seconds after the call that starts it
-CLAUDE_RUN = 9.0             # a `claude -p` run: first record to `cost-state`
-CODEX_RUN = 7.0              # a `codex exec` run: first record to `task_complete`
 LONG_RUN = 130.0             # a run that is long enough for its command's record to come after the board has looked once (`rec=late`)
 GUARD_AT = -30.0
 SUB_AT = 10.0                # the spawn of the first native sub-agent
@@ -152,9 +150,9 @@ class Cxo:
         return end
 
     # ---- Claude records ----
-    def claude_run(self, role, cwd, text, t0, finished, report=None, sub=None, length=CLAUDE_RUN):
+    def claude_run(self, role, cwd, text, t0, finished, report=None, sub=None, length=CLAUDE_RUN, final=None):
         """A `claude -p` run (the record of a `sdk-cli` session): its first line, a tool call, and, when finished, the end of its turn and `cost-state`. `report` = a file it
-        writes (a Write call)."""
+        writes (a Write call); `final` = its last message (what a `>` of the call that started it writes into its file)."""
         sid = self.b.sid(role)
         tr = self.b.transcript(role, cwd, 'sdk-cli', sid=sid)
         tr.prompt(t0, text, source='sdk')
@@ -169,7 +167,7 @@ class Cxo:
             tr.result(t0 + 6.5, wid, 'written')
             self.files[report[0]] = report[1]
         if finished:
-            tr.say(t0 + length - 1, 'Finished the review.', 'end_turn')
+            tr.say(t0 + length - 1, final or 'Finished the review.', 'end_turn')
             tr.cost_state(t0 + length, 9000)
         else:
             tr.tool(t0 + 7, 'Bash', {'command': 'ls', 'description': 'look'}, toolu(self.b, 'live-' + role))
@@ -201,7 +199,8 @@ class Cxo:
 
     # ---- Codex runs ----
     def codex_run(self, role, t0, text, finished, report=None, length=CODEX_RUN, writes=()):
-        """A `codex exec` run: its rollout (root thread, source "exec"); `report` = the file `-o` writes at the end; `writes` = files the run writes itself with a patch."""
+        """A `codex exec` run: its rollout (root thread, source "exec"); `report` = the file `-o` writes at the end (the last message of the run is its text); `writes` = files the
+        run writes itself with a patch."""
         r = self.root(role, 'codex_exec', t0, text)
         turn = self.turn_of(r.tid)
         r.usage(t0 + 3, turn, 1000, 80)
@@ -210,8 +209,9 @@ class Cxo:
                 r.file_change(t0 + length - 2, path, content, turn)
                 self.files[path] = content
         if finished:
-            r.say(t0 + length - 1, 'Finished the review.', turn, final=True)
-            r.complete(t0 + length, turn, 'Finished the review.', started=t0)
+            last = report[1] if report else 'Finished the review.'
+            r.say(t0 + length - 1, last, turn, final=True)
+            r.complete(t0 + length, turn, last, started=t0)
             if report:
                 self.files[report[0]] = report[1]
         return r
@@ -223,6 +223,10 @@ class Cxo:
         b.main_path = main_path
         for p, t in self.files.items():
             put(p, t)
+        if v['topic'] != 'none':                              # the time of every file of the debate folder is the plan's
+            for rel, meta in plan.cxo_talk_scene(v).F.files.items():
+                if os.path.exists(os.path.join(self.W, rel)):
+                    os.utime(os.path.join(self.W, rel), (b.T(meta['mtime']), b.T(meta['mtime'])))
         first = now_live if self.late else None                # a late record: the first look sees the files as they were then, the rest is written between the looks
         for r in self.rolls:
             r.save(first)
@@ -304,7 +308,9 @@ class Cxo:
             letter = 'B' if kind == 'cx' else 'A'
             rpath = os.path.join(W, 'talk', 'r1', letter + '.md')
             self.files[os.path.join(W, 'talk', 'brief.md')] = brief_text('r1')
-            report = (rpath, 'Findings of %s: all is in order.\n' % letter)
+            body, aux_body = plan.cxo_report(letter)
+            report = (rpath, body)
+            os.makedirs(os.path.join(W, 'talk', 'r1'), exist_ok=True)        # the debate folder is made before the participants run
             if kind == 'cl':
                 if topic == 'talk_redir':
                     redirect = rpath                           # the shell writes the report: the instruction has no path
@@ -314,7 +320,7 @@ class Cxo:
                 text = '%s Write your report to %s.' % (text, rpath)
                 self.o_arg = os.path.join(W, 'talk', 'r1', 'B_last.md')
                 self.aux = report                              # B.md is the child's own file; `-o` writes another one beside it
-                report = (self.o_arg, 'The last message of B.\n')
+                report = (self.o_arg, aux_body)
             else:
                 self.o_arg = os.path.join('talk', 'r1', 'B.md') if topic == 'talk_rel' else rpath
             b.meta['report'] = rpath
@@ -359,7 +365,7 @@ class Cxo:
                 self.files[redirect] = report[1] if finished else ''
             if v['how'] != 'bg':
                 if kind == 'cl':
-                    self.claude_run('child', W, text, t0c, finished, report=None if redirect else report, length=length)
+                    self.claude_run('child', W, text, t0c, finished, report=None if redirect else report, length=length, final=report[1] if redirect else None)
                 else:
                     self.codex_run('child', t0c, text, finished, report=report, length=length, writes=[self.aux] if self.aux else ())
         self.lookalikes(text, finished)

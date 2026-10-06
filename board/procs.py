@@ -378,20 +378,24 @@ def env_values(pid, names):
 
 
 _ENV_VALUE = re.compile(rb'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}|[0-9]{1,12}')      # the values we ask for: a session id or a pid
+# The shape of the values of the two variables a user may set for a room (board/lineage.py TAG_NAMES), as `ps -E` gives them: a path with no blank in it, a name, a round and a name. A path that holds a
+# blank cannot be told from the next variable there, so it is not read.
+_ENV_SHAPES = {b'BULLPEN_ROOM': re.compile(rb'/\S*'), b'BULLPEN_SEAT': re.compile(rb'[^\s/]+|(?:r|round)[0-9]+/[^\s/]+')}
 
 
 def _pick_env(raw, names, nul):
     """From raw (the environment blob), picks only `name=value` for each of names. nul: whether items are separated by NUL (environ) or by whitespace (ps).
     A name that stands twice with different values is unknown (left out). With ps the items are only blank-separated, so a value that holds blanks can hold
-    text that looks like ` NAME=value`: a value counts only when it is an id or a number that ends at a blank or at the end."""
+    text that looks like ` NAME=value`: a value counts only when it is the shape of its name (an id or a number; a path or a seat name for BULLPEN_ROOM and BULLPEN_SEAT) and ends at a blank or at the end."""
     out = {}
     before, value = (b'\0', rb'([^\0]*)') if nul else (rb'\s', rb'(\S*)')
     for n in names:
-        found = {m.group(1) for m in re.finditer(rb'(?:\A|' + before + rb')' + re.escape(n) + b'=' + value, raw)}
+        end = rb'(?=\s+[A-Za-z_][A-Za-z0-9_]*=|\s*\Z)' if (not nul and n in _ENV_SHAPES) else b''          # a path or a name is the item up to the next `NAME=` (one that holds a blank is another shape: not read)
+        found = {m.group(1) for m in re.finditer(rb'(?:\A|' + before + rb')' + re.escape(n) + b'=' + value + end, raw)}
         if len(found) != 1:
             continue                                                 # not there, or two different values
         v = next(iter(found))
-        if not nul and not _ENV_VALUE.fullmatch(v):
+        if not nul and not _ENV_SHAPES.get(n, _ENV_VALUE).fullmatch(v):
             continue
         out[n.decode('ascii', 'replace')] = v.decode('utf-8', 'replace')
     return out

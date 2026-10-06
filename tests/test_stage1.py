@@ -14,6 +14,9 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat import patched, server, start_patches, terminal_lang  # noqa: E402
+from judge_support import Fixture, agent, plan, win, wr  # noqa: E402
+import test_invariance as INV  # noqa: E402  (dump: a Judgement as bytes)
+from board import units as U  # noqa: E402
 
 
 class Item1SessionId(unittest.TestCase):
@@ -267,7 +270,8 @@ class Item6HostHeader(unittest.TestCase):
 
 
 class Item3ReportRe(unittest.TestCase):
-    """REPORT_RE does not start in the middle of a path ('/t2_error' in '…/t2_error/r2/A.md')."""
+    """REPORT_RE does not start in the middle of a path ('/t2_error' in '…/t2_error/r2/A.md'). The judgment of debates does not use it any more (it reads no sentence); what is left of it is the name a path gives a report
+    (the tag of an output file, the author of a report another agent read, in the feed)."""
 
     def root(self, text):
         m = server.REPORT_RE.search(text)
@@ -293,71 +297,6 @@ class Item3ReportRe(unittest.TestCase):
     def test_all_matches(self):
         t = '/a/b/r1/A.md and /c/d/r2/B.md, also ~/e/r1/C.md'
         self.assertEqual([m.group(1) for m in server.REPORT_RE.finditer(t)], ['/a/b', '/c/d', '~/e'])
-
-
-class DebateBase(unittest.TestCase):
-    """Common set-up of the debate table tests: two debates (t9, t8) in a temporary folder, and a Session built without a file."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.root = os.path.realpath(self.tmp.name)
-        self.unit = os.path.join(self.root, 't9')
-        self.unit2 = os.path.join(self.root, 't8')
-        for u in (self.unit, self.unit2):
-            os.makedirs(os.path.join(u, 'r1'))
-            for name in ('brief.md', 'r1/A.md', 'r1/B.md'):
-                with open(os.path.join(u, name), 'w') as f:
-                    f.write('# %s\nx\n' % os.path.basename(u))
-
-    def sess(self, agents):
-        s = server.Session.__new__(server.Session)
-        s.lock = threading.RLock()
-        s._file_cache, s._head_cache = {}, {}
-        s.agents = {a.id: a for a in agents}
-        return s
-
-    def agent(self, aid, tag, prompt, received=()):
-        a = server.Agent(aid, {'description': '%s worker' % tag})
-        a.spawn_prompt = prompt
-        a.spawn_ts = 100.0
-        a.received = [{'ts': 200.0 + i, 'text': t} for i, t in enumerate(received)]
-        return a
-
-    def cells(self, s, status, row):
-        d, _ = s.debates({aid: status for aid in s.agents})
-        top = next(t for dd in d for t in dd['topics'] if t['dir'] == self.unit)
-        r = next(x for x in top['rows'] if x['p'] == row)
-        return top['rounds'], [(c['round'], c['state'], c['agent']) for c in r['cells']]
-
-
-class Item20RelativeReports(DebateBase):
-    """A relative report path (`r2/A.md`) in a Claude agent's instruction is resolved against that folder only when the agent already belongs to exactly one debate folder."""
-
-    def test_resolved_when_one_unit(self):
-        a = self.agent('aA', 'T9-A', '결과를 `%s/r1/A.md`에 쓴다' % self.unit, ['R2 시작: `r1/B.md`를 읽고 `r2/A.md`를 쓴다'])
-        s = self.sess([a])
-        rounds, cells = self.cells(s, 'running', 'A')
-        self.assertEqual(rounds, [1, 2])
-        self.assertEqual(cells, [(1, 'done', 'aA'), (2, 'writing', 'aA')])        # the round being written now is 2
-
-    def test_not_resolved_without_absolute_ref(self):
-        a = self.agent('aA', 'T9-A', 'r1/A.md를 쓴다', ['R2: r2/A.md를 쓴다'])          # there is no folder it already belongs to
-        self.assertEqual(self.sess([a]).debates({'aA': 'running'})[0], [])
-
-    def test_not_resolved_with_two_units(self):
-        a = self.agent('aA', 'T9-A', '`%s/r1/A.md`에 쓴다. `%s/r1/A.md`에 쓴다.' % (self.unit, self.unit2), ['R2: r2/A.md를 쓴다'])
-        s = self.sess([a])
-        rounds, cells = self.cells(s, 'running', 'A')
-        self.assertEqual(rounds, [1])
-        self.assertEqual(cells, [(1, 'draft', 'aA')])                             # no round 2 cell appears
-
-    def test_other_tag_not_own(self):
-        a = self.agent('aB', 'T9-B', '`%s/r1/B.md`에 쓴다' % self.unit, ['R2: r2/A.md를 읽는다'])   # someone else's report (A) is not this agent's cell
-        s = self.sess([a])
-        rounds, cells = self.cells(s, 'running', 'B')
-        self.assertEqual(cells, [(1, 'draft', 'aB')])
-        self.assertEqual(rounds, [1])
 
 
 class Item8Registry(unittest.TestCase):
@@ -702,57 +641,81 @@ class Item11TurnSeq(unittest.TestCase):
             self.assertEqual(set(det['turns'][0]), {'start', 'end', 'status', 'error', 'bash_ts', 'out', 'out_state'})
 
 
-class Item12Determinism(DebateBase):
-    """The cell's assignee is the last in (launch time, id) order, the writer is the agent with the earliest write time. The order in which agents were found does not matter."""
+class Item12Determinism(Fixture):
+    """The judgment is a pure function of the facts and the disk (J19): the order in which the agents are given changes nothing, byte for byte, and what is held is held the same way every time. The owner of a
+    cell is the first sure write that made the whole file (two within TIE_SEC hold it: no id breaks a tie); the one asked to save a file that nobody wrote is the one that was not over when the others started."""
 
-    def make(self, order, spawn=(100.0, 200.0), writes=None):
-        a1 = self.agent('aA1', 'T9-A', '`%s/r1/A.md`에 쓴다' % self.unit)
-        a2 = self.agent('aA2', 'T9-A', '`%s/r1/A.md`에 쓴다' % self.unit)
-        a1.spawn_ts, a2.spawn_ts = spawn
-        for a, ts in zip((a1, a2), writes or ()):
-            a.writes = [{'ts': ts, 'path': os.path.join(self.unit, 'r1', 'A.md')}]
-        by = {'aA1': a1, 'aA2': a2}
-        return self.sess([by[i] for i in order])
+    def make(self, agents, walked=True, **kw):
+        """The Judgement of the agents given in every order; the same bytes whatever the order (the folder is a debate when a walk found it: no write needs to name it)."""
+        base = None
+        for order in (range(len(agents)), reversed(range(len(agents)))):
+            jd = self.assign(*[agents[i] for i in order], walked=(self.p('t9'),) if walked else (), **kw)
+            got = INV.dump(jd, self.root)
+            self.assertEqual(got, base or got, 'the order of the agents changed the Judgement')
+            base = got
+        return jd
 
-    def cell(self, s, status='done'):
-        d, _ = s.debates({aid: status for aid in s.agents})
-        top = next(t for dd in d for t in dd['topics'] if t['dir'] == self.unit)
-        return next(x for x in top['rows'] if x['p'] == 'A')['cells'][0]
+    def cell(self, jd):
+        return jd.cells[(self.p('t9'), 'r1', 'A')]
 
     def test_assignee_is_latest_spawn(self):
-        for order in (('aA1', 'aA2'), ('aA2', 'aA1')):
-            c = self.cell(self.make(order))
-            self.assertEqual(c['agent'], 'aA2', order)
-            self.assertEqual(c['state'], 'done')
+        f = self.file('t9/r1/A.md')
+        # two agents were asked to save the file and neither did: the one that was over when the other started drops out, the later one is the cell's agent (J7)
+        c = self.cell(self.make([agent('aA1', planned=[plan(f, ts=100)], start=100, last=150), agent('aA2', planned=[plan(f, ts=200)], start=200, last=300)]))
+        self.assertEqual((c.owner, c.agent, c.evidence, c.state), (None, 'aA2', 'planned', 'missing'))      # it is over and the file was not saved by it: not done
+        # both wrote: the first writer holds the cell, the later launch takes it over only when it was asked to save this file and the first was over (J4)
+        a1 = agent('aA1', writes=[wr(f, 120)], planned=[plan(f, ts=100)], start=100, last=150)
+        a2 = agent('aA2', writes=[wr(f, 250)], planned=[plan(f, ts=200)], start=200, last=300)
+        c = self.cell(self.make([a1, a2]))
+        self.assertEqual((c.owner, c.agent, c.editors, c.state), ('aA2', 'aA2', ['aA1'], 'done'))
+        # the first one is not over: it keeps the cell, and the later one is an editor
+        c = self.cell(self.make([agent('aA1', writes=[wr(f, 120)], planned=[plan(f, ts=100)], status='running', start=100, last=300), a2]))
+        self.assertEqual((c.owner, c.editors), ('aA1', ['aA2']))
 
     def test_assignee_status_follows(self):
-        s = self.make(('aA2', 'aA1'))
-        d, _ = s.debates({'aA1': 'running', 'aA2': 'ended'})           # aA2, launched later, is the assignee, so the cell is not a draft even while aA1 runs
-        top = next(t for dd in d for t in dd['topics'] if t['dir'] == self.unit)
-        self.assertEqual(next(x for x in top['rows'] if x['p'] == 'A')['cells'][0]['state'], 'done')
+        f = self.file('t9/r1/A.md')
+        for owner_status, state in (('done', 'done'), ('running', 'draft')):
+            with self.subTest(owner_status):
+                # aA2 wrote first, so it holds the cell; aA1 runs and edits. The state of the cell follows the one that holds it, not the one that is working
+                c = self.cell(self.make([agent('aA1', writes=[wr(f, 300, kind='update')], status='running'), agent('aA2', writes=[wr(f, 250)], status=owner_status)]))
+                self.assertEqual((c.owner, c.editors, c.state), ('aA2', ['aA1'], state))
 
     def test_assignee_tie_uses_id(self):
-        for order in (('aA1', 'aA2'), ('aA2', 'aA1')):
-            self.assertEqual(self.cell(self.make(order, spawn=(150.0, 150.0)))['agent'], 'aA2')
+        f = self.file('t9/r1/A.md')
+        # asked by two that are both working (neither was over when the other started): nobody is picked by id, the cell has no agent and both are named (seat_tie_held)
+        jd = self.make([agent('aA1', planned=[plan(f, ts=100)], status='running', start=150, last=300), agent('aA2', planned=[plan(f, ts=100)], status='running', start=150, last=300)])
+        c = self.cell(jd)
+        self.assertEqual((c.owner, c.agent, c.state), (None, None, 'previous'))
+        self.assertEqual([(d['code'], d['agent']) for d in jd.diag], [('seat_tie_held', 'aA1'), ('seat_tie_held', 'aA2')])
 
     def test_writer_is_earliest(self):
-        for order in (('aA1', 'aA2'), ('aA2', 'aA1')):
-            self.assertEqual(self.cell(self.make(order, writes=(300.0, 250.0)))['writer'], 'aA2', order)
-            self.assertEqual(self.cell(self.make(order, writes=(250.0, 300.0)))['writer'], 'aA1', order)
+        f = self.file('t9/r1/A.md')
+        for t1, t2, first, second in ((300.0, 250.0, 'aA2', 'aA1'), (250.0, 300.0, 'aA1', 'aA2')):
+            jd = self.make([agent('aA1', writes=[wr(f, t1)]), agent('aA2', writes=[wr(f, t2)])])
+            c = self.cell(jd)
+            self.assertEqual((c.owner, c.editors, jd.diag), (first, [second], []), (t1, t2))
 
     def test_writer_tie_uses_id(self):
-        for order in (('aA1', 'aA2'), ('aA2', 'aA1')):
-            self.assertEqual(self.cell(self.make(order, writes=(300.0, 300.0)))['writer'], 'aA1', order)
+        f = self.file('t9/r1/A.md')
+        for gap in (0.0, 0.5, U.TIE_SEC):                           # two writes that close cannot be told apart by the records: the cell is held, whoever has the lower id
+            jd = self.make([agent('aA1', writes=[wr(f, 300.0)]), agent('aA2', writes=[wr(f, 300.0 + gap)])])
+            c = self.cell(jd)
+            self.assertEqual((c.owner, c.agent, c.state), (None, None, 'previous'), gap)
+            self.assertEqual([(d['code'], d['agent'], d['detail']) for d in jd.diag], [('seat_tie_held', 'aA1', '1/A'), ('seat_tie_held', 'aA2', '1/A')], gap)
+        c = self.cell(self.make([agent('aA1', writes=[wr(f, 300.0)]), agent('aA2', writes=[wr(f, 300.0 + U.TIE_SEC + 0.5)])]))
+        self.assertEqual((c.owner, c.editors), ('aA1', ['aA2']))      # past TIE_SEC the earlier one holds it
 
     def test_no_writer(self):
-        self.assertIsNone(self.cell(self.make(('aA1', 'aA2')))['writer'])
+        self.file('t9/r1/A.md')
+        c = self.cell(self.make([agent('aA1'), agent('aA2')]))
+        self.assertEqual((c.owner, c.agent, c.evidence, c.editors, c.state), (None, None, None, [], 'previous'))      # a file nobody of this session wrote is from before
 
     def test_xread_author_earliest_writer(self):
-        path = os.path.join(self.unit, 'r1', 'A.md')
+        path = os.path.join(self.p('t9'), 'r1', 'A.md')
         for order in (('aA1', 'aA2', 'aB'), ('aB', 'aA2', 'aA1')):
-            a1 = self.agent('aA1', 'T9-A', 'x')
-            a2 = self.agent('aA2', 'T9-A', 'x')
-            b = self.agent('aB', 'T9-B', 'x')
+            a1 = self.session_agent('aA1')
+            a2 = self.session_agent('aA2')
+            b = self.session_agent('aB')
             a1.writes = [{'ts': 300.0, 'path': path}]
             a2.writes = [{'ts': 250.0, 'path': path}]
             b.read_log = [(400.0, path)]
@@ -763,9 +726,43 @@ class Item12Determinism(DebateBase):
             xr = [e for e in s.feed if e['kind'] == 'xread']
             self.assertEqual([e['author'] for e in xr], ['aA2'], order)
 
+    def sess(self, agents):
+        s = server.Session.__new__(server.Session)
+        s.lock = threading.RLock()
+        s._file_cache, s._head_cache = {}, {}
+        s.agents = {a.id: a for a in agents}
+        return s
+
+    @staticmethod
+    def session_agent(aid):
+        a = server.Agent(aid, {'description': 'T9 worker'})
+        a.spawn_ts = 100.0
+        return a
+
     def test_writer_table(self):
-        s = self.make(('aA2', 'aA1'), writes=(300.0, 250.0))
-        self.assertEqual(server.writer_table(s), {os.path.join(self.unit, 'r1', 'A.md'): 'aA2'})
+        f = self.file('t9/r1/A.md')
+        jd = self.make([agent('aA1', writes=[wr(f, 250.0)]), agent('aA2', writes=[wr(f, 300.0)])])
+        self.assertEqual({c.path: c.owner for c in jd.cells.values()}, {f: 'aA1'})        # the table of who wrote first is the owner of the cells (the writer of a cell in the old tables)
+        jd = self.make([agent('aA1', writes=[wr(f, 300.0)]), agent('aA2', writes=[wr(f, 250.0)])])
+        self.assertEqual({c.path: c.owner for c in jd.cells.values()}, {f: 'aA2'})
+
+    def test_the_same_facts_and_disk_give_the_same_bytes(self):
+        f = self.file('t9/r1/A.md')
+        self.file('t9/r1/B.md')
+        self.file('t9/final.md', 'x\n')
+        agents = [agent('aA1', writes=[wr(f, 250.0)], planned=[plan(f, ts=100)], windows=[win(240.0, 260.0)]), agent('aA2', writes=[wr(f, 300.0, kind='update')], status='running')]
+        sf = self.sf(*agents, walked=(self.p('t9'),))
+        base = INV.dump(U.assign(sf, U.Catalog()), self.root)
+        self.assertEqual(INV.dump(U.assign(sf, U.Catalog()), self.root), base)           # again, on a Catalog of its own
+        cat = U.Catalog()
+        self.assertEqual([INV.dump(U.assign(sf, cat), self.root) for _ in range(3)], [base] * 3)      # again and again on one Catalog (every generation looks at the disk anew)
+
+    def test_the_judgment_reads_no_clock(self):
+        f = self.file('t9/r1/A.md')
+        agents = [agent('aA1', writes=[wr(f, 250.0)], windows=[win(240.0, None, ok=None)], status='running')]       # a window that is still open runs to the end of time, not to now
+        base = INV.dump(self.assign(*agents, walked=(self.p('t9'),)), self.root)
+        with mock.patch.object(U, 'time', types.SimpleNamespace()):                          # any use of the clock in the judgment is an AttributeError
+            self.assertEqual(INV.dump(self.assign(*agents, walked=(self.p('t9'),)), self.root), base)
 
 
 class Item13UserSay(unittest.TestCase):

@@ -49,13 +49,6 @@ def link_brief(a):
     return {'rule': rule, 'certain': certain(rule)}
 
 
-# only a `codex exec` in command position (not text inside a string or heredoc, pgrep, or --help)
-# `do` and `then` are reserved words only in command position (after a separator or at the start of a line): the `then` in `echo then codex exec …` is an argument, so it is not a command boundary
-LAUNCH_RE = re.compile(r'(?:^|[;&|(`]|\$\()\s*(?:(?:do|then)\s+)*(?:(?:timeout\s+\S+|nohup|setsid|time|exec|'
-                       r'env(?:\s+[A-Za-z_]\w*=\S*)*)\s+)*codex\s+exec\b(?!\s+--help)', re.M)
-# Claude Code started from Bash (`claude -p …`): a claude in command position followed by -p/--print. A session like that is a child agent of the session that started it
-CLAUDE_LAUNCH_RE = re.compile(r'(?:^|[;&|(`]|\$\()\s*(?:(?:do|then)\s+)*(?:(?:timeout\s+\S+|nohup|setsid|time|exec|'
-                              r'env(?:\s+(?:-i|--ignore-environment|-u\s*\S+|[A-Za-z_]\w*=\S*))*)\s+)*claude\b(?=[^;&|\n]*?\s(?:-p|--print)\b)', re.M)
 CLI_WINDOW = 60            # only the missed-candidate list (`unlinked`) still looks this far back from a child's start; linking no longer has a window (it goes by the calls still running)
 CX_VAR_RE = re.compile(r'\$\([^)]*\)|\$\{[^}]*\}|\$[A-Za-z_][A-Za-z0-9_]*|\$\d')
 CX_OPT_ARG = {'-C', '--cd', '--add-dir', '-s', '--sandbox', '-m', '--model', '-c', '--config', '-o',
@@ -115,6 +108,8 @@ CX_PREFIX_CMDS = {
     'nohup': {}, 'exec': {}, 'time': {'flags': {'-p'}},
     'setsid': {'flags': {'-c', '-f', '-w', '--ctty', '--fork', '--wait'}},
     'sudo': {'flags': {'-E', '-H', '-n'}, 'args': {'-u': CX_NAME}, 'assign': True},
+    'ionice': {'flags': {'-t', '--ignore'}, 'args': {'-c': r'[0-3]|none|realtime|best-effort|idle', '-n': r'[0-7]', '--class': r'[0-3]|none|realtime|best-effort|idle', '--classdata': r'[0-7]'}},
+    'stdbuf': {'attached': True, 'args': {'-i': r'L|\d+[A-Za-z]*', '-o': r'L|\d+[A-Za-z]*', '-e': r'L|\d+[A-Za-z]*', '--input': r'L|\d+[A-Za-z]*', '--output': r'L|\d+[A-Za-z]*', '--error': r'L|\d+[A-Za-z]*'}},
 }
 CX_SHELL_SHORT_RE = re.compile(r'-[leuxic]+')                       # -l -e -u -x -i and their bundles (+ c: -lc, -ec)
 # long options are accepted only by bash (dash and sh exit 2 with `Illegal option --`; zsh and ksh are not opened because we could not confirm that they accept them)
@@ -128,10 +123,13 @@ CX_SHELL_OPTIONS = {'bash': {'pipefail', 'errexit', 'nounset', 'xtrace', 'verbos
                     'dash': {'errexit', 'nounset', 'xtrace', 'verbose', 'noclobber'}}
 
 
-def _skip_prefix(name, w, k):
-    """Position after skipping the prefix `name` (w[k]) and its options. None if any option is outside the closed list."""
+def _skip_prefix(name, w, k, ops=None):
+    """Position after skipping the prefix `name` (w[k]) and its options. None if any option is outside the closed list. `ops`: a list that gets what the prefix does to the environment of the
+    command it runs, in order: ('set', NAME, value or None when it is no literal), ('unset', NAME), ('clear',) (`env -i`, and `sudo` that gives the command a clean one)."""
     spec = CX_PREFIX_CMDS[name]
     flags, args = spec.get('flags', ()), spec.get('args', {})
+    if ops is not None and name == 'sudo':
+        ops.append(('clear',))                                      # the environment of a command sudo runs is the one sudo makes (a variable of the caller does not reach it)
     k += 1
     while k < len(w) and w[k].startswith('-') and w[k] != '-':
         t = w[k]
@@ -141,23 +139,109 @@ def _skip_prefix(name, w, k):
         opt, _, val = t.partition('=')
         if t in flags:
             k += 1
+            if ops is not None and name == 'env' and t in ('-i', '--ignore-environment'):
+                ops.append(('clear',))
         elif t in args:
-            if k + 1 >= len(w) or not re.fullmatch(args[t], w[k + 1]):
+            if k + 1 >= len(w) or w[k + 1] is None or not re.fullmatch(args[t], w[k + 1]):
                 return None
+            if ops is not None and name == 'env' and t in ('-u', '--unset'):
+                ops.append(('unset', w[k + 1]))
             k += 2
         elif val and opt.startswith('--') and opt in args and re.fullmatch(args[opt], val):
             k += 1                                                   # only `--long=value`. The `=` of a short option such as `-u=FOO` is part of the value, so it does not run
+            if ops is not None and name == 'env' and opt == '--unset':
+                ops.append(('unset', val))
+        elif spec.get('attached') and len(t) > 2 and not t.startswith('--') and t[:2] in args and re.fullmatch(args[t[:2]], t[2:]):
+            k += 1                                                   # the value written against its option (`stdbuf -oL`): only for the prefix that is written so
         elif spec.get('numflag') and re.fullmatch(r'-\d+', t):
             k += 1
         else:
             return None
-    while spec.get('assign') and k < len(w) and CX_ASSIGN_RE.match(w[k]):
+    while spec.get('assign') and k < len(w) and w[k] is not None and CX_ASSIGN_RE.match(w[k]):
+        if ops is not None and name == 'env':
+            nm, _, value = w[k].partition('=')
+            ops.append(('set', nm, None if nm.endswith('+') or '$' in value or '`' in value else value))
         k += 1
     if spec.get('npos'):
-        if k >= len(w) or not re.fullmatch(spec['npos'], w[k]):
+        if k >= len(w) or w[k] is None or not re.fullmatch(spec['npos'], w[k]):
             return None
         k += 1
     return k
+
+
+def skip_prefixes(words, k=0):
+    """(k, ok, ops) for the words of a simple command, from `words[k]`: the place of the command word after what leads it (`VAR=x` assignments and prefix commands with their options: `env -u A`, `timeout -s KILL 5`,
+    `nice -n 5`, `stdbuf -oL` ... the closed list CX_PREFIX_CMDS the shell -c reader uses), whether every option in front of it was one of the list (`ok`; when it was not, k is the place after the word
+    of the prefix that could not be read), and what they do to the environment, in order (`_skip_prefix`'s `ops`)."""
+    ops = []
+    while k < len(words):
+        w = words[k]
+        if w is None:
+            return k, False, ops
+        if CX_ASSIGN_RE.match(w):
+            nm, _, value = w.partition('=')
+            ops.append(('set', nm, None if nm.endswith('+') or '$' in value or '`' in value else value))
+            k += 1
+            continue
+        name = w.rsplit('/', 1)[-1]
+        if name in CX_PREFIX_CMDS:
+            got = _skip_prefix(name, words, k, ops)
+            if got is None:
+                return k + 1, False, ops
+            k = got
+            continue
+        break
+    return k, True, ops
+
+
+CODEX_VALUE_OPTS = frozenset(('-c', '--config', '-m', '--model', '-s', '--sandbox', '-a', '--ask-for-approval', '-C', '--cd', '-p', '--profile', '-i', '--image', '--add-dir', '--enable', '--disable',
+                              '--local-provider', '--thread-source'))     # the options of `codex` (before its subcommand) that take a value
+
+
+def codex_sub(rest):
+    """The subcommand of `codex` from the words after its name: the first word that is no option and no value of one (`exec` and its alias `e` start a thread; `-c key=value`, `-m model` and the like
+    stand before it). None when there is none or an option cannot be told from its value."""
+    j = 0
+    while j < len(rest):
+        t = rest[j]
+        if t is None:
+            return None
+        if t.startswith('-') and t != '-':
+            j += 1 if ('=' in t or t not in CODEX_VALUE_OPTS) else 2
+        else:
+            return t
+    return None
+
+
+def _prefix_regex(name, spec):
+    """The regex of a prefix command and its options as the table CX_PREFIX_CMDS writes them (the same list `_skip_prefix` reads word by word)."""
+    alts = [re.escape(f) for f in sorted(spec.get('flags', ()))]
+    for opt, val in spec.get('args', {}).items():
+        alts.append(re.escape(opt) + (r'(?:=(?:%s)|\s+(?:%s))' % (val, val) if opt.startswith('--') else r'\s*(?:%s)' % val))
+    if spec.get('numflag'):
+        alts.append(r'-\d+')
+    rx = re.escape(name) + (r'(?:\s+(?:%s))*' % '|'.join(alts) if alts else '')
+    if spec.get('assign'):
+        rx += r'(?:\s+[A-Za-z_]\w*=\S*)*'
+    if spec.get('npos'):
+        rx += r'\s+(?:%s)' % spec['npos']
+    return rx
+
+
+# What stands in front of a launch: the prefix commands with the options of the closed list (`env -u A`, `timeout -s KILL 5`, `nice -n 5`, `stdbuf -oL` ...), and the shapes the launch reader always took
+# (`timeout` and any one word, `env` and its few options), which stay as they were.
+_PREFIX_RX = '(?:%s|timeout\\s+\\S+|nohup|setsid|time|exec|env(?:\\s+(?:-i|--ignore-environment|-u\\s*\\S+|[A-Za-z_]\\w*=\\S*))*)' % '|'.join(_prefix_regex(n, sp) for n, sp in CX_PREFIX_CMDS.items())
+# the start of a command: a separator, then `{` (a group), `do` and `then` (reserved words only in command position: the `then` in `echo then codex exec …` and the `{` in `echo { codex exec …` are arguments, so they are no command boundary),
+# and the words `NAME=value` in front of the command word (assignments of the shell: what follows them is still the command position, as it is after `env NAME=value`)
+_LAUNCH_HEAD = r'(?:^|[;&|(`]|\$\()\s*(?:(?:do|then|\{)\s+)*(?:[A-Za-z_]\w*=\S*\s+)*(?:' + _PREFIX_RX + r'\s+)*'
+# `codex` and the options before its subcommand (`codex -c model=x exec …`), then `exec` or its alias `e`, in command position (not text inside a string or heredoc, pgrep, or --help)
+_CX_SHORT_VALUES = ''.join(sorted(o[1] for o in CODEX_VALUE_OPTS if not o.startswith('--')))
+_CX_LONG_VALUES = '|'.join(sorted(o[2:] for o in CODEX_VALUE_OPTS if o.startswith('--')))
+# an option that takes a value takes the next word: `-m e` is no `e`; the options that take none are the others
+_CODEX_OPT = r'(?:-[%s]\s*\S+|--(?:%s)(?:=\S+|\s+\S+)|--(?!(?:%s)(?![\w-]))[\w-]+(?:=\S+)?|-(?![%s])[A-Za-z])' % (_CX_SHORT_VALUES, _CX_LONG_VALUES, _CX_LONG_VALUES, _CX_SHORT_VALUES)
+LAUNCH_RE = re.compile(_LAUNCH_HEAD + r'codex(?:\s+' + _CODEX_OPT + r')*\s+(?:exec|e)(?![\w-])(?!\s+--help)', re.M)
+# Claude Code started from Bash (`claude -p …`): a claude in command position followed by -p/--print. A session like that is a child agent of the session that started it
+CLAUDE_LAUNCH_RE = re.compile(_LAUNCH_HEAD + r'claude\b(?=[^;&|\n]*?\s(?:-p|--print)\b)', re.M)
 
 
 def _shell_c_operand(shell, rest):
@@ -246,6 +330,9 @@ def shell_code(cmd):
     return got
 
 
+SCAN_STOP_RE = re.compile(r'[\\\'"`$#()<\n]')            # the characters `_shell_code` looks at: the others are text
+
+
 def _shell_code(cmd):
     n, out, pending = len(cmd), list(cmd), []
     last_scan = [0, 0]           # [where the last code_quote scan began, where the simple command it looked at starts]: what lies before that position is final
@@ -253,6 +340,11 @@ def _shell_code(cmd):
     def mask(a, b):
         if a < b:
             out[a:b] = re.sub(r'[^\n]', 'x', ''.join(out[a:b]))
+
+    def qmask(a, b):
+        """Masks quoted text: all of it, a line break too (a line break inside quotes is text and ends no command; the line breaks that stay in the masked code are the ones the shell reads as breaks)."""
+        if a < b:
+            out[a:b] = 'x' * (b - a)
 
     def code_quote(i):
         """Whether the opening quote at position i is really the eval argument or the shell -c command text at a command position (looking similar is not enough: echo 'eval …' is text).
@@ -310,12 +402,12 @@ def _shell_code(cmd):
         while i < n:
             m = CX_DQ_SPECIAL_RE.search(cmd, i)
             j = m.start() if m else n
-            mask(i, j)                                 # a stretch with no special characters is masked all at once
+            qmask(i, j)                                # a stretch with no special characters is masked all at once
             if not m:
                 return n
             i, ch = j, cmd[j]
             if ch == '\\':
-                mask(i, min(i + 2, n))
+                qmask(i, min(i + 2, n))
                 i += 2
             elif ch == '"':
                 return i + 1
@@ -324,7 +416,7 @@ def _shell_code(cmd):
             elif ch == '`':
                 i = scan(i + 1, '`') + 1
             else:
-                mask(i, i + 1)
+                qmask(i, i + 1)
                 i += 1
         return n
 
@@ -351,6 +443,10 @@ def _shell_code(cmd):
     def scan(i, closer):
         depth = 0
         while i < n:
+            m = SCAN_STOP_RE.search(cmd, i)                # (a stretch of ordinary characters is passed at once)
+            if m is None:
+                return n
+            i = m.start()
             ch = cmd[i]
             if ch == '\\':
                 if i + 1 < n and cmd[i + 1] == '\n':
@@ -367,7 +463,7 @@ def _shell_code(cmd):
                     if kind == 'sh' and j < n:
                         out[j] = ')'
                 else:
-                    mask(i + 1, j)
+                    qmask(i + 1, j)
                 i = j + 1
             elif ch == '"':
                 i = dquote(i + 1)
@@ -1469,11 +1565,23 @@ CL_SHORT_VALUE_OPTS = frozenset(('-n', '-d', '-m'))
 REOPEN_OPTS = frozenset(('--resume', '--continue', '--session-id', '--fork-session', '--from-pr'))      # options that take an existing session up again
 
 
+TOK_TOP_RE = re.compile(r'[ \t\r;|\n)&`$(]')         # in a simple command the characters that end or change the word being read; the others are text
+TOK_IN_RE = re.compile(r'[$)`(]')                     # inside `$( … )` or backticks only these do
+
+
 def _simple_tokens(code, i0):
     """The word ranges [(a, b)] of the simple command that starts at code[i0:] and the position where it ends (`;` `|` newline, an unmatched `)`, a lone `&`).
     `$( … )` and backtick regions stay inside one word, `&>` and `>&` are not command ends. `code` is shell_code(text): quoted text is already masked."""
     n, i, start, depth, bt, toks = len(code), i0, None, 0, False, []
     while i < n:
+        m = (TOK_TOP_RE if depth == 0 and not bt else TOK_IN_RE).search(code, i)
+        j = m.start() if m else n
+        if j > i:                                     # a stretch of ordinary characters is passed at once
+            if start is None:
+                start = i
+            i = j
+            if i >= n:
+                break
         ch = code[i]
         top = depth == 0 and not bt
         if top and ch in ' \t\r':
@@ -1490,7 +1598,10 @@ def _simple_tokens(code, i0):
             depth += 1
             i += 2
             continue
-        if ch == ')' and depth:
+        if ch == '(':
+            if code[i - 1:i] in ('<', '>') and i > i0:                  # `<( … )` and `>( … )` (process substitution) are inside one word too
+                depth += 1
+        elif ch == ')' and depth:
             depth -= 1
         elif ch == '`':
             bt = not bt
@@ -1498,6 +1609,9 @@ def _simple_tokens(code, i0):
     if start is not None:
         toks.append((start, i))
     return toks, i
+
+
+QUOTE_CHARS_RE = re.compile(r'[\'"\\\s]')
 
 
 def _classify(text, code, toks):
@@ -1510,9 +1624,15 @@ def _classify(text, code, toks):
         k += 1
         ct = code[a:b]
         m = RED_TOK_RE.fullmatch(ct) if ct[:1] in '0123456789&<>' else None
+        if m is not None and m.group(2) in ('<', '>') and not m.group(1) and m.group(3).startswith('('):
+            m = None                                                           # `<( … )` and `>( … )` are a word (a file that is a process), no redirection
         if m is None:
+            word = text[a:b]
+            if word and not QUOTE_CHARS_RE.search(word):                      # a word with no quote and no backslash is itself
+                words.append(word)
+                continue
             try:
-                parts = shlex.split(text[a:b])
+                parts = shlex.split(word)
             except ValueError:
                 parts = None
             words.append(parts[0] if parts and len(parts) == 1 else None)
@@ -1545,7 +1665,7 @@ def resolve_path(word, env, base_cwd, quoted=True):
         if len(parts) != 1:
             return [(None, [])]
         w = parts[0]
-    if '`' in w or '$(' in w:
+    if '`' in w or '$(' in w or w.startswith(('<(', '>(')):
         return [(None, ['$(…)'])]
     names = sorted({m.group(1) or m.group(2) for m in VAR_RE.finditer(w)})
     missing = [x for x in names if x not in env]
@@ -2924,16 +3044,19 @@ class LinkIndex:
         tid = b.get('id')
         if not tid:
             return
-        call = self._make_call(f, tid, ts, cmd, d.get('cwd'), _input(b).get('description') or '', launches, (off, ln), lambda: self._can_launch(f, tid, off, ln))
+        msg = d.get('message') if isinstance(d.get('message'), dict) else {}
+        call = self._make_call(f, tid, ts, cmd, d.get('cwd'), _input(b).get('description') or '', launches, (off, ln), lambda: self._can_launch(f, tid, off, ln),
+                               msg_id=msg.get('id') if isinstance(msg.get('id'), str) else None)
         self._track_end(f, call)
         self._dirty = True
 
-    def _make_call(self, f, tid, ts, cmd, cwd, desc, launches, loc, probe, end=None, end_status='running'):
+    def _make_call(self, f, tid, ts, cmd, cwd, desc, launches, loc, probe, end=None, end_status='running', msg_id=None):
         """The affil.Call of one launching command of a record `f` (a Claude Bash call or a Codex command), registered with its owner and the output index.
-        `end`: when the call is already over (a Codex command is written when it ends)."""
+        `end`: when the call is already over (a Codex command is written when it ends). `msg_id`: the group the call was made in (`Span.msg_id`): the message.id of the line of a Claude
+        call, the exec call around a Codex command (else the command's own id); what makes two launches one launch together."""
         reds = [r for L in launches for r in L['redirects']]
         span = Span(owner_tree=f['tree'], owner_node=f['node'], call_id=tid, start=ts, end=end, end_status=end_status, launchy=True,
-                    cwd=os.path.normpath(cwd) if isinstance(cwd, str) and cwd else None, redirects=reds)
+                    cwd=os.path.normpath(cwd) if isinstance(cwd, str) and cwd else None, redirects=reds, msg_id=msg_id)
         lits = short_literals(cmd) if (launches or (('claude' in cmd or 'codex' in cmd) and WORD_RE.search(cmd))) else frozenset()
         launch_list = [affil.Launch(L['cwd'], L['n'], L['arg'], L['loop_args'], L['resume'], L['session_id'], L['persist'], True, L['redirects'], L['reopens'], L['cwds'],
                                     _WrittenText(self, f, L['src'], ts) if L.get('src') else None)
@@ -3213,7 +3336,8 @@ class LinkIndex:
             found += [(x['text'], x['code'], x['env'], x['cwd']) for x in scripts if 'claude' in x['text']]
             launches = [L for t, code, env, base in found for L in launch_facts(t, code, base, env, 'claude')]
         if launches or scripts or _launchy_call(text):
-            self._make_call(f, item, c['start'], text, cwd, '', launches, None, lambda: self._cx_kinds(tid, item, cwd), end=c['end'], end_status='result')
+            self._make_call(f, item, c['start'], text, cwd, '', launches, None, lambda: self._cx_kinds(tid, item, cwd), end=c['end'], end_status='result',
+                            msg_id=(c.get('exec') or (item,))[0])
 
     @staticmethod
     def _cx_kinds(tid, item, cwd):

@@ -8,9 +8,11 @@ name, path and text is synthetic.
 import os
 import shutil
 
+from . import plan
 from .axes import (ABOVE_DOC, ABOVE_TEXT, COMMON_DOCS, COMMON_TITLE, ROOM_ALIAS, ROOM_BUNDLE, ROOM_GUIDES, SEAT_LETTERS, room_code, room_disk, room_folder, room_guide, room_late_guide,
-                   room_out, room_title, room_tree)
+                   room_out, room_timing, room_title, room_tree)
 from .build import Transcript, agent_id_of, dump, prose, put
+from .axes import digest
 from .scene_aff import toolu
 from .scene_sta import COORD, Sta
 
@@ -221,14 +223,16 @@ class Room:
 
     # ------------------------------------------------------------------------------------------------ the participants
     def timing(self, k):
-        """(life, when the Agent call is made) of the k-th participant of the page. Overlapping runs start a second apart; sequential ones start ten minutes apart, each after the
-        one before has finished (the last one may still be running)."""
-        if self.v['rtime'] == 'quiet':                                      # every one is still running, though each has been quiet since the next one began
-            return 'running', -300 - 600 * (len(self.page) - 1 - k)
-        if self.v['rtime'] == 'sequential':
-            last = len(self.page) - 1 - k
-            return ('running' if self.v['phase'] == 'working' and last == 0 else 'normal_end'), -300 - 600 * last
-        return self.life, -300 - k
+        """(life, when the Agent call is made) of the k-th participant of the page (axes.room_timing)."""
+        return room_timing(self.v, k, len(self.page))
+
+    def message(self):
+        """The id of the assistant message that starts the participants of the page: one for all of them (parallel Agent calls) when they are started together, none when the call that
+        started them cannot be told (`launch=none`), else None (a message of its own for each)."""
+        v = self.v
+        if v['launch'] == 'none':
+            return False
+        return 'msg_' + digest(self.cid, 'room-launch', n=12) if v['launch'] == 'msg' and v['rtime'] == 'overlap' and len(self.page) > 1 else None
 
     def tail(self, i):
         """What participant i does in its own record before it ends: reads the guide, tells the others its view, writes its own file."""
@@ -330,10 +334,18 @@ class Room:
             S.W = here
         for k, i in enumerate(self.page):
             life, off = self.timing(k)
-            S.sub_subject(self.role(i), self.description(i), self.instruction(i), life, 'just_ended', tail=self.tail(i), off=off)
+            S.sub_subject(self.role(i), self.description(i), self.instruction(i), life, 'just_ended', tail=self.tail(i), off=off, msg=self.message())
         self.strangers(S)
         S.finish()
+        self.set_times()
         return S
+
+    def set_times(self):
+        """The time of every file of the scene is the plan's (the one place that says when a file was written)."""
+        for rel, meta in plan.room_scene(self.v).F.files.items():
+            path = os.path.join(self.b.work, rel)
+            if os.path.exists(path):
+                os.utime(path, (self.b.T(meta['mtime']), self.b.T(meta['mtime'])))
 
 
 def build_room(b):

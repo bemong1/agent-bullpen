@@ -12,7 +12,7 @@
   function demoCtx(G, D, base) {
     const st = clone(base);
     let d0 = (st.debates || []).find(x => x.current);
-    if (!d0) { d0 = { root: 'demo', name: 'demo', title: t('demo.topic.debate'), topics: [], finals: [], current: true, last_ts: 0 }; st.debates = [d0].concat(st.debates || []); }
+    if (!d0) { d0 = { root: 'demo', name: 'demo', title: t('demo.topic.debate'), topics: [], finals: [], current: true, sure: true, final: null, placed: [], last_ts: 0 }; st.debates = [d0].concat(st.debates || []); }
     const now = () => Date.now() / 1000;
     const c = {
       st, d0, now,
@@ -27,9 +27,9 @@
       talk: (id, text) => c.status(id, 'running', { current: { kind: 'text', ts: now(), text } }),
       topic: (key, title, roles) => {       // demo-only room: seats A·B·C, round 1 and 2 cells
         const t = { dir: 'demo/' + key, key, title, name: title, deps: '', brief: true, docs: [], rounds: [1, 2],
-          final: { path: null, rel: null, exists: false, mtime: null, lines: 0 },
+          final: { path: null, rel: null, confirmed: false, exists: false, mtime: null, lines: 0, why: [], candidates: [] }, closable: false, placed: [],
           rows: roles.map((role, i) => ({ p: PQ[i], role, agents: [],
-            cells: [1, 2].map(r => ({ round: r, state: 'waiting', path: '', agent: null, writer: null, readers: [], lines: 0, mtime: null })) })) };
+            cells: [1, 2].map(r => ({ round: r, state: 'waiting', path: '', agent: null, owner: null, editors: [], evidence: null, hint: null, previous: false, readers: [], lines: 0, mtime: null })) })) };
         d0.topics.push(t);
         return t;
       },

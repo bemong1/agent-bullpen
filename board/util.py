@@ -113,20 +113,60 @@ def strip_reminders(text):
 
 
 # ---------- three ways to handle files ----------
-# 1. The way that opens content (open_safe: document view, reading brief, counting lines, -o sha1): right before opening, realpath and the deny check are redone **without any cache**.
+# 1. The way that opens content (open_safe: document view, reading brief, counting lines, -o sha1): right before opening, realpath and the deny check are redone **without any cache**
+#    (the deny list is compared by name; what an auth file that is a link leads to is kept while the folders that hold the auth files are as they were, and the auth files themselves are never looked up).
 # 2. The way that only looks at metadata (stat_regular: debate cells, the final in the brief table): it sees only existence, size and time. It opens nothing, so using the cache below leaks no content.
-# 3. The way that searches a folder for candidates (stat_plain: auto_final candidates, docs, finals list): way 2 plus the dot-path and secret-name rules. It opens nothing either.
+# 3. The way that searches a folder for candidates (stat_plain: the candidates of a final, docs, finals list): way 2 plus the dot-path and secret-name rules. It opens nothing either.
 _DENY_ROOTS = {'e': None}     # (key, creation time, value): realpaths of the deny list. Only the non-opening way (stat_regular) uses this brief memory
 DENY_ROOTS_TTL = 2.0          # seconds
+_AUTH_LINKS = {'e': None}     # (the names, the state of their folders, which of the names are links, whether the folders were old enough to trust the state)
+AUTH_RACY = 2.0               # seconds: a folder that changed this recently is looked at again each time (its time cannot yet tell the next change)
+
+
+def _folder_state(real):
+    """(inode, time in ns) of a folder, or None. A file made, removed or replaced in a folder moves its time."""
+    try:
+        st = os.stat(real)
+    except OSError:
+        return None
+    return (st.st_ino, st.st_mtime_ns)
+
+
+def _auth_link_names(where):
+    """Which of the deny-list files are links. {real folder: [file names]} in, the paths of the names that are links out. This is the one question the board puts to the auth files themselves, and
+    it is asked as seldom as it can be: the answer is kept while the folders that hold them are as they were (an entry that is made, removed or replaced moves the time of its folder), unless a
+    folder changed in the last AUTH_RACY seconds. Where a name is not a link nothing more is ever asked of it; where it is, `_deny_files` follows it again at every check, since what it leads to
+    can change with no change in the folder (a link in the middle of the way is repointed)."""
+    names = frozenset(os.path.join(d, n) for d, ns in where.items() for n in ns)
+    state = tuple(sorted((d, _folder_state(d)) for d in where))
+    memo = _AUTH_LINKS['e']
+    if memo is not None and memo[0] == names and memo[1] == state and memo[3]:
+        return memo[2]
+    here = dict(state)
+    links = frozenset(p for d, ns in where.items() if here[d] is not None for p in (os.path.join(d, n) for n in ns) if os.path.realpath(p) != p)        # (a folder that is not there holds no link)
+    now = time.time()
+    trusted = all(st is None or now - st[1] / 1e9 > AUTH_RACY for st in here.values())
+    _AUTH_LINKS['e'] = (names, state, links, trusted)
+    return links
+
+
+def _deny_files():
+    """The real paths of the deny-list files, compared by name: the real path of the folder and the name as it is, and where a name is a link, what it leads to, found anew each time (O19)."""
+    where = {}
+    for p in DENY_FILES:
+        d, n = os.path.split(p)
+        where.setdefault(os.path.realpath(d), []).append(n)
+    return {os.path.join(d, n) for d, ns in where.items() for n in ns} | {os.path.realpath(p) for p in _auth_link_names(where)}
 
 
 def _deny_roots(fresh):
-    """(set of realpaths of the denied files, realpath of the Claude config folder, realpath of the Codex folder). Unless fresh, one from within DENY_ROOTS_TTL is used."""
+    """(set of realpaths of the denied files, realpath of the Claude config folder, realpath of the Codex folder). Unless fresh, one from within DENY_ROOTS_TTL is used. The denied files are never
+    looked up themselves (`_deny_files`): the names are compared."""
     key = (CLAUDE_HOME, CODEX_HOME, DENY_FILES)
     e = _DENY_ROOTS['e']
     now = time.monotonic()
     if fresh or e is None or e[0] != key or now - e[1] > DENY_ROOTS_TTL:
-        e = (key, now, ({os.path.realpath(p) for p in DENY_FILES}, os.path.realpath(CLAUDE_HOME), os.path.realpath(CODEX_HOME)))
+        e = (key, now, (_deny_files(), os.path.realpath(CLAUDE_HOME), os.path.realpath(CODEX_HOME)))
         if not fresh:
             _DENY_ROOTS['e'] = e
     return e[2]
@@ -221,7 +261,7 @@ def stat_regular(path, strict=False):
 
 
 def stat_plain(path):
-    """For candidates found by searching a folder (auto_final candidates, docs, finals list): stat_regular plus the dot-path and secret-name rules."""
+    """For candidates found by searching a folder (the candidates of a final, docs, finals list): stat_regular plus the dot-path and secret-name rules."""
     return stat_regular(path, strict=True)
 
 

@@ -196,14 +196,15 @@ async function run(lang) {
   check(L('the draft of an interrupted agent: "' + P.T('board.cell.draftHeld', { state: P.T('status.interrupted') }) + '", no typing dots, a sentence that it is not being written'),
     !!heldCell && heldHtml.includes(esc(P.T('board.cell.draftHeld', { state: P.T('status.interrupted') }))) && !heldHtml.includes('typing') && heldHtml.includes(esc(P.T('board.cell.draftHeld.title.interrupted'))), heldHtml || 'no such cell in the fixture');
   check(L('the draft of a running agent still types'), cellsOf().some(c => c.state === 'draft' && (agentsBy(a => a.id === c.agent)[0] || {}).status === 'running') ? /class="cell c-draft"[^]*?typing/.test(deb) : true, '');
-  const openOf = state => P.run(`topicStage({ final: { exists: false }, deps: '', rows: [{ cells: [{ round: 1, state: ${JSON.stringify(state)}, agent: 'x' }, { round: 1, state: 'done', agent: 'y' }] }], rounds: [1] }).cls`);
+  const openOf = state => P.run(`topicStage({ final: { confirmed: false }, deps: '', rows: [{ cells: [{ round: 1, state: ${JSON.stringify(state)}, agent: 'x' }, { round: 1, state: 'done', agent: 'y' }] }], rounds: [1] }).cls`);
   check(L('a round with a cell in a state this page does not know (or paused) is still open'), openOf('unknown') === 's-active' && openOf('paused') === 's-active' && openOf('done') !== 's-active', [openOf('unknown'), openOf('paused'), openOf('done')]);
 
   // ---------- rooms: people who work together in a folder, whatever the work is called ----------
   const live3 = STATE.agents.filter(a => a.status === 'running').slice(0, 2).concat(STATE.agents.filter(a => a.status === 'done').slice(0, 1));
-  const cellOf = (a, st) => ({ round: 1, state: st, path: '/r/meeting/' + a.id + '.md', agent: a.id, writer: null, readers: [], lines: 4, mtime: STATE.now - 60, planned: false });
-  const roomOf = (kind, ags, states) => ({ root: '/r/meeting', short: '~/r/meeting', name: 'meeting', title: 'Weekly sync', finals: [], last_ts: STATE.now, current: true, topics: [{
-    dir: '/r/meeting', key: 'meeting', title: 'Weekly sync', name: '', deps: '', kind: 'rounds', room: kind, guide: '/r/meeting/agenda.md', final: { path: null, rel: null, exists: false, auto: false, mtime: null, lines: 0 },
+  const cellOf = (a, st) => ({ round: 1, state: st, path: '/r/meeting/' + a.id + '.md', agent: a.id, owner: a.id, editors: [], evidence: 'tool', hint: null, previous: false, rdir: '', readers: [], lines: 4, mtime: STATE.now - 60, planned: false });
+  const noFinal = (closable) => ({ confirmed: false, exists: false, path: null, rel: null, by: null, mtime: null, lines: 0, why: closable ? [] : ['none'], candidates: [], scope: 'room', table_path: null });
+  const roomOf = (kind, ags, states, closable) => ({ root: '/r/meeting', short: '~/r/meeting', name: 'meeting', title: 'Weekly sync', finals: [], last_ts: STATE.now, current: true, sure: true, final: null, placed: [], topics: [{
+    dir: '/r/meeting', key: 'meeting', title: 'Weekly sync', name: '', deps: '', kind: 'rounds', room: kind, room_sure: true, room_why: 'tag', guide: '/r/meeting/agenda.md', final: noFinal(closable), closable: !!closable, placed: [],
     rounds: kind === 'cells' ? [1] : [], docs: [{ name: 'agenda.md', path: '/r/meeting/agenda.md' }], brief: true,
     rows: ags.map((a, i) => ({ p: kind === 'cells' ? 'ABC'[i] : (a.tag || a.id.slice(0, 6)), role: '', agents: [a.id], cells: kind === 'cells' ? [cellOf(a, states[i])] : [] })) }] });
   const withRoom = (kind, states) => over(s => { s.debates = [roomOf(kind, live3.map(a => s.agents.find(x => x.id === a.id)), states)]; });
@@ -217,29 +218,19 @@ async function run(lang) {
   check(L('a room of cells whose every file is in but whose people still work: "all submitted"'), shows(RD.html('#topics'), RD.T('board.stage.room.ready', { total: 3 })), RD.html('#topics').match(/class="stage[^<]*</g));
   const ended = s => { s.agents.forEach(a => { if (a.status === 'running') a.status = 'done'; }); };
   const stageOf = html => { const m = html.match(/class="stage (s-[a-z]+)">([^<]*)</); return m ? m[1] + ' ' + m[2] : null; };      // the stage badge of the first topic: its class and its text
-  const RF = await boot({ state: over(s => { s.debates = [roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'done', 'done'])]; ended(s); }) });
+  const RF = await boot({ state: over(s => { s.debates = [roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'done', 'done'], true)]; ended(s); }) });
+  const RN = await boot({ state: over(s => { s.debates = [roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'done', 'done'])]; ended(s); }) });
   const RT = await boot({ state: over(s => { const d = roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'done', 'done']); d.copies = 3; s.debates = [d]; ended(s); }) });
   const tip = RT.T('board.debate.copies', { count: 3 });
   check(L('a debate that stands for folded copies says how many, in the tab and in the title tooltip; one with none says nothing'), tip && RT.html('#debateTabs').includes('title="' + esc(tip) + '"') && RT.html('#debateMeta').includes(esc(tip)) && !RF.html('#debateTabs').includes('title='),
     [RT.html('#debateTabs').slice(0, 200), RT.html('#debateMeta').slice(0, 200)]);
-  check(L('a room of cells whose every file is in and nobody works: "' + RF.T('board.stage.complete') + '" (no round to wait for), the green stage'), stageOf(RF.html('#topics')) === 's-final ' + RF.T('board.stage.complete'), stageOf(RF.html('#topics')));
+  check(L('a room of cells whose every file is in, nobody works and the judgment can close it: "' + RF.T('board.stage.complete') + '" (no round to wait for), the green stage'), stageOf(RF.html('#topics')) === 's-final ' + RF.T('board.stage.complete'), stageOf(RF.html('#topics')));
+  check(L('the same room whose end is not confirmed is not "' + RN.T('board.stage.complete') + '": "' + RN.T('board.stage.room.unconfirmed', { total: 3 }) + '"'), stageOf(RN.html('#topics')) === 's-ready ' + RN.T('board.stage.room.unconfirmed', { total: 3 }), stageOf(RN.html('#topics')));
   const RG = await boot({ state: over(s => { s.debates = [roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'missing', 'done'])]; ended(s); }) });
   check(L('a room with a seat that never handed in is stopped, not complete'), stageOf(RG.html('#topics')) === 's-ready ' + RG.T('board.stage.room.partial', { done: 2, total: 3 }), stageOf(RG.html('#topics')));
-  const RH = await boot({ state: over(s => { const d = roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'done', 'done']); d.topics[0].final = { path: '/r/CLOSING.md', rel: '../CLOSING.md', exists: true, auto: true, mtime: STATE.now, lines: 30 }; s.debates = [d]; ended(s); }) });
+  const RH = await boot({ state: over(s => { const d = roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['done', 'done', 'done'], true); d.topics[0].final = { confirmed: true, exists: true, path: '/r/CLOSING.md', rel: '../CLOSING.md', by: 'orch', mtime: STATE.now, lines: 30, why: [], candidates: [], scope: 'room', table_path: null }; s.debates = [d]; ended(s); }) });
   check(L('a room closed by the conclusion of its bundle above it: the final stage, and the document is named and opens'), stageOf(RH.html('#topics')) === 's-final ' + RH.T('board.stage.final') && shows(RH.html('#topics'), '../CLOSING.md') && RH.html('#topics').includes('data-path="/r/CLOSING.md"'), stageOf(RH.html('#topics')));
-  // a flat review (its result files are declared, there is no round folder): its cells carry no round
-  const flatOf = (ags, states) => ({ root: '/r/rev', short: '~/r/rev', name: 'rev', title: 'Release review', finals: [], last_ts: STATE.now, current: true, topics: [{
-    dir: '/r/rev', key: 'rev', title: 'Release review', name: '', deps: '', kind: 'flat', final: { path: null, rel: null, exists: false, auto: false, mtime: null, lines: 0 }, rounds: [], docs: [{ name: 'brief.md', path: '/r/rev/brief.md' }], brief: true,
-    rows: ags.map((a, i) => ({ p: ['sol', 'opus', 'mini'][i], role: '', agents: [a.id], cells: [{ round: null, state: states[i], path: '/r/rev/' + ['sol', 'opus', 'mini'][i] + '.md', agent: a.id, writer: null, readers: [], lines: 4, mtime: STATE.now - 60, planned: false }] })) }] });
-  const withFlat = (states, end) => over(s => { s.debates = [flatOf(live3.map(a => s.agents.find(x => x.id === a.id)), states)]; if (end) ended(s); });
-  const FD = await boot({ state: withFlat(['done', 'done', 'done'], true) });
-  const fd = FD.html('#topics');
-  check(L('a flat review whose every result is in and nobody works: complete, with one result column and a cell for each'), stageOf(fd) === 's-final ' + FD.T('board.stage.complete') && shows(fd, FD.T('board.room.col')) && !shows(fd, FD.T('board.round', { n: 1 })) && (fd.match(/class="cell c-done"/g) || []).length === 3, stageOf(fd));
-  const FW = await boot({ state: withFlat(['done', 'draft', 'writing'], false) });
-  check(L('a flat review with results still coming: working, in/total'), stageOf(FW.html('#topics')) === 's-active ' + FW.T('board.stage.room.active', { done: 1, total: 3 }), stageOf(FW.html('#topics')));
-  const FP = await boot({ state: withFlat(['done', 'waiting', 'waiting'], true) });
-  check(L('a flat review with only some results in and nobody working is stopped, not complete and not waiting'), stageOf(FP.html('#topics')) === 's-ready ' + FP.T('board.stage.room.partial', { done: 1, total: 3 }), stageOf(FP.html('#topics')));
-  check(L('a debate with round folders keeps its stage: round done, next stage waits'), P.run(`topicStage({ final: { exists: false }, deps: '', kind: 'rounds', rows: [{ agents: [], cells: [{ round: 1, state: 'done', agent: 'x' }, { round: 2, state: 'done', agent: 'x' }] }], rounds: [1, 2] }).text`) === P.T('board.stage.ready', { n: 2 }), '');
+  check(L('a debate with round folders keeps its stage: round done, next stage waits'), P.run(`topicStage({ final: { confirmed: false }, deps: '', kind: 'rounds', rows: [{ agents: [], cells: [{ round: 1, state: 'done', agent: 'x' }, { round: 2, state: 'done', agent: 'x' }] }], rounds: [1, 2] }).text`) === P.T('board.stage.ready', { n: 2 }), '');
   const RM = await boot({ state: withRoom('members', []) });
   const rm = RM.html('#topics');
   check(L('a room of participants only: no stepper, no round column, the stage says how many talk, a row for each'),
@@ -260,6 +251,104 @@ async function run(lang) {
     && shows(P.html('#agentFilter'), P.T('board.agents.tab.debate')) && !shows(P.html('#agentFilter'), P.T('board.agents.tab.room')) && shows(P.html('#tlWin'), P.T('board.tl.win.debate')), [P.html('#agentFilter'), P.html('#tlWin')]);
   const RE = await boot({ state: over(s => { s.debates = [roomOf('members', live3.map(a => s.agents.find(x => x.id === a.id)), [])]; s.agents.forEach(a => { if (a.status === 'running') a.status = 'done'; }); }) });
   check(L('a room of participants only whose participants have all ended says so'), shows(RE.html('#topics'), RE.T('board.stage.room.membersEnded', { count: 3 })), RE.html('#topics').match(/class="stage[^<]*</g));
+
+  // ---------- 0.3.0: a cell is what was written, a folder with no cell is told by what was not ----------
+  const base = () => clone(STATE.debates[0]);
+  const withDebate = f => over(s => { const d = base(); f(d, s); s.debates = [d]; });
+  const t2 = d => d.topics.find(tp => tp.key === 't2_retry'), rowOf = (tp, p) => tp.rows.find(r => r.p === p);
+  const live3b = STATE.agents.filter(a => a.status === 'running').concat(STATE.agents.filter(a => a.status === 'done')).slice(0, 4).map(a => a.id);
+  // a file from before this run: grey, with its lines and time, and it opens; a cell waiting for this run's file keeps the old one as a line under its state
+  const PV = await boot({ state: withDebate(d => {
+    const a = rowOf(t2(d), 'A').cells[1], b = rowOf(t2(d), 'B').cells[1];
+    Object.assign(a, { state: 'previous', previous: true, owner: null, agent: null, evidence: null, lines: 12, mtime: STATE.now - 7200 });
+    Object.assign(b, { state: 'writing', previous: true, lines: 9, mtime: STATE.now - 3600, planned: true });
+  }) });
+  const pv = PV.html('#topics');
+  check(L('a file from before this run is grey ("' + PV.T('board.cell.previous') + '"), not a submission, and it opens'), /class="cell c-previous" data-path="[^"]+"/.test(pv) && shows(pv, PV.T('board.cell.previous')), pv.match(/c-previous[^]{0,200}/));
+  check(L('a cell that waits for this run\'s file says so and keeps the old one: "' + PV.T('board.cell.prevFile', { count: 9, time: PV.hm(STATE.now - 3600) }) + '"'), shows(pv, PV.T('board.cell.prevFile', { count: 9, time: PV.hm(STATE.now - 3600) })) && /class="cell c-writing" data-path=/.test(pv), pv.match(/c-writing[^]{0,300}/));
+  // how the owner's first write was seen, who fixed it, a guess from the time (and that it is a guess)
+  const MT = await boot({ state: withDebate(d => {
+    const c = rowOf(t2(d), 'A').cells[0], c2 = rowOf(t2(d), 'B').cells[0], c3 = rowOf(t2(d), 'A').cells[1];
+    Object.assign(c, { evidence: 'shell', editors: ['orch', live3b[1]] });
+    Object.assign(c2, { evidence: 'planned' });
+    Object.assign(c3, { owner: null, hint: { kind: 'window', agent: live3b[2] } });
+  }) });
+  const mt = MT.html('#topics'), nm3 = MT.run(`agentName(${JSON.stringify(live3b[2])})`);
+  check(L('the way a cell was first written is a badge (' + MT.T('board.cell.ev.shell') + ', ' + MT.T('board.cell.ev.planned') + ', ' + MT.T('board.cell.ev.tool') + '), with a sentence on mouse-over'), shows(mt, '>' + MT.T('board.cell.ev.shell') + '<') && shows(mt, '>' + MT.T('board.cell.ev.planned') + '<') && shows(mt, '>' + MT.T('board.cell.ev.tool') + '<') && shows(mt, MT.T('board.cell.ev.shell.title')), mt.match(/class="cev"[^]{0,120}/));
+  check(L('who fixed a cell stands beside it (the orchestrator by its short name)'), shows(mt, MT.T('board.cell.editors', { names: MT.T('common.orchestrator.short') + '·' + MT.run(`agentName(${JSON.stringify(live3b[1])})`) })), mt.match(/fixed[^]{0,100}|고침[^]{0,100}/));
+  check(L('a guess from the time says "' + MT.T('board.cell.hint', { name: nm3 }) + '" with the "' + MT.T('board.link.guess') + '" mark'), shows(mt, MT.T('board.cell.hint', { name: nm3 })) && mt.includes('<span class="guess" title="' + esc(MT.T('board.cell.hint.title')) + '">'), mt.match(/class="guess"[^]{0,200}/));
+  // the agents thought to work in a topic and hold no cell there: one line for each reason, "estimated" except for a room tag, a grey line for the ones that are over
+  const PL = await boot({ state: withDebate((d, s) => {
+    t2(d).placed = [{ agent: live3b[0], why: 'launch_peer', whys: ['launch_peer', 'guide_read'], sure: false, live: true }, { agent: live3b[1], why: 'guide_read', whys: ['guide_read'], sure: false, live: true },
+                    { agent: live3b[2], why: 'tag', whys: ['tag'], sure: true, live: true }, { agent: live3b[3], why: 'launch_call', whys: ['launch_call'], sure: false, live: false }];
+    d.placed = [{ agent: STATE.agents.find(a => !live3b.includes(a.id)).id, why: 'launch_peer', whys: ['launch_peer'], sure: false, live: true }];
+    const a0 = s.agents.find(a => a.id === live3b[0]); a0.units = [];             // holding no cell
+    const a3 = s.agents.find(a => a.id === live3b[3]); a3.units = []; a3.work_units = [d.root]; a3.placed = null;       // tied to the debate by the judgment (not a guess), holding no cell
+    Object.assign(a0, { placed: { unit: d.root, topic: d.root + '/t2_retry', why: 'guide_read', whys: ['launch_peer', 'guide_read'], sure: false }, room_tag: { room: '~/x/room', seat: 'r2/B' }, launch: 'claude:aaaa:-:g1' });
+    s.agents.find(a => a.id === live3b[1]).launch = 'claude:aaaa:-:g1';
+  }) });
+  const pl = PL.html('#topics'), why = k => PL.T('board.placed.why.' + k);
+  check(L('"' + PL.T('board.placed.working', { why: why('launch_peer') }) + '" and one line for each other reason, a room tag without "estimated", and "' + PL.T('board.placed.ended') + '" for the ones that are over'),
+    shows(pl, PL.T('board.placed.working', { why: why('launch_peer') })) && shows(pl, PL.T('board.placed.working', { why: why('guide_read') })) && shows(pl, PL.T('board.placed.working.tag')) && !shows(pl, PL.T('board.placed.working', { why: why('tag') })) && shows(pl, PL.T('board.placed.ended')), pl.match(/class="placed[^]{0,160}/g));
+  check(L('each of them is a name that opens the agent, and the line of the whole bundle stands above its topics'), live3b.every(id => pl.includes(`data-agent="${id}"`)) && pl.indexOf('root-placed') >= 0 && pl.indexOf('root-placed') < pl.indexOf('<colgroup>'), [pl.indexOf('root-placed'), pl.indexOf('<colgroup>')]);
+  check(L('an agent the judgment ties to the debate and that holds no cell counts as one of its agents (the agent filter, the token card, the timeline window)'), PL.run(`inDebate(S.agents.find(a => a.id === ${JSON.stringify(live3b[3])}), S.debates[0])`), '');
+  const dl = PL.run(`lineageText(S.agents.find(a => a.id === ${JSON.stringify(live3b[0])}))`);
+  check(L('the details of an agent say where it is thought to work and why, its room tag and seat, and how many were started by the same call'), shows(dl, PL.T('board.drawer.placed', { unit: 't2_retry', why: why('guide_read') })) && shows(dl, PL.T('board.drawer.roomTag.seat', { room: '~/x/room', seat: 'r2/B' })) && shows(dl, PL.T('board.drawer.together', { count: 1 })), dl);
+  check(L('the agents thought to work in the debate are not "other work"'), !(PL.html('#topics').split('data-agent="' + live3b[0] + '"').length > 3), PL.html('#topics').split('data-agent="' + live3b[0] + '"').length);
+  // the end of a topic: confirmed (opens), or "closing not confirmed" with the reasons and the documents that could be it (a quiet topic with nothing handed in says nothing)
+  const FN = await boot({ state: withDebate(d => {
+    const tp = t2(d), t1 = d.topics.find(x => x.key === 't1_env');
+    tp.final = { confirmed: false, exists: false, path: null, rel: null, by: null, mtime: null, lines: 0, why: ['several', 'live_participant'], scope: 'topic', table_path: d.root + '/final/t2.md',
+      candidates: [{ path: tp.dir + '/a.md', rel: 'a.md', mtime: STATE.now, lines: 5 }, { path: tp.dir + '/b.md', rel: 'b.md', mtime: STATE.now, lines: 7 }] };
+    d.finals = [{ name: 't2.md', path: d.root + '/final/t2.md', mtime: STATE.now, lines: 21 }];
+    t1.final = Object.assign({}, t1.final, { by: 'orch' });
+    d.final = { confirmed: false, exists: false, path: null, rel: null, by: null, mtime: null, lines: 0, why: ['open_cell'], candidates: [{ path: d.root + '/final/t2.md', rel: 'final/t2.md', mtime: STATE.now, lines: 21 }], scope: 'bundle', table_path: null };
+  }) });
+  const fn = FN.html('#topics'), fm = FN.html('#debateMeta');
+  check(L('"' + FN.T('board.final.unconfirmed') + '" with its reasons and the candidates that open; what the brief table names is shown as that, with its file'),
+    shows(fn, FN.T('board.final.unconfirmed')) && shows(fn, FN.T('board.final.why.several')) && shows(fn, FN.T('board.final.why.live_participant')) && fn.includes('data-path="' + STATE.debates[0].topics[1].dir + '/a.md"') && fn.includes('data-path="' + STATE.debates[0].topics[1].dir + '/b.md"')
+    && shows(fn, FN.T('board.foot.table', { rel: '<span class="mono">final/t2.md</span>', state: '' }).split('<span')[0]) && fn.includes('data-path="' + STATE.debates[0].root + '/final/t2.md"'), fn.match(/class="chip unconf"[^]{0,400}/));
+  check(L('a confirmed final names who wrote it and opens; the unconfirmed ending of the bundle is told above the topics too'), shows(fn, FN.T('board.foot.by', { name: FN.T('common.orchestrator.short') })) && shows(fm, FN.T('board.debate.bundleFinal')) && shows(fm, FN.T('board.final.why.open_cell')), [fm.slice(0, 300)]);
+  const FQ = await boot({ state: withDebate(d => { t2(d).final = Object.assign({}, t2(d).final, { why: ['no_report'], candidates: [] }); }) });
+  check(L('a topic where nothing was handed in is not "closing not confirmed": there is nothing to close'), !shows(FQ.html('#topics').split('class="card topic')[2] || '', FQ.T('board.final.unconfirmed')), '');
+  const FO = await boot({ state: withDebate(d => { const tp = d.topics.find(x => x.key === 't1_env'); tp.final = { exists: true, path: tp.dir + '/rulings.md', rel: 'rulings.md', lines: 8, mtime: STATE.now }; delete tp.closable; }) });
+  check(L('an older answer (a final with `exists` only, no `closable`) still draws its final'), shows(FO.html('#topics'), FO.T('board.stage.final')) && shows(FO.html('#topics'), 'rulings.md'), '');
+  // a topic closed by the final of its bundle says so (it is not "closing not confirmed"), and the writer of a confirmed final is not "ended · no file"
+  const BC = await boot({ state: withDebate(d => {
+    const tp = t2(d);
+    tp.final = Object.assign({}, tp.final, { confirmed: false, exists: false, why: ['none'], candidates: [] }); tp.closable = true;
+    d.final = { confirmed: true, exists: true, path: d.root + '/CLOSING.md', rel: 'CLOSING.md', by: live3b[0], mtime: STATE.now, lines: 12, why: [], candidates: [], scope: 'bundle', table_path: null };
+    tp.placed = [{ agent: live3b[0], why: 'launch_peer', whys: ['launch_peer'], sure: false, live: false }, { agent: live3b[1], why: 'launch_peer', whys: ['launch_peer'], sure: false, live: false }];
+  }) });
+  const bc = BC.html('#topics'), bcCard = bc.split('<div class="card topic').find(x => x.includes('t2_retry')) || '';
+  check(L('a topic closed by the final of its bundle: "' + BC.T('board.stage.bundleFinal') + '", the bundle\'s file opens, no "closing not confirmed"'), shows(bcCard, BC.T('board.stage.bundleFinal')) && bcCard.includes('data-path="' + STATE.debates[0].root + '/CLOSING.md"')
+    && !shows(bcCard, BC.T('board.final.unconfirmed')) && shows(bcCard, BC.T('board.step.finalNamed', { name: 'CLOSING.md' })), bcCard.slice(0, 300));
+  check(L('whoever wrote a confirmed final is not listed as "' + BC.T('board.placed.ended') + '"; the others of that line are'), !bcCard.includes('data-agent="' + live3b[0] + '" title') && bcCard.includes('class="who-b agent" data-agent="' + live3b[1] + '"'), (bcCard.match(/class="placed[^]{0,300}/) || [''])[0]);
+  // beside a final, a round nobody wrote in is no wait: no column of "Pending", a dash in the empty cell of a round that has files
+  const CL = await boot({ state: withDebate(d => {
+    const tp = d.topics.find(x => x.key === 't1_env');
+    tp.rounds = [1, 2, 3];
+    const c = rowOf(tp, 'C').cells[1]; Object.assign(c, { state: 'waiting', agent: null, owner: null, evidence: null, previous: false, lines: 0, mtime: null });
+  }) });
+  const cl = CL.html('#topics').split('<div class="card topic')[1] || '';
+  check(L('a closed topic: no round column nobody wrote in, and "—" instead of "' + CL.T('board.cell.pending') + '" in the empty cell of a round that has files'), !shows(cl, CL.T('board.round', { n: 3 })) && shows(cl, CL.T('board.round', { n: 2 })) && (cl.match(/class="cell c-none"/g) || []).length === 1 && !shows(cl, CL.T('board.cell.pending')), cl.match(/<th>[^<]*/g));
+  const OP = await boot({ state: withDebate(d => { const tp = t2(d); tp.rounds = [1, 2, 3]; }) });
+  check(L('an open topic keeps its columns'), shows((OP.html('#topics').split('<div class="card topic').find(x => x.includes('t2_retry')) || ''), OP.T('board.round', { n: 3 })), '');
+  // an estimate is not counted with the agents that were seen working in the debate; the token card says how many are left out
+  const GU = await boot({ state: withDebate((d, s) => {
+    [live3b[0], live3b[1]].forEach((id, i) => { const a = s.agents.find(x => x.id === id); a.units = []; a.work_units = [d.root]; a.placed = { unit: d.root, topic: null, why: i ? 'tag' : 'guide_read', whys: [i ? 'tag' : 'guide_read'], sure: !!i }; });
+  }) });
+  check(L('an agent that is only thought to work in a debate is no member of it (the filter, the token count), one with a room tag is; the token card tells how many were left out'),
+    !GU.run(`inDebate(S.agents.find(a => a.id === ${JSON.stringify(live3b[0])}), S.debates[0])`) && GU.run(`inDebate(S.agents.find(a => a.id === ${JSON.stringify(live3b[1])}), S.debates[0])`) && shows(GU.html('#tokCard'), GU.T('board.tok.guessed', { count: 1 })), GU.html('#tokCard').slice(-300));
+  // an estimated room: a mark on the tab and on its card, never opened by itself; with nothing else current the page says so
+  const ER = await boot({ state: over(s => { const d = roomOf('cells', live3.map(a => s.agents.find(x => x.id === a.id)), ['draft', 'draft', 'draft']); d.sure = false; d.current = false; d.topics[0].room_sure = false; d.topics[0].room_why = 'launch'; s.debates = [d]; }) });
+  check(L('an estimated room is marked on its tab, and with nothing else current none is opened by itself: "' + ER.T('board.debate.pick') + '"'), shows(ER.html('#debateTabs'), ER.T('board.room.est')) && shows(ER.html('#topics'), ER.T('board.debate.pick')) && !ER.html('#topics').includes('<colgroup>'), ER.html('#topics').slice(0, 200));
+  ER.run('ui.debate = S.debates[0].root; renderDebates();');
+  check(L('picked by the user it opens, marked "' + ER.T('board.room.est') + '", with the sentence on mouse-over, and the tag room carries its own mark'), shows(ER.html('#topics'), ER.T('board.room.est')) && shows(ER.html('#topics'), ER.T('board.room.est.title.launch')) && shows(RC.html('#topics'), RC.T('board.room.tag')), ER.html('#topics').slice(0, 300));
+  // the work outside the debate: the agents launched together are one group, the rest stand alone
+  const OT = await boot({ state: over(s => { s.debates = []; s.agents.slice(0, 4).forEach((a, i) => { a.status = 'running'; a.last_ts = s.now - 5; a.launch = i < 2 ? 'claude:aaaa:-:grp1' : null; }); }) });
+  const ot = OT.html('#topics');
+  check(L('the agents launched together stand together under "' + OT.T('board.work.together', { count: 2 }) + '", the others alone'), shows(ot, OT.T('board.work.together', { count: 2 })) && (ot.match(/class="grp"/g) || []).length === 1, ot.match(/class="grp"[^]{0,100}/));
   const sr = scan(RC), sm = scan(RM);
   check(L('the rooms show no [key]') + (ko ? '' : ' and no Hangul outside data'), !sr.keys.length && !sr.missing.length && !sm.keys.length && !sm.missing.length && (ko || (!sr.han.length && !sm.han.length)), [sr, sm]);
 

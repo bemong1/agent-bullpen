@@ -2,6 +2,41 @@
 
 Agent Bullpen is in **beta** (0.x): the formats it reads are the private on-disk transcripts of Claude Code and Codex, which can change with any release of those tools, and options and screens may change between 0.x releases. Please report what looks wrong with the bug template (it asks for the output of `python3 tools/harvest.py <session id>`, which holds no transcript text). `python3 server.py --version` prints the release you run.
 
+## Unreleased — 0.3.0: debates from folders and real writes, not from sentences
+
+The debate table, the rooms and the end of a topic are no longer judged from the words of an instruction, a brief or a report. They are judged from what the agents wrote and where, which the board already reads from the records, so the same record gives the same table in any language. Only the first heading of a brief, its table and the list of documents are still read, and only to be shown. The rules are in the [screen guide](docs/guide.md#how-debates-are-recognized).
+
+**What the judgment says now**
+
+- **A cell is a file that was really written** (a tool write, a completed Codex file change, a shell `>`/`tee` that worked, or the file a `codex exec -o` / `claude -p … >` was asked to save). Whoever's first write created it owns it; the others who wrote it are "fixed by"; a file only edited has no owner. A write that failed or whose result is unknown is no evidence and holds an answer back instead of deciding it (`seat_tie_held`, `history_lost`).
+- **"Previous file"**: grey, opens, never a submission. It is a file nobody owns, or one its owner was asked to save again and has not.
+- **Agents with no cell are placed by an estimate**: launched together with a participant, the launch made the folder, or the guide was read. The page lists them as "Working · estimated (reason)" and the office seats them in that room; the rest of a launched-together group stand together in "Other work". An estimate decides nothing and is not counted as a member of the debate.
+- **"Probably written by X"** on a file nobody owns, saved while exactly one command of one agent ran. A marked guess.
+- **Rooms**: a room tag (two or more agents with the same `BULLPEN_ROOM`) is sure; agents launched together that each wrote a `.md` of their own in a folder make an *estimated room*, which is marked, never the current debate and never closes.
+- **Optional tags** on the launch command itself (`BULLPEN_ROOM=<folder>`, `BULLPEN_SEAT=<name>` or `<rN/name>`): only what the command passes to the run counts, and a value merely inherited or dropped by a resume does not.
+- **The end of a topic is confirmed or "Closing not confirmed".** One `.md` written by a tool or shell command after the last report, with every cell in and nobody tied to the topic working. Anything else shows the reasons and the documents that could be it; a topic of a confirmed bundle final reads "Closed by the bundle's final". The final the brief table names is shown and decides nothing. "Final ready", a room's "Done" and the closing of an office room go by the judgment alone.
+- Copies of one folder in linked worktrees: when none has anything of its own, one stands for them.
+
+**What is lost (on purpose: a miss is better than a false seat or a false end)**
+
+- A seat before anything is written: only `-o`, `claude -p … >` and a seat tag make a cell wait for its file.
+- The role line of a brief: a row is named for its file. A review with no round folder is no debate: give it an `r1/` folder, or start two or more agents with `BULLPEN_ROOM`.
+- The conclusion found by its words, so more "Closing not confirmed". A final in `final/` that the brief table names does not close a topic.
+- Python, `cp` and `mv` writes (a guess may say who wrote the file).
+
+**API.** `/api/state`: `agents[].placed`, `.launch`, `.room_tag` (`tag` stays the letter the page names the agent by), `.work_units`; `debates[].sure`, `.final`, `.placed`; `topics[].room_sure`, `.room_why`, `.placed`, `.closable`, `final {confirmed, path, rel, by, mtime, lines, why[], candidates[], scope, table_path}` (`final.exists` stays as an alias of `confirmed` and goes in 0.4.0); cells have `owner`, `editors`, `evidence`, `hint`, `previous`, `rdir` and the state `previous`; `rows[].role` is always empty. `/api/agent`: `write_events` (every write with `ok`, `proof`, `sure`), `run`, `placed`, `launch`, `room_tag`.
+
+**Diagnostics.** Gone: `path_ambiguous`, `debate_in_misc`, `declaration_missing`. New: `launch_split`, `history_lost`. Kept: `seat_tie_held` (more than one agent could have been first to write a cell), `alias_collision` (`r01` and `r1` both there), `listing_capped`, and `path_unresolved` (a launch whose path could not be worked out).
+
+### Known limitations
+
+- The Agent tool and Codex native sub-agents cannot carry a room tag; on macOS a running process's folder is read only when its path has no space; a value with `$` in the launch command is not read.
+- A final in a dot folder or with a secret-looking name is not confirmed for the page (it cannot open it).
+- A cut last line (a Codex process died while writing) is skipped, not a hole: if it was a cell's first write, another agent may seem its owner.
+- A big rollout's front is scanned once, and not again while the file only grows.
+- Sessions of about 300 agents open about 4 s slower than in 0.2.1; shell events after the first screen come in 0.3.1.
+- A running agent whose only cell is in an earlier round shows it as a draft; a file changed with no write event in a resumed run stays "Submitted".
+
 ## 0.2.1 — a longer timeline, and the debates an orchestrator sets up itself
 
 - **The activity timeline can look further back, and at a range of your own.** Besides 30 minutes, 2 hours, this debate and 12 hours there are 24 hours, 3 days, 7 days and all of the session (on a phone the longer ones are in a box next to the first four tabs), a custom range of two date-time inputs (at most 31 days, kept in the browser), and ◀ ▶ that move the range by its own length into the past and back toward now (the newest step stops at now; a range that ends in the past draws no "now" line and the live refresh does not move it). The server thins a window over 13 hours: for each lane one mark of each kind in each of about a thousand time columns (a number says how many a mark stands for), only the saved reports among the writes, and the 60 lanes that were most recently at work in the range until Show all (the window of a debate always holds the debate's own agents; a session with hundreds of agents stays under 1 MB, and the server's lock is held for milliseconds, not for the binning); the windows up to 12 hours are sent as before. `/api/timeline` takes an optional `until` (a number after `since`, at most 31 days later, else `400` with `error_code` `bad_range`) and `all=1`. Ticks are every 12 hours and every day at local noon and midnight (counted on the calendar, so a change of the clocks does not move them), with dates over a day, as many of them as the width of the card allows. "Up to now" is an open end: a range picked or stepped to now goes on with the clock, and one that ended a few minutes ago is asked for again for the records that come late.

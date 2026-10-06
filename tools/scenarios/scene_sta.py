@@ -79,18 +79,23 @@ class Sta:
             self.tear.append(tr)
 
     # ------------------------------------------------------------------------------------------------ claude -p child
-    def cli_subject(self, role, text, cmd, life, at, cwd, legacy=False, tail=None, launcher=None, tree=None):
-        """`launcher`: the record that holds the launching call (default: the main session); `tree`: (session id, pid, shell pid) of the Claude process above it."""
+    def cli_subject(self, role, text, cmd, life, at, cwd, legacy=False, tail=None, launcher=None, tree=None, final=None, off=0.0, msg=None, env_extra=None, shared=None):
+        """`launcher`: the record that holds the launching call (default: the main session); `tree`: (session id, pid, shell pid) of the Claude process above it; `final`: the last
+        message of the run when it ends well (what a `>` redirect of the launch writes into its file); `off`: when the launching call is made (seconds from the case's base time);
+        `msg`: the id of the assistant message the launching call is in (None: its own, False: none); `env_extra`: more names in the environment of the process (a tag); `shared`: {tid, bgi, emit}, the launching call that
+        also starts another run (one Bash call, two children): only the run with `emit` writes the call, its result and the notice of its end."""
         b, O = self.b, launcher or self.O
         tree_sid, tree_pid, shell_pid = tree or (b.sid('orch'), 100, 101)
         G = b.sid(role)
-        tid, bgi = toolu(b, 'launch-' + role), bgid(b, 'bg-' + role)
-        tc, t0 = b.T(0), b.T(2.4)
+        tid, bgi = (shared['tid'], shared['bgi']) if shared else (toolu(b, 'launch-' + role), bgid(b, 'bg-' + role))
+        emit = not shared or shared['emit']
+        tc, t0 = b.T(off), b.T(off + 2.4)
         C = b.transcript(role, cwd, 'sdk-cli', sid=G)
         C.version = self.version()
         self.extra_tr.append(C)
-        O.tool(tc, 'Bash', {'command': cmd, 'description': 'launch child', 'run_in_background': True}, tid)
-        O.result(tc + 0.4, tid, 'started', bg=bgi)
+        if emit:
+            O.tool(tc, 'Bash', {'command': cmd, 'description': 'launch child', 'run_in_background': True}, tid, msg=msg)
+            O.result(tc + 0.4, tid, 'started', bg=bgi)
         self.prompt(C, t0, text, legacy=legacy)
         C.tool(t0 + 3, 'Read', {'file_path': os.path.join(cwd, 'notes.md')}, toolu(b, 'rd-' + role))
         C.result(t0 + 4, toolu(b, 'rd-' + role), 'notes')
@@ -108,7 +113,7 @@ class Sta:
             alive = True                                  # the process is there, the record has not grown for 20 minutes and no tool call is open
             self.now = t0 + 4 + 1200
         elif life == 'normal_end':
-            C.say(t_end, 'Finished the review.', 'end_turn')
+            C.say(t_end, final or 'Finished the review.', 'end_turn')
             notif = (t_end + 1.5, 'completed', 'Background command "launch child" completed (exit code 0)')
         elif life in ERR:
             r = self.err(C, t_end, life)
@@ -134,7 +139,7 @@ class Sta:
             self.now = t_end + 120
             if life == 'sub_limit_dead':
                 self.now = r + 3600 if r else self.now
-        if notif and life != 'time_limit_silent':
+        if notif and life != 'time_limit_silent' and emit:
             O.notification(notif[0], bgi, tid, notif[1], notif[2])
         self.resets_at = r
         if at in ('after_resume', 'resume_stopped') and life in RESUMABLE and life not in ('running', 'stalled_silent'):
@@ -156,7 +161,7 @@ class Sta:
                 alive = False
                 self.now = t_res + 120
         self.finish_flaws(C, life, legacy)
-        child = proc(103, shell_pid, ['claude', '-p', '--model', MODEL], env={'CLAUDE_CODE_SESSION_ID': tree_sid, 'CLAUDE_PID': str(tree_pid)},
+        child = proc(103, shell_pid, ['claude', '-p', '--model', MODEL], env=dict({'CLAUDE_CODE_SESSION_ID': tree_sid, 'CLAUDE_PID': str(tree_pid)}, **(env_extra or {})),
                      session=session_file(b, 103, G, cwd, 'sdk-cli', t0))
         shell = proc(shell_pid, tree_pid, ['/bin/bash', '-c', 'eval run'])
         if self.flaw == 'multi_proc':
@@ -182,13 +187,14 @@ class Sta:
         return C
 
     # ------------------------------------------------------------------------------------------------ sub-agent
-    def make_sub(self, role, desc, at_off, parent=None, depth=None, prompt='Work on the task.'):
-        """A sub-agent: the Agent call (and its async-launched result) in its parent's record, the meta file (depth 1 or more), the record with its spawn line."""
+    def make_sub(self, role, desc, at_off, parent=None, depth=None, prompt='Work on the task.', msg=None):
+        """A sub-agent: the Agent call (and its async-launched result) in its parent's record, the meta file (depth 1 or more), the record with its spawn line. `msg`: the id of the
+        assistant message the Agent call is in (sub-agents launched in parallel share one; None: a message of its own, False: none)."""
         b, O = self.b, self.O
         aid = b.ids.get(role) or b.ids.setdefault(role, agent_id_of(self.cid, role))
         tu = toolu(b, 'spawn-' + role)
         host = O if parent is None else parent
-        host.tool(b.T(at_off), 'Agent', {'description': desc, 'prompt': prompt}, tu)
+        host.tool(b.T(at_off), 'Agent', {'description': desc, 'prompt': prompt}, tu, msg=msg)
         host.result(b.T(at_off + 0.3), tu, 'Async agent launched', extra={
             'isAsync': True, 'status': 'async_launched', 'agentId': aid, 'description': desc, 'prompt': prompt,
             'outputFile': '/tmp/claude-synth/tasks/%s.output' % aid, 'canReadOutputFile': True})
@@ -204,10 +210,10 @@ class Sta:
         self.subs.append(S)
         return S, aid, tu
 
-    def sub_subject(self, role, desc, prompt, life, at, parent=None, depth=None, tail=None, off=-200):
+    def sub_subject(self, role, desc, prompt, life, at, parent=None, depth=None, tail=None, off=-200, msg=None):
         """`tail(S, t)` may add the subject's own work records (a debate participant writes its report there). `off`: when the Agent call is made, in seconds from the case's base time."""
         b, O = self.b, self.O
-        S, aid, tu = self.make_sub(role, desc, off, parent=parent, depth=depth, prompt=prompt)
+        S, aid, tu = self.make_sub(role, desc, off, parent=parent, depth=depth, prompt=prompt, msg=msg)
         S.version = self.version()
         t0 = b.T(off + 1)
         notes_to = parent if parent is not None else O
@@ -265,7 +271,8 @@ class Sta:
                 'type': 'queued_command', 'commandMode': 'task-notification', 'prompt': body, 'timestamp': iso(t)}})
 
     # ------------------------------------------------------------------------------------------------ Codex thread
-    def codex_subject(self, role, text, cmd, life, at, cwd, extra=None):
+    def codex_subject(self, role, text, cmd, life, at, cwd, extra=None, final=None):
+        """`final`: the last message of the run when it ends well (what `-o` of the launch writes into its file)."""
         b, O = self.b, self.O
         tid = b.ids[role] = '019a%04d-0000-7000-8000-%012d' % (int(digest(self.cid, role, 'cx', n=3), 16) % 10000, int(digest(self.cid, role, 'cx2', n=6), 16) % 10 ** 12)
         tc = b.T(0)
@@ -277,7 +284,7 @@ class Sta:
         complete = life in ('normal_end', 'codex_error')
         alive = life in ('running', 'stalled_silent')
         err = {'codex_error_info': 'server_overloaded', 'message': 'overloaded'} if life == 'codex_error' else None
-        path = codex_rollout(b, tid, start, cwd, text, 'codex_exec', complete=complete, error=err, extra=extra)
+        path = codex_rollout(b, tid, start, cwd, text, 'codex_exec', complete=complete, error=err, extra=extra, final=final)
         if life == 'taskstop_kill':
             with open(path, 'a') as f:
                 f.write(dump({'timestamp': iso(start + 5), 'type': 'event_msg', 'payload': {'type': 'turn_aborted', 'reason': 'interrupted'}}) + '\n')

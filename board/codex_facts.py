@@ -195,6 +195,12 @@ class ThreadFacts:
             self.gaps = [(min(g[0] for g in self.gaps), None if any(g[1] is None for g in self.gaps) else max(g[1] for g in self.gaps), 'many')]
         self.gaps.append((start, end, why))
 
+    def wrapper(self, start):
+        """(call id, time) of the exec call that a command which began at `start` ran in: the one exec call that was open then (called before it, its output not come yet); None when there was no
+        such call or there were several (nothing says which)."""
+        found = [(cid.decode() if isinstance(cid, bytes) else cid, t) for cid, t in self.execs.items() if t <= start + 1.0]       # (the ids are kept as the bytes the line was read as)
+        return found[0] if len(found) == 1 else None
+
     def begin_turn(self, ts):
         self.turn_start = ts
         self.execs.clear()                                     # a call of an earlier turn that never got its output is no command running now
@@ -284,7 +290,7 @@ def _cmd_exec(thread, ts, offset, item_id, process_id, command, cwd, status, exi
     big = cmd is not None and nbytes(cmd) > CX_CMD_MAX
     dur = secs + nanos / 1e9 if secs is not None and nanos is not None else 0
     return {'thread': thread, 'item_id': item_id, 'process_id': process_id, 'cmd': None if big else cmd, 'cwd': file_path(cwd),
-            'start': ts - dur, 'end': ts, 'status': status, 'exit_code': exit_code, 'offset': offset}, big
+            'start': ts - dur, 'end': ts, 'status': status, 'exit_code': exit_code, 'offset': offset, 'exec': None}, big
 
 
 def parse_cmd_exec(raw, at, thread, ts, offset=None):

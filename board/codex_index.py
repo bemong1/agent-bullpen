@@ -336,6 +336,7 @@ class CodexIndex:
         if c is None:
             f.unreadable(*(run_window(raw, ts) or (e['meta_ts'] or -INF, ts or e['last_ts'])))      # when it ran if the line says, else sometime between the start of the thread and now
         elif c is not False:
+            c['exec'] = f.wrapper(c['start'])      # the exec call the command ran in, when it is known (the group of a launch, the start of its window)
             f.add_cmd(c, big)
 
     def _activity(self, e, raw, ts):

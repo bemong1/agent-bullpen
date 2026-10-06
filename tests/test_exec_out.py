@@ -32,7 +32,7 @@ class ExecOut(unittest.TestCase):
         self.assertEqual(self.out('codex', 'exec', 'resume', 'abc', '-o', '/w/B.md', 'more'), '/w/B.md')
 
     def test_what_gives_nothing(self):
-        self.assertIsNone(self.out('codex', 'exec', '-o', 'r1/B.md', 'do it'))                                  # a relative path needs the folder of the process, which is not read
+        self.assertIsNone(self.out('codex', 'exec', '-o', 'r1/B.md', 'do it'))                                  # a relative path needs a folder to count from (`exec_out(argv, cwd)`: the one of its thread)
         self.assertIsNone(self.out('codex', 'exec', '-o', '/w/A.md', '-o', '/w/B.md', 'do it'))                 # two: which one is the report
         self.assertIsNone(self.out('codex', 'exec', '-o', '/w/A.md', '--output-last-message=/w/A.md', 'x'))      # even the same twice
         self.assertIsNone(self.out('codex', 'exec', 'do it', '--', '-o', '/w/B.md'))                            # after `--` it is a word of the instruction
@@ -70,7 +70,11 @@ class LiveOutOfTheProcesses(TP.Fixture):
 
     def test_no_path_no_entry(self):
         self.assertEqual(self.processes(['codex', 'exec', 'do it']), {})
-        self.assertEqual(self.processes(['codex', 'exec', '-o', 'r1/B.md', 'do it'], tid=TP.TID2), {})
+        self.assertEqual(self.processes(['codex', 'exec', '-C', '/other', '-o', 'r1/B.md', 'do it'], tid=TP.TID2), {})              # the command moves the folder: a relative word is not known to be read from the thread's
+
+    def test_a_relative_path_counts_from_the_folder_the_thread_was_started_in(self):
+        self.assertEqual(self.processes(['codex', 'exec', '-o', 'r1/B.md', 'do it'], tid=TP.TID2), {TP.TID2: '/w/r1/B.md'})
+        self.assertEqual(self.processes(['codex', 'exec', '-o', 'r1/B.md', 'do it'], ['codex', 'exec', '-o', '/w/r1/B.md', 'do it'], tid=TP.TID2), {TP.TID2: '/w/r1/B.md'})      # (the same file said two ways)
 
     def test_two_processes_with_the_rollout_open_agree_or_there_is_none(self):
         self.assertEqual(self.processes(['codex', 'exec', '-o', '/w/B.md', 'x'], ['codex', 'exec', '-o', '/w/B.md', 'x']), {TP.TID: '/w/B.md'})

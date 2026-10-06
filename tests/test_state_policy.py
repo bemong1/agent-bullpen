@@ -159,8 +159,8 @@ class DiagParams(unittest.TestCase):
                          ('evidence_conflict', {'other': self.SID}), ('content_author_differs', {'other': self.SID}), ('content_author_differs', {'other': self.AID}),
                          ('node_unresolved', {'run': 1}), ('node_unresolved', {}), ('orphan_launch', {'n': 2, 'ambiguous': True}), ('orphan_launch', {'n': 1}),
                          ('path_unresolved', {'n': 2}), ('content_only', {}), ('ambiguous_content', {}), ('fingerprint_incomplete', {}), ('proc_unknown', {}),
-                         ('silent_live', {}), ('seat_tie_held', {'detail': '1/B_gate'}), ('seat_tie_held', {'detail': '-/sol'}), ('alias_collision', {'detail': 'A.md,a.md'}),
-                         ('alias_collision', {'detail': 'r1,r01'}), ('path_ambiguous', {}), ('debate_in_misc', {}), ('declaration_missing', {}), ('listing_capped', {})):
+                         ('silent_live', {}), ('seat_tie_held', {'detail': '1/B_gate'}), ('seat_tie_held', {'detail': '-/sol'}), ('history_lost', {'detail': '1/B_gate'}),
+                         ('alias_collision', {'detail': 'r1,r01'}), ('launch_split', {'detail': 'x,y'}), ('listing_capped', {})):
             self.assertEqual(self.params(code, **kw), kw, (code, kw))
 
     def test_a_parameter_the_code_does_not_have_is_dropped(self):
@@ -182,6 +182,8 @@ class DiagParams(unittest.TestCase):
         self.assertEqual(self.params('evidence_conflict', other=self.SID + ' /SYNTH/x'), {})
         self.assertEqual(self.params('seat_tie_held', detail='1/B\n/SYNTH/x'), {})
         self.assertEqual(self.params('seat_tie_held', detail='x' * 200), {})
+        self.assertEqual(self.params('history_lost', detail='1/B\n/SYNTH/x'), {})
+        self.assertEqual(self.params('launch_split', detail='x' * 200), {})
         self.assertEqual(self.params('alias_collision', detail='a\x00b'), {})
 
     def test_a_number_has_to_be_a_plain_small_number(self):

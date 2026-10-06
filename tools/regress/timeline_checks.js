@@ -32,7 +32,7 @@ class FDate extends Date { constructor(...a) { a.length ? super(...a) : super(FI
 function crowded(n, units, base = STATE, name = 'Crowd') {
   const S = clone(base), a0 = S.agents[0];
   for (let i = 0; i < n; i++) S.agents.push({ ...clone(a0), id: 'zz-' + name.toLowerCase() + '-' + String(i).padStart(3, '0'), title: name + ' ' + String(i).padStart(3, '0'), tag: '', status: 'done', last_ts: STATE.now - 300 - i * 60,
-    spawn_ts: STATE.now - 3600, first_ts: STATE.now - 3600, units: units || [] });
+    spawn_ts: STATE.now - 3600, first_ts: STATE.now - 3600, units: units || [], work_units: units || [], placed: null });      // (what the judgment ties an agent to is where it sits)
   return S;
 }
 // The agents of the first debate, moved to `hours` ago (a debate that is older than the server's limit for a range that is sent whole)

@@ -81,10 +81,21 @@ const agentById = id => S && S.agents.find(a => a.id === id);
 const toolText = x => x.text_i18n && I18N.has(x.text_i18n.key) ? t(x.text_i18n.key, i18nParams(x.text_i18n.params)) : x.text;
 const isLive = a => a.status === 'running' || a.status === 'stalled';              // Working (suspected stalls included). The test for running only and the "within 45 s" test are used separately
 const isHeld = a => a.status === 'interrupted' || a.status === 'unknown';          // Not working and not over: stopped by a limit or an error, or not known. They stay in the main list, not under "finished"
-const inDebate = (a, d) => a.units.some(u => u === d.root || u.startsWith(d.root + '/')) ||   // Agents that worked in this debate's folder
+const under = (u, d) => u === d.root || u.startsWith(d.root + '/');
+// An agent the judgment only guesses to work in a debate (an estimate, with no cell there) is shown as that: it is not counted with the ones that were seen working there
+const guessedIn = (a, d) => !!a.placed && a.placed.sure === false && under(a.placed.unit || '', d) && !a.units.some(u => under(u, d));
+const inDebate = (a, d) => a.units.some(u => under(u, d)) || ((a.work_units || []).some(u => under(u, d)) && !guessedIn(a, d)) ||   // Agents that worked in this debate's folder, or that the judgment ties to it (a tag, a request to save)
   d.topics.some(tp => tp.room === 'members' && tp.rows.some(r => r.agents.includes(a.id)));         // and those of a room of participants only (they hold no seat)
 // A folder of people who work together (a room) is "work", not a debate: the words that name the unit follow it
 const isRoom = d => !!d && d.topics.length > 0 && d.topics.every(tp => tp.room);
+// A final is confirmed when the judgment says so (`confirmed`; `exists` is its alias for one release). Anything else is "closing not confirmed", with the documents that could be it
+const finalOk = f => !!f && (f.confirmed !== undefined ? f.confirmed : f.exists);
+// A topic or a room may be closed (the office closes its room, the stage reads "Done") only when the judgment says it can: a confirmed final and nobody working, a room that is not an estimate
+const isClosable = tp => tp.closable !== undefined ? !!tp.closable : finalOk(tp.final);
+// A topic that is closable though its own final is not confirmed is closed by the final of its bundle (J16)
+const bundleClosed = tp => !tp.room && !finalOk(tp.final) && tp.closable === true;
+// The name of whoever wrote or fixed a file: an agent, or the orchestrator
+const whoName = id => id === 'orch' ? t('common.orchestrator.short') : agentName(id);
 // Tab row: items = [[key, text], …], cur = the key that is on, onPick(key)
 function tabBar(el, items, cur, onPick) {
   el.innerHTML = items.map(([k, n]) => `<button class="tab ${cur === k ? 'on' : ''}" data-k="${k}">${n}</button>`).join('');
@@ -201,31 +212,38 @@ function md(src) {
 // ---------- derived values ----------
 function currentDebate() {
   if (!S || !S.debates.length) return null;
-  return S.debates.find(d => d.root === ui.debate) || S.debates.find(d => d.current) || S.debates[0];
+  return S.debates.find(d => d.root === ui.debate) || S.debates.find(d => d.current) || null;          // an estimated room is never the current one: with no current debate none is opened for the user
 }
 function topicKey(tp) { const m = (tp.title || '').match(/^(T\d+)\s+(.*)$/); return m ? [m[1], m[2]] : ['', tp.title]; }
 const OPEN_CELLS = ['writing', 'draft', 'paused', 'unknown'];        // a cell of these states is a round that is not over: the agent is writing, has left a draft, was interrupted, or is not known
-// A topic with no round folders is a room (of cells, or of participants only) or a flat review (its cells carry no round): one result per seat, so it has one result column and no "next round" to wait for.
+// A topic with no round folders is a room (of cells, or of participants only): one result per seat, so it has one result column and no "next round" to wait for.
 // (game.js keeps its own copy of these two: the office does not load this file.)
-const noRounds = tp => !!tp.room || tp.kind === 'flat';
-const roundKeys = tp => tp.room === 'members' ? [] : tp.kind === 'flat' ? [null] : tp.room ? [1] : Array.from({ length: Math.max(2, ...tp.rounds) }, (_, i) => i + 1);      // a room has one round, a flat review one cell with no round, a debate at least two rounds
+const noRounds = tp => !!tp.room;
+const roundKeys = tp => tp.room === 'members' ? [] : tp.room ? [1] : Array.from({ length: Math.max(2, ...tp.rounds) }, (_, i) => i + 1);      // a room has one round, a debate at least two rounds
+const livePlaced = tp => (tp.placed || []).filter(p => p.live);              // the agents thought to work in a topic that hold no cell there
 function topicStage(tp) {
   const cells = tp.rows.flatMap(r => r.cells);
   const assigned = cells.filter(c => c.agent);
-  if (tp.final.exists) return { cls: 's-final', text: t('board.stage.final'), step: 'final' };
+  if (finalOk(tp.final)) return { cls: 's-final', text: t('board.stage.final'), step: 'final' };
+  if (bundleClosed(tp)) return { cls: 's-final', text: t('board.stage.bundleFinal'), step: 'final' };
   if (tp.room === 'members') {                       // a room of participants only: no cell and no round, so only whether they still talk
     const live = tp.rows.some(r => r.agents.some(id => isLive(agentById(id))));
     return { cls: live ? 's-active' : 's-ready', text: t(live ? 'board.stage.room.members' : 'board.stage.room.membersEnded', { count: tp.rows.length }), step: 'brief' };
   }
-  if (!assigned.length && !cells.some(c => c.state === 'done')) return { cls: 's-wait', text: tp.deps ? t('board.stage.waitDeps', { deps: tp.deps }) : t('board.stage.wait'), step: 'brief' };
-  if (noRounds(tp)) {                                // one result per seat: submitted, or still being written, or stopped; complete once every seat is in and nobody works
+  if (!assigned.length && !cells.some(c => c.state === 'done')) {
+    const est = livePlaced(tp).length;               // nobody holds a cell, but somebody is thought to work here: not pending, and not done either
+    if (est) return { cls: 's-active', text: t('board.stage.estimated', { count: est }), step: 'brief' };
+    return { cls: 's-wait', text: tp.deps ? t('board.stage.waitDeps', { deps: tp.deps }) : t('board.stage.wait'), step: 'brief' };
+  }
+  if (noRounds(tp)) {                                // one result per seat: submitted, or still being written, or stopped; "Done" only when the judgment closes it (a confirmed final, nobody working)
     const rc = tp.rows.map(row => row.cells[0]).filter(Boolean);
     const done = rc.filter(c => c.state === 'done').length, step = roundKeys(tp)[0];
     if (rc.some(c => OPEN_CELLS.includes(c.state))) return { cls: 's-active', text: t('board.stage.room.active', { done, total: rc.length }), step };
     if (!done) return { cls: 's-wait', text: t('board.stage.wait'), step: 'brief' };
     if (done < rc.length) return { cls: 's-ready', text: t('board.stage.room.partial', { done, total: rc.length }), step };
-    if (tp.rows.some(r => r.agents.some(id => isLive(agentById(id))))) return { cls: 's-ready', text: t('board.stage.room.ready', { total: rc.length }), step };
-    return { cls: 's-final', text: t('board.stage.complete'), step, doneThrough: step };
+    if (isClosable(tp)) return { cls: 's-final', text: t('board.stage.complete'), step, doneThrough: step };
+    if (tp.rows.some(r => r.agents.some(id => isLive(agentById(id)))) || livePlaced(tp).length) return { cls: 's-ready', text: t('board.stage.room.ready', { total: rc.length }), step };
+    return { cls: 's-ready', text: t('board.stage.room.unconfirmed', { total: rc.length }), step };        // everything is in and nobody works, but no document is confirmed as the end
   }
   const rounds = tp.rounds;
   let active = null;
@@ -365,6 +383,7 @@ function renderTokens() {
   });
   const T = tokSum([o, ...S.agents.map(a => a.tokens)]);
   const dAgents = d ? S.agents.filter(a => inDebate(a, d)) : [];
+  const dGuessed = d ? S.agents.filter(a => guessedIn(a, d)).length : 0;
   const D = tokSum(dAgents.map(a => a.tokens));
   const row = (name, sub, ctx, tk, cls = '') => `<tr class="${cls}"><td>${name}${sub ? ` <span class="sub">${sub}</span>` : ''}</td><td>${ctx}</td><td>${kfmt(tokIn(tk))}</td><td class="c-out">${kfmt(tk.output)}</td><td class="c-usd">${usd(tk.cost)}</td></tr>`;
   const rows = p => {
@@ -401,7 +420,7 @@ function renderTokens() {
       <i style="width:${pct(T.cost_read)}%;background:var(--blue)"></i><i style="width:${pct(T.cost_write)}%;background:var(--amber)"></i><i style="width:${pct(T.cost_input)}%;background:var(--purple)"></i><i style="width:${pct(T.cost_output)}%;background:var(--green)"></i></div>
     <div class="tok-foot">
       ${provs.map(foot).join('')}
-      ${d && dAgents.length ? `${t(isRoom(d) ? 'board.tok.room' : 'board.tok.debate', { name: esc(d.name), count: dAgents.length, input: `<b>${kfmt(tokIn(D))}</b>`, output: `<b>${kfmt(D.output)}</b>`, cost: `<b style="color:var(--green)">${usd(D.cost)}</b>` })}<br>` : ''}
+      ${d && dAgents.length ? `${t(isRoom(d) ? 'board.tok.room' : 'board.tok.debate', { name: esc(d.name), count: dAgents.length, input: `<b>${kfmt(tokIn(D))}</b>`, output: `<b>${kfmt(D.output)}</b>`, cost: `<b style="color:var(--green)">${usd(D.cost)}</b>` })}${dGuessed ? ` <span class="faint">${t('board.tok.guessed', { count: dGuessed })}</span>` : ''}<br>` : ''}
       ${t(mixed ? 'board.tok.breakdownTotal' : 'board.tok.breakdown', { sr: '<span style="color:var(--blue)">■</span>', read: `<b>${usd(T.cost_read)}</b>`, sw: '<span style="color:var(--amber)">■</span>', write: `<b>${usd(T.cost_write)}</b>`,
         si: '<span style="color:var(--purple)">■</span>', input: `<b>${usd(T.cost_input)}</b>`, so: '<span style="color:var(--green)">■</span>', output: `<b>${usd(T.cost_output)}</b>` })}${T.adv_cost ? ' ' + t('board.tok.advIncl', { cost: usd(T.adv_cost) }) : ''}<br>
       <span class="faint">${t('board.tok.note')}${T.unpriced ? ' · ' + (G.calls ? `<span title="${t('board.tok.unpriced.title', { calls: G.calls, input: kfmt(G.input), output: kfmt(G.output) })}">${t('board.tok.unpriced', { count: T.unpriced })}</span>` : t('board.tok.unpriced', { count: T.unpriced })) : ''}</span>
@@ -419,7 +438,7 @@ function renderSummary() {
     if (st.cls === 's-active') {
       const r = st.step;
       const parts = tp.rows.map(row => { const c = row.cells.find(c => c.round === r); return c ? [row, c] : null; }).filter(Boolean);
-      const w = parts.filter(([, c]) => c.state !== 'done').map(([row, c]) => `${row.p}${c.state === 'draft' ? '(' + t('board.sum.draft', { count: c.lines }) + ')' : c.state === 'writing' ? '(' + t('board.sum.writing') + ')' : c.state === 'paused' ? '(' + t('board.sum.paused') + ')' : c.state === 'missing' ? '(' + t('board.sum.missing') + ')' : ''}`);
+      const w = parts.filter(([, c]) => c.state !== 'done').map(([row, c]) => `${row.p}${c.state === 'draft' ? '(' + t('board.sum.draft', { count: c.lines }) + ')' : c.state === 'writing' ? '(' + t('board.sum.writing') + ')' : c.state === 'paused' ? '(' + t('board.sum.paused') + ')' : c.state === 'missing' ? '(' + t('board.sum.missing') + ')' : c.state === 'previous' ? '(' + t('board.sum.previous') + ')' : ''}`);
       if (w.length) detail = ' — ' + t('board.sum.remaining', { list: w.join(', ') });
     }
     items.push(`<li><span class="k">${esc(k || '·')}</span><span><b>${esc(name)}</b> · ${esc(st.text)}${esc(detail)}</span></li>`);
@@ -434,46 +453,121 @@ function renderDebates() {
   // At most 8 tabs. A debate with a Codex participant shows even past that (a session with only Claude is unchanged)
   const cxDebate = x => x.topics.some(tp => tp.rows.some(r => r.agents.some(id => isCx(agentById(id)))));
   tabs.innerHTML = S.debates.filter((x, i) => i < 8 || cxDebate(x)).map(x =>
-    `<button class="tab ${d && x.root === d.root ? 'on' : ''}" data-root="${esc(x.root)}"${x.copies ? ` title="${esc(t('board.debate.copies', { count: x.copies }))}"` : ''}>${esc(x.name)}${x.current ? `<span class="cur">${t('board.debate.current')}</span>` : ''}</button>`).join('');
+    `<button class="tab ${d && x.root === d.root ? 'on' : ''}" data-root="${esc(x.root)}"${x.copies ? ` title="${esc(t('board.debate.copies', { count: x.copies }))}"` : ''}>${esc(x.name)}${x.current ? `<span class="cur">${t('board.debate.current')}</span>` : ''}${x.sure === false ? `<span class="est" title="${esc(t('board.room.est.title.launch'))}">${t('board.room.est')}</span>` : ''}</button>`).join('');
   tabs.querySelectorAll('.tab').forEach(b => b.onclick = () => { ui.debate = b.dataset.root; store.set('debate', ui.debate); renderAll(); loadTimeline(); });
-  if (!d) { $('#topics').innerHTML = `<div class="card empty">${soloNow() ? t('board.debate.solo') : t('board.debate.none')}</div>` + renderOther(null); $('#debateMeta').innerHTML = ''; bindTopics(); return; }
+  if (!d) { $('#topics').innerHTML = `<div class="card empty">${soloNow() ? t('board.debate.solo') : S.debates.length ? t('board.debate.pick') : t('board.debate.none')}</div>` + renderOther(null); $('#debateMeta').innerHTML = ''; bindTopics(); return; }
   $('#debateMeta').innerHTML = `<span title="${esc(d.root + (d.copies ? ' — ' + t('board.debate.copies', { count: d.copies }) : ''))}">${esc(d.title)}</span><span class="faint mono">${esc(d.short)}</span>` +
-    (d.finals.length ? d.finals.map(f => `<span class="chip fchip" data-path="${esc(f.path)}">${t('board.debate.final', { name: esc(f.name), lines: `<span class="faint">${t('unit.line', { count: f.lines })}</span>` })}</span>`).join('') : '');
+    (d.sure === false ? `<span class="guess" title="${esc(t('board.room.est.title.launch'))}">${t('board.room.est')}</span>` : '') +
+    (d.finals.length ? d.finals.map(f => `<span class="chip fchip" data-path="${esc(f.path)}">${t('board.debate.final', { name: esc(f.name), lines: `<span class="faint">${t('unit.line', { count: f.lines })}</span>` })}</span>`).join('') : '') +
+    (d.final && (finalOk(d.final) || (d.final.why || []).length && !d.final.why.includes('no_report')) ? `<span class="bundle-final">${t('board.debate.bundleFinal')} ${finalHtml(d.final)}</span>` : '');
   $('#debateMeta').querySelectorAll('[data-path]').forEach(e => e.onclick = () => openFile(e.dataset.path));
-  $('#topics').innerHTML = d.topics.map(renderTopic).join('') + renderOther(d);
+  const rootPlaced = placedHtml(withoutWriters(d.placed, d, null));          // the agents thought to work in the bundle as a whole (no one topic): one line above its topics
+  $('#topics').innerHTML = (rootPlaced ? `<div class="card topic root-placed">${rootPlaced}</div>` : '') + d.topics.map(tp => renderTopic(tp, d)).join('') + renderOther(d);
   bindTopics();
 }
 function bindTopics() {
   $('#topics').querySelectorAll('[data-path]').forEach(e => e.onclick = ev => { ev.stopPropagation(); openFile(e.dataset.path); });
   $('#topics').querySelectorAll('[data-agent]').forEach(e => e.onclick = ev => { ev.stopPropagation(); openDrawer(e.dataset.agent); });
 }
-// Other work: agents that are working but sit in no cell of this debate (same rule as the "Other work" room in the office)
+// The agents of this debate that hold no cell but are thought to work in it (the lines under its topics and above them: `placed`), by id
+function placedIds(d) {
+  const ids = new Set((d && d.placed || []).map(p => p.agent));
+  (d ? d.topics : []).forEach(tp => (tp.placed || []).forEach(p => ids.add(p.agent)));
+  return ids;
+}
+// Other work: agents that are working but sit in no cell of this debate and are not thought to work in it either (same rule as the "Other work" room in the office); the ones that were launched together are one group
 function renderOther(d) {
-  const seated = new Set();
+  const seated = placedIds(d);
   (d ? d.topics : []).forEach(tp => tp.rows.forEach(r => r.agents.length && seated.add(r.agents[r.agents.length - 1])));
   const list = S.agents.filter(a => isLive(a) && !seated.has(a.id))
     .sort((a, b) => (a.spawn_ts || 0) - (b.spawn_ts || 0));
   if (!list.length) return '';
-  const rows = list.map(a => {
+  const row = a => {
     const live = a.status === 'running' && now() - (a.last_ts || 0) < 45;
     const lt = a.last_tool;
     return `<tr><td><div class="who"><span class="plet">${esc(a.tag || '·')}</span><div style="min-width:0"><div class="role" title="${esc(a.description)}">${esc(a.title)}</div>` +
       `<div class="ag" data-agent="${esc(a.id)}"><span class="dot ${a.status} ${live ? 'active' : ''}${cxCls(a)}"></span><span class="t">${esc(stateLabel(a))} · ${ago(a.last_ts)} · ${t('board.elapsed', { dur: dur(now() - (a.spawn_ts || a.first_ts || now())) })}</span></div>` + provLine(a) +
       (lt ? `<div class="now-line" title="${esc(lt.text)}">${esc(lt.name)} ${esc(lt.text)}</div>` : '') + `</div></div></td></tr>`;
-  }).join('');
+  };
+  const groups = [], at = new Map();                                    // the agents launched together (the same `launch`) stand together, at the place of the first of them; the rest stand alone
+  list.forEach(a => {
+    if (a.launch && at.has(a.launch)) { at.get(a.launch).push(a); return; }
+    const g = [a]; groups.push(g);
+    if (a.launch) at.set(a.launch, g);
+  });
+  const rows = groups.map(g => (g.length > 1 ? `<tr class="grp"><td>${t('board.work.together', { count: g.length })}</td></tr>` : '') + g.map(row).join('')).join('');
   return `<div class="card topic active">
     <div class="topic-head"><span class="tkey">${t('board.work.key')}</span><h3>${t('board.work.title')}</h3><span class="stage s-active">${t('board.work.count', { count: list.length })}</span></div>
     <table class="mx"><thead><tr><th>${t('board.work.th')}</th></tr></thead><tbody>${rows}</tbody></table>
   </div>`;
 }
-function renderTopic(tp) {
-  const [k, name] = topicKey(tp), st = topicStage(tp), rounds = roundKeys(tp);
+// ---------- the agents thought to work in a topic (no cell), the end of a topic ----------
+const PLACED_ORDER = ['tag', 'launch_call', 'launch_peer', 'guide_read'];
+const placedWhy = why => I18N.has('board.placed.why.' + why) ? t('board.placed.why.' + why) : why;
+function placedChip(p) {
+  const a = agentById(p.agent), name = a ? agentName(p.agent) : String(p.agent || '').slice(0, 6);
+  const live = !a ? '' : p.live ? ` <span class="faint">${t('board.elapsed', { dur: dur(now() - (a.spawn_ts || a.first_ts || now())) })}</span>` : ` <span class="faint">${esc(stateLabel(a))}</span>`;       // working: for how long; over: how it ended (done, interrupted …)
+  return `<span class="who-b agent" data-agent="${esc(p.agent)}" title="${esc(t('board.placed.title', { whys: (p.whys && p.whys.length ? p.whys : [p.why]).map(placedWhy).join(', ') }))}">${cxMark(a)}${esc(name)}</span>${live}`;
+}
+// "Working · estimated (launched together)" for the agents that hold no cell but are thought to work here, one line for each reason (a room tag is a fact, so it says no "estimated"), and a grey "Ended · no file" line for those that are over
+function placedHtml(items) {
+  if (!items || !items.length) return '';
+  const whys = PLACED_ORDER.concat([...new Set(items.map(p => p.why))].filter(w => !PLACED_ORDER.includes(w)));
+  const lines = whys.map(why => {
+    const ps = items.filter(p => p.live && p.why === why);
+    return ps.length ? `<div class="placed${why === 'tag' ? ' sure' : ''}"><span class="pl-key">${t(why === 'tag' ? 'board.placed.working.tag' : 'board.placed.working', { why: placedWhy(why) })}</span> ${ps.map(placedChip).join(' ')}</div>` : '';
+  });
+  const gone = items.filter(p => !p.live);
+  if (gone.length) lines.push(`<div class="placed ended"><span class="pl-key">${t('board.placed.ended')}</span> ${gone.map(placedChip).join(' ')}</div>`);
+  return lines.join('');
+}
+const FINAL_CANDIDATES = 5;
+// The end of a topic, a room or a bundle: the confirmed final (open it), or "closing not confirmed" with the reasons and the documents that could be it. `table`: the file the brief table names, as
+// { rel, file } (`file`: the document of the bundle's final/ folder that is that file, when there is one). The table is read for display only: it settles nothing
+function finalHtml(f, table) {
+  if (!f) return '';
+  const named = table ? ' ' + t('board.foot.table', { rel: `<span class="mono">${esc(table.rel)}</span>`, state: table.file ? `<span class="chip fchip" data-path="${esc(table.file.path)}">${t('board.foot.open', { count: table.file.lines })}</span>` : `<span class="faint">${t('board.foot.none')}</span>` }) : '';
+  if (finalOk(f)) return (f.rel ? t('board.foot.final', { rel: `<span class="mono">${esc(f.rel)}</span>`, state: `<span class="chip fchip" data-path="${esc(f.path)}">${t('board.foot.open', { count: f.lines })}</span>` }) : '')
+    + (f.by ? ` <span class="faint">${t('board.foot.by', { name: esc(whoName(f.by)) })}</span>` : '') + named;
+  const why = f.why || [];
+  if (!why.length || why.includes('no_report')) return named.trim();                                    // nothing was handed in: there is nothing to close
+  const reasons = why.map(w => I18N.has('board.final.why.' + w) ? t('board.final.why.' + w) : w);
+  const cands = f.candidates || [];
+  return `<span class="chip unconf" title="${esc(reasons.join(' · '))}">${t('board.final.unconfirmed')}</span> <span class="faint">${esc(reasons.join(' · '))}</span>`
+    + (cands.length ? ` <span class="faint">${t('board.final.candidates')}</span> ` + cands.slice(0, FINAL_CANDIDATES).map(c => `<span class="chip fchip" data-path="${esc(c.path)}" title="${esc(c.rel)}">${t('board.final.candidate', { name: esc(c.rel.replace(/^final\//, '')), lines: `<span class="faint">${t('unit.line', { count: c.lines })}</span>` })}</span>`).join(' ')
+      + (cands.length > FINAL_CANDIDATES ? ` <span class="faint">${t('board.final.more', { count: cands.length - FINAL_CANDIDATES })}</span>` : '') : '')
+    + named;
+}
+// How the owner's first write of a cell was seen (a tool, the shell, a request to save, a room tag): a small badge at the end of the state line
+const evBadge = c => c.evidence && I18N.has('board.cell.ev.' + c.evidence) ? `<span class="cev" title="${esc(t('board.cell.ev.' + c.evidence + '.title'))}">${t('board.cell.ev.' + c.evidence)}</span>` : '';
+// What a cell tells besides its state: who owns it when that is not the agent of the row, who fixed it, and a guess from the time (marked as one)
+function cellMeta(c, agentId) {
+  const out = [];
+  if (c.owner && c.owner !== agentId) out.push(t('board.cell.owner', { name: esc(whoName(c.owner)) }));
+  if (c.editors && c.editors.length) out.push(t('board.cell.editors', { names: c.editors.map(id => esc(whoName(id))).join('·') }));
+  if (c.hint && c.hint.agent) out.push(`<span class="guess" title="${esc(t('board.cell.hint.title'))}">${t('board.link.guess')}</span> ${t('board.cell.hint', { name: esc(whoName(c.hint.agent)) })}`);
+  return out.length ? `<div class="sub meta">${out.join(' · ')}</div>` : '';
+}
+// The agents that wrote a confirmed final (of the topic, or of the bundle) are not "working · estimated" or "ended · no file": what they did is the end of the topic
+function withoutWriters(items, d, tp) {
+  const by = new Set([tp && tp.final, d && d.final].filter(finalOk).map(f => f.by).filter(Boolean));
+  (d && !tp ? d.topics : []).forEach(x => { if (finalOk(x.final) && x.final.by) by.add(x.final.by); });
+  return (items || []).filter(p => !by.has(p.agent));
+}
+const shortLetter = text => { const c = Array.from(text || ''); return c.length <= 3 ? c.join('') : c[0].toUpperCase(); };
+function renderTopic(tp, d) {
+  const [k, name] = topicKey(tp), st = topicStage(tp);
+  const fin = finalOk(tp.final), byBundle = bundleClosed(tp) && d && finalOk(d.final) ? d.final : null, closed = fin || isClosable(tp);
+  // A topic that is closed shows no round in which nobody wrote anything (a column of "Pending" beside a final is no wait); one with nothing at all keeps its columns
+  let rounds = roundKeys(tp);
+  if (closed && !noRounds(tp)) { const used = rounds.filter(r => tp.rows.some(row => { const c = row.cells.find(c => c.round === r); return c && c.state !== 'waiting'; })); if (used.length) rounds = used; }
   // Step marks: brief → round 1 → round 2 … → final
   const roundDone = r => tp.rows.length && tp.rows.every(row => (row.cells.find(c => c.round === r) || {}).state === 'done');
   const roundName = r => noRounds(tp) ? t('board.room.col') : t('board.round', { n: r });
+  const finRel = fin ? tp.final.rel : byBundle ? byBundle.rel : null;
   const steps = [{ n: t('board.step.brief'), s: tp.brief ? 'done' : '' }]
     .concat(rounds.map(r => ({ n: roundName(r), s: roundDone(r) ? 'done' : st.step === r ? 'active' : '' })))
-    .concat([{ n: tp.final.rel ? t('board.step.finalNamed', { name: tp.final.rel.replace(/^final\//, '') }) : t('board.step.final'), s: tp.final.exists ? 'done' : '' }]);
+    .concat([{ n: finRel ? t('board.step.finalNamed', { name: finRel.replace(/^final\//, '') }) : t('board.step.final'), s: fin || byBundle || bundleClosed(tp) ? 'done' : '' }]);
   const stepper = steps.map((s, i) => (i ? `<span class="bar ${s.s === 'done' || (s.s === 'active' && steps[i - 1].s === 'done') ? 'done' : ''}"></span>` : '') +
     `<span class="step ${s.s}"><span class="b">${s.s === 'done' ? '✓' : i === 0 ? '·' : i === steps.length - 1 ? '★' : i}</span>${esc(s.n)}</span>`).join('');
   const rows = tp.rows.map(row => {
@@ -484,30 +578,38 @@ function renderTopic(tp) {
       : `<div class="ag"><span class="t faint">${t('board.row.unassigned')}</span></div>`;
     const cells = rounds.map(r => {
       const c = row.cells.find(c => c.round === r);
-      if (!c) return `<td><div class="cell c-waiting"><div class="st">${t('board.cell.pending')}</div></div></td>`;
+      if (!c || (closed && c.state === 'waiting' && !c.agent && !c.previous)) return closed ? `<td><div class="cell c-none" title="${esc(t('board.cell.none.title'))}"><div class="st">—</div></div></td>` : `<td><div class="cell c-waiting"><div class="st">${t('board.cell.pending')}</div></div></td>`;
       const rd = c.readers.length ? `<div class="sub">${t('board.cell.readBy', { names: c.readers.map(esc).join('·') })}</div>` : '';
-      const p = `data-path="${esc(c.path)}"`;
-      if (c.state === 'done') return `<td><div class="cell c-done" ${p} title="${esc(c.path)}"><div class="st">${t('board.cell.done')}</div><div class="sub">${t('unit.line', { count: c.lines })} · ${hm(c.mtime)}</div>${rd}</div></td>`;
+      const meta = cellMeta(c, a && a.id), ev = evBadge(c), openable = c.previous && c.lines != null;
+      const prev = c.previous && c.state !== 'previous' ? `<div class="sub prev">${t('board.cell.prevFile', { count: c.lines, time: hm(c.mtime) })}</div>` : '';      // a file from before this run, kept for what it is
+      const p = c.state === 'draft' || c.state === 'done' || c.state === 'previous' || openable ? `data-path="${esc(c.path)}"` : '';
+      if (c.state === 'done') return `<td><div class="cell c-done" ${p} title="${esc(c.path)}"><div class="st">${t('board.cell.done')}</div><div class="sub l">${t('unit.line', { count: c.lines })} · ${hm(c.mtime)}${ev}</div>${meta}${rd}</div></td>`;
+      if (c.state === 'previous') return `<td><div class="cell c-previous" ${p} title="${esc(c.path)}"><div class="st">${t('board.cell.previous')}</div><div class="sub l">${t('unit.line', { count: c.lines })} · ${hm(c.mtime)}${ev}</div>${meta}${rd}</div></td>`;
       const ca = (c.agent && agentById(c.agent)) || a, held = !!(ca && isHeld(ca));      // the agent of the cell is stopped or not known: nothing is being typed
-      if (c.state === 'draft' && held) return `<td><div class="cell c-draft c-held" ${p} title="${t('board.cell.draftHeld.title.' + ca.status)}"><div class="st">${t('board.cell.draftHeld', { state: statusLabel(ca.status) })}</div><div class="sub">${t('unit.line', { count: c.lines })} · ${ago(c.mtime)}</div>${rd}</div></td>`;
-      if (c.state === 'draft') return `<td><div class="cell c-draft" ${p} title="${t('board.cell.draft.title')}"><div class="st">${t('board.cell.draft')} <span class="typing"><i></i><i></i><i></i></span></div><div class="sub">${t('unit.line', { count: c.lines })} · ${ago(c.mtime)}</div>${rd}</div></td>`;
-      if (c.state === 'writing') return `<td><div class="cell c-writing"><div class="st">${t('board.cell.writing')}${held ? '' : ' <span class="typing"><i></i><i></i><i></i></span>'}</div><div class="sub">${c.planned ? t('board.cell.willSave') : t('board.cell.noFile')}</div></div></td>`;
-      if (c.state === 'paused') return `<td><div class="cell c-paused" title="${t('board.cell.paused.title')}"><div class="st">${t('board.cell.paused')}</div><div class="sub">${t('board.cell.paused.sub')}</div></div></td>`;
-      if (c.state === 'missing') return `<td><div class="cell c-missing"><div class="st">${t('board.cell.missing')}</div><div class="sub">${t('board.cell.agentEnded')}</div></div></td>`;
-      return `<td><div class="cell c-waiting"><div class="st">${t('board.cell.pending')}</div></div></td>`;
+      if (c.state === 'draft' && held) return `<td><div class="cell c-draft c-held" ${p} title="${t('board.cell.draftHeld.title.' + ca.status)}"><div class="st">${t('board.cell.draftHeld', { state: statusLabel(ca.status) })}</div><div class="sub l">${t('unit.line', { count: c.lines })} · ${ago(c.mtime)}${ev}</div>${meta}${rd}</div></td>`;
+      if (c.state === 'draft') return `<td><div class="cell c-draft" ${p} title="${t('board.cell.draft.title')}"><div class="st">${t('board.cell.draft')} <span class="typing"><i></i><i></i><i></i></span></div><div class="sub l">${t('unit.line', { count: c.lines })} · ${ago(c.mtime)}${ev}</div>${meta}${rd}</div></td>`;
+      if (c.state === 'writing') return `<td><div class="cell c-writing" ${p}><div class="st">${t('board.cell.writing')}${held ? '' : ' <span class="typing"><i></i><i></i><i></i></span>'}</div><div class="sub l">${c.planned ? t('board.cell.willSave') : t('board.cell.noFile')}${ev}</div>${prev}${meta}</div></td>`;
+      if (c.state === 'paused') return `<td><div class="cell c-paused" ${p} title="${t('board.cell.paused.title')}"><div class="st">${t('board.cell.paused')}</div><div class="sub l">${t('board.cell.paused.sub')}${ev}</div>${prev}${meta}</div></td>`;
+      if (c.state === 'missing') return `<td><div class="cell c-missing" ${p}><div class="st">${t('board.cell.missing')}</div><div class="sub l">${t('board.cell.agentEnded')}${ev}</div>${prev}${meta}</div></td>`;
+      return `<td><div class="cell c-waiting"><div class="st">${t('board.cell.pending')}</div>${ev ? `<div class="sub l">${ev}</div>` : ''}${meta}</div></td>`;
     }).join('');
-    return `<tr><td><div class="who"><span class="plet">${esc(row.p)}</span><div style="min-width:0"><div class="role">${esc(row.role || row.p)}</div>${agentLine}</div></div></td>${cells}</tr>`;
+    const file = row.cells.length ? row.p + '.md' : '';                  // a row is a file: its name is the file's name (no role is read from a text)
+    return `<tr><td><div class="who"><span class="plet">${esc(shortLetter(row.p))}</span><div style="min-width:0"><div class="role"${file ? ` title="${esc(file)}"` : ''}>${esc(file || row.p)}</div>${agentLine}</div></div></td>${cells}</tr>`;
   }).join('');
   const w = rounds.length > 2 ? '40%' : '46%';
+  const tp0 = tp.final && tp.final.table_path;
+  const table = tp0 && d && tp0.startsWith(d.root + '/') ? { rel: tp0.slice(d.root.length + 1), file: (d.finals || []).find(f => f.path === tp0) || null } : null;       // what the brief table names as the final
   const foot = [
-    tp.final.rel ? t('board.foot.final', { rel: `<span class="mono">${esc(tp.final.rel)}</span>`, state: tp.final.exists ? `<span class="chip fchip" data-path="${esc(tp.final.path)}">${t('board.foot.open', { count: tp.final.lines })}</span>` : `<span class="faint">${t('board.foot.none')}</span>` }) : '',
+    byBundle ? t('board.foot.bundle', { rel: `<span class="mono">${esc(byBundle.rel)}</span>`, state: `<span class="chip fchip" data-path="${esc(byBundle.path)}">${t('board.foot.open', { count: byBundle.lines })}</span>` }) : bundleClosed(tp) ? t('board.stage.bundleFinal') : finalHtml(tp.final, table),
     tp.deps ? t('board.foot.after', { deps: esc(tp.deps) }) : '',
   ].filter(Boolean).join(' · ') + (tp.docs || []).map(f => ` <span class="chip fchip" data-path="${esc(f.path)}">${t(f.name === 'brief.md' || f.path === tp.guide ? 'board.foot.brief' : 'board.foot.doc', { name: esc(f.name) })}</span>`).join('');
+  const room = tp.room ? (tp.room_sure === false ? `<span class="guess" title="${esc(t('board.room.est.title.' + (tp.room_why || 'launch')))}">${t('board.room.est')}</span>` : tp.room_why === 'tag' ? `<span class="chip sure" title="${esc(t('board.room.tag.title'))}">${t('board.room.tag')}</span>` : '') : '';
   return `<div class="card topic ${st.cls === 's-wait' ? 'idle' : st.cls === 's-active' ? 'active' : ''}">
-    <div class="topic-head">${k ? `<span class="tkey">${esc(k)}</span>` : tp.room ? `<span class="tkey">${t('board.room.key')}</span>` : ''}<h3 title="${esc(tp.dir)}">${esc(name)}</h3><span class="stage ${st.cls}">${esc(st.text)}</span></div>
+    <div class="topic-head">${k ? `<span class="tkey">${esc(k)}</span>` : tp.room ? `<span class="tkey">${t('board.room.key')}</span>` : ''}<h3 title="${esc(tp.dir)}">${esc(name)}</h3>${room}<span class="stage ${st.cls}">${esc(st.text)}</span></div>
     ${tp.room === 'members' ? '' : `<div class="stepper">${stepper}</div>`}
     <table class="mx"><colgroup><col style="width:${w}">${rounds.map(() => '<col>').join('')}</colgroup>
       <thead><tr><th>${t('board.topic.th.agent')}</th>${rounds.map(r => `<th>${esc(roundName(r))}</th>`).join('')}</tr></thead><tbody>${rows}</tbody></table>
+    ${placedHtml(withoutWriters(tp.placed, d, tp))}
     ${foot ? `<div class="topic-foot">${foot}</div>` : ''}
   </div>`;
 }
@@ -895,7 +997,11 @@ function linkText(D, a) {                    // A Codex agent or a `claude -p` r
 // Where an agent hangs (launched by …) and how many runs its record holds with who handed over the last one
 function lineageText(a) {
   const runs = a.runs && a.runs.length > 1 ? `<span>${t('board.drawer.runs', { count: a.runs.length })}${a.by ? ' · ' + t('board.drawer.run.by', { who: esc(byName(a.by)) }) : ''}</span>` : '';
-  return (a.parent ? `<span>${t('board.agents.launchedBy', { name: esc(agentName(a.parent)) })}</span>` : '') + runs;
+  const base = p => String(p || '').split('/').filter(Boolean).pop() || '';
+  const together = a.launch && S ? S.agents.filter(x => x.id !== a.id && x.launch === a.launch).length : 0;                  // the ones started by the same call
+  const placed = a.placed ? `<span title="${esc(t('board.placed.title', { whys: (a.placed.whys && a.placed.whys.length ? a.placed.whys : [a.placed.why]).map(placedWhy).join(', ') }))}">${t(a.placed.sure ? 'board.drawer.placed.sure' : 'board.drawer.placed', { unit: esc(base(a.placed.topic || a.placed.unit)), why: esc(placedWhy(a.placed.why)) })}</span>` : '';
+  const tag = a.room_tag ? `<span>${t(a.room_tag.seat ? 'board.drawer.roomTag.seat' : 'board.drawer.roomTag', { room: esc(a.room_tag.room), seat: esc(a.room_tag.seat || '') })}</span>` : '';
+  return (a.parent ? `<span>${t('board.agents.launchedBy', { name: esc(agentName(a.parent)) })}</span>` : '') + runs + (together ? `<span>${t('board.drawer.together', { count: together })}</span>` : '') + placed + tag;
 }
 function renderDrawer() {
   const a = agentById(ui.drawer), D = DETAIL;

@@ -1,5 +1,6 @@
 """What the page reads: builds the current picture of a session (Session) in the shape the API returns — state, alerts, agent detail, timeline, and the files that may be opened."""
 
+import contextlib
 import glob
 import os
 import re
@@ -7,7 +8,7 @@ import time
 from bisect import bisect_left, bisect_right
 from datetime import datetime
 
-from . import diag, runstate as RS
+from . import diag, runstate as RS, units as U
 from .util import BOOT, HOME, denied_file, hidden_or_secret, short_path, trunc, write_made
 from .codex_index import CODEX
 from .link import LINKS, certain, link_brief
@@ -130,6 +131,27 @@ def link_of(s, a):
     return out
 
 
+def room_tag_of(a):
+    """The room tag of an agent (BULLPEN_ROOM and BULLPEN_SEAT, 2.4) as the page gets it: {room: short path, seat} or None. It is `room_tag`, not `tag`: `tag` is the letter the screen names the agent by."""
+    t = getattr(a, 'room_tag', None)
+    return {'room': short_path(t.room), 'seat': t.seat} if t else None
+
+
+WRITE_EVENTS_MAX = 500           # the write events /api/agent lists: the latest ones
+
+
+def write_events_of(a):
+    """The write events of an agent as /api/agent lists them (failed, unknown and unchecked ones too): {ts, path, short, kind, evidence, ok, proof, sure}. `sure` is J1: the result says it worked
+    and the tool or the exit status decides it, or (a checked proof) the file named was saved in the time the command ran, which is asked of the disk now, as the judgment asks it."""
+    ev = getattr(a, 'ev', None)
+    with (ev.lock if ev is not None else contextlib.nullcontext()):
+        events = sorted(getattr(a, 'write_events', ()), key=lambda w: w.ts)[-WRITE_EVENTS_MAX:]
+    cat = U.Catalog()
+    cat.begin()
+    judge = U._Judge(U.SessionFacts(agents=[]), cat)
+    return [{'ts': w.ts, 'path': w.path, 'short': short_path(w.path), 'kind': w.kind, 'evidence': w.evidence, 'ok': w.ok, 'proof': w.proof, 'sure': bool(judge.sure(w))} for w in events]
+
+
 def _with_orch_diag(entries, ov):
     """The diagnostics of the orchestrator's own judgment (OrchVerdict.diag: `proc_unknown` when its process cannot be told) added to the list as entries of the orchestrator,
     once per code, in the order and under the cap diag.collect keeps."""
@@ -179,7 +201,8 @@ def state(s):
                 'pending': min(a.pending.values(), key=lambda p: p['ts'] or now) if a.pending and
                 statuses[a.id] in ('running', 'stalled') else None,
                 'handbacks': len(a.handbacks), 'received': len(a.received) + len(a.orch_msgs),
-                'units': sorted(seated.get(a.id, [])), 'work_units': sorted(jd.agent_units.get(a.id, [])),
+                'units': sorted(seated.get(a.id, [])), 'work_units': sorted(jd.members.get(a.id, [])),
+                'placed': jd.placed.get(a.id), 'launch': jd.launch.get(a.id), 'room_tag': room_tag_of(a),
                 'notification': a.notifications[-1] if a.notifications else None,
                 'provider': a.provider, 'origin': a.origin, 'link': link_of(s, a),
                 'by': by_of(a), 'parent': None if s.launcher_of(a) == 'orch' else s.launcher_of(a), 'runs': runs_of(a),
@@ -354,7 +377,14 @@ def agent_detail(s, aid):
                             key=lambda x: -(x['ts'] or 0))[:80],
             'tool_counts': a.tool_counts.most_common(), 'ticks': ticks,
             'provider': a.provider,
+            'write_events': write_events_of(a), 'run': getattr(a, 'run', None), 'room_tag': room_tag_of(a), 'placed': None, 'launch': None,
         }
+        verdicts = getattr(s, '_verdicts', None)
+        if verdicts:                                   # where the agent is thought to work and the call that launched it: from the judgment the page's state is made of, the one it made last (this request
+            statuses = {k: v.status for k, v in verdicts.items()}                   # asks nothing new of the disk: the page polls every few seconds and the next state() looks again)
+            last = getattr(s, 'last_judged', None)
+            jd = (last(statuses) if last is not None else None) or s.judged(statuses)
+            d['placed'], d['launch'] = jd.placed.get(aid), jd.launch.get(aid)
         if a.provider == 'codex':
             d['link'] = dict(a.link, certain=certain((a.link or {}).get('rule'))) if a.link else a.link
             d['turns'] = [{k: t[k] for k in ('start', 'end', 'status', 'error', 'bash_ts', 'out', 'out_state')}

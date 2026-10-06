@@ -684,8 +684,8 @@ class Aff:
             self.L.bash(tc, "echo 'Run: codex exec \"%s\"'" % text, tid, end=tc + 0.2, desc='note the command')
 
 
-def codex_rollout(b, tid, t, cwd, user, originator, parent=None, complete=True, error=None, model='gpt-6.1-sol', extra=None):
-    """One Codex rollout file: session_meta, task_started, the user message, an answer, and (when finished) task_complete."""
+def codex_rollout(b, tid, t, cwd, user, originator, parent=None, complete=True, error=None, model='gpt-6.1-sol', extra=None, final=None):
+    """One Codex rollout file: session_meta, task_started, the user message, an answer (`final`, 'Finished.' by default), and (when finished) task_complete."""
     d = os.path.join(b.codex, 'sessions', '2026', '10', '01')
     os.makedirs(d, exist_ok=True)
     path = os.path.join(d, 'rollout-2026-10-01T00-00-00-%s.jsonl' % tid)
@@ -701,8 +701,8 @@ def codex_rollout(b, tid, t, cwd, user, originator, parent=None, complete=True, 
         rows.append((t + dt, {'timestamp': iso(t + dt), 'type': 'event_msg', 'payload': payload}))
     if complete:
         rows.append((t + 6, {'timestamp': iso(t + 6), 'type': 'response_item',
-                             'payload': {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': 'Finished.'}]}}))
-        done = {'type': 'task_complete', 'last_agent_message': 'Finished.'}
+                             'payload': {'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': final or 'Finished.'}]}}))
+        done = {'type': 'task_complete', 'last_agent_message': final or 'Finished.'}
         if error:
             done['error'] = error
         rows.append((t + 7, {'timestamp': iso(t + 7), 'type': 'event_msg', 'payload': done}))

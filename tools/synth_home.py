@@ -275,6 +275,14 @@ Read A and B round 1. No new objections.
 Ask for T2-B: please check clock-skew handling when the budget is measured with `time.time()`; I used `time.monotonic()`.
 ''',
 }
+REPORTS[('t2_retry', 2, 'B')] = '''# T2-B · round 2 — Failure modes (draft)
+
+**Accepted:** jitter, if the random source is injectable (A's `rng=` argument).
+
+**Still contested:** the 15 s total budget has to be measured with `time.monotonic()`; `time.time()` jumps when the clock is corrected.
+
+- Open: what the loader does when the budget runs out (fail start-up, or start with the last cached config).
+'''
 FINAL_MSG = {
     ('t1_env', 1, 'A'): 'Round 1 written to r1/A.md. Position: keep flat names, nesting only through an explicit separator; accept both for one release.',
     ('t1_env', 1, 'B'): 'Round 1 written to r1/B.md. Position: nested `ACME_<SECTION>__<KEY>`, prefix mandatory, one release of overlap at most.',
@@ -353,6 +361,14 @@ class Synth:
         msg = {'id': 'msg_' + hx(key, str(k), n=24), 'model': model, 'role': 'assistant', 'content': content, 'stop_reason': stop, 'usage': self.usage(k)}
         log.add(t, self.line(t, 'assistant', cwd, sid, effort=effort, message=msg, **kw))
 
+    def assistant_blocks(self, log, t, k, key, cwd, sid, model, blocks, stop=None, effort='high', **kw):
+        """One assistant message of several content blocks (calls made at the same time), written the way Claude Code writes it: a line for each block, all of them with the id of the message.
+        Whatever is launched by calls of one message is launched together."""
+        mid = 'msg_' + hx(key, str(k), n=24)
+        for i, block in enumerate(blocks):
+            msg = {'id': mid, 'model': model, 'role': 'assistant', 'content': [block], 'stop_reason': stop if i == len(blocks) - 1 else None, 'usage': self.usage(k)}
+            log.add(t, self.line(t, 'assistant', cwd, sid, effort=effort, message=msg, **kw))
+
     def result(self, log, t, cwd, sid, tool_id, text, **kw):
         log.add(t, self.line(t, 'user', cwd, sid, message={'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': tool_id, 'content': text}]}, **kw))
 
@@ -393,6 +409,13 @@ class Synth:
             tid = tid or 'toolu_' + hx('orch', str(k[0]), n=24)
             self.assistant(main, t, k[0], ORCH, w, ORCH, CLAUDE_MODELS['opus'], [{'type': 'tool_use', 'id': tid, 'name': name, 'input': inp}], 'tool_use')
             self.result(main, t + 1.0, w, ORCH, tid, out, **kw)
+
+        def parallel(t, calls):
+            """Several tool calls of one assistant message, then their results: calls = [(name, input, result, tool_use id, extra fields of the result)]."""
+            k[0] += 1
+            self.assistant_blocks(main, t, k[0], ORCH, w, ORCH, CLAUDE_MODELS['opus'], [{'type': 'tool_use', 'id': tid, 'name': name, 'input': inp} for name, inp, _out, tid, _kw in calls], 'tool_use')
+            for i, (_name, _inp, out, tid, kw) in enumerate(calls):
+                self.result(main, t + 1.0 + 0.01 * i, w, ORCH, tid, out, **kw)
 
         def human(t, text):
             main.add(t, self.line(t, 'user', w, ORCH, origin={'kind': 'human'}, message={'role': 'user', 'content': text}))
@@ -445,11 +468,10 @@ class Synth:
         for key, ago in (('t1_env', 115.3), ('t2_retry', 115.2)):
             tool(m(ago), 'Write', {'file_path': os.path.join(self.unit[key], 'brief.md'), 'content': TOPIC_BRIEF[key]}, 'File created')
         say(m(114.6), 'Briefs are in docs/review/. Launching T1-A, T1-B, T2-A, T2-B and the Codex cross-check for T1.')
-        for i, (tag, desc, model, key, who) in enumerate(SPEC):
-            tool(m(114.5 - i * 0.05), 'Agent', {'description': '%s %s' % (tag, desc), 'subagent_type': 'general-purpose', 'model': model,
-                                                'run_in_background': True, 'prompt': self.spawn_prompt(tag, desc, key, who)},
-                 'Async agent launched successfully.\nagentId: %s' % self.agents[tag], tid=self.spawn_use[tag],
-                 toolUseResult={'isAsync': True, 'status': 'async_launched', 'agentId': self.agents[tag]})
+        parallel(m(114.5), [('Agent', {'description': '%s %s' % (tag, desc), 'subagent_type': 'general-purpose', 'model': model, 'run_in_background': True,
+                                       'prompt': self.spawn_prompt(tag, desc, key, who)},
+                             'Async agent launched successfully.\nagentId: %s' % self.agents[tag], self.spawn_use[tag],
+                             {'toolUseResult': {'isAsync': True, 'status': 'async_launched', 'agentId': self.agents[tag]}}) for tag, desc, model, key, who in SPEC])     # the four at once: launched together
         codex_launch(1, m(114.2))
         turn_end(m(113.5), 5)
 
@@ -549,7 +571,8 @@ class Synth:
                                             'message': 'Round 2 is in r2/A.md. Please check the budget logic for clock skew: I measure it with time.monotonic().'}, 'Message sent')
             s.end(m(12.0), FINAL_MSG[(key, 2, 'A')])
         else:
-            s.say(m(30.0), 'A\'s jitter proposal is acceptable if the random source is injectable; checking A\'s round 2 before I write mine.')
+            s.say(m(30.0), 'A\'s jitter proposal is acceptable if the random source is injectable; writing a first draft of round 2, then checking A\'s.')
+            s.write_report(m(6.0), os.path.join(unit, 'r2', 'B.md'), REPORTS[(key, 2, 'B')])        # a draft: the file is there and B is still working on it
             s.tool(m(0.7), 'Read', {'file_path': os.path.join(unit, 'r2', 'A.md')}, None)     # no result yet: B is mid-read
 
     # ---------- Codex ----------
@@ -724,7 +747,9 @@ BUSY_TEXT = {      # per topic: r1 = {who: (stance, bullet, bullet)}, r2 = {who:
     't3_retry': {
         'r1': {'A': ('exponential backoff with full jitter.', 'Base 200 ms, factor 2, cap 10 s, at most 5 attempts.', 'Jitter spreads clients that fail together.'),
                'B': ('cap the total wait, not only the delay.', 'Five attempts at the cap is 50 s of a blocked start-up.', 'Log every retry at WARNING.'),
-               'C': ('both policies survive the flaky-link scenario.', 'Full jitter recovered 3 s sooner on average.', 'The total-wait cap prevented two stuck start-ups.')}},
+               'C': ('both policies survive the flaky-link scenario.', 'Full jitter recovered 3 s sooner on average.', 'The total-wait cap prevented two stuck start-ups.')},
+        'r2': {'A': ('a total-wait cap on top of the delay cap', 'full jitter stays, with an injectable random source'), 'B': ('jitter is fine if tests can fix the seed', 'the cap must be measured with a monotonic clock'),
+               'C': ('no objections', 'seeded runs reproduce the 3 s gain')}},
     't4_config': {
         'r1': {'A': ('a `schema_version` field and one migration per bump.', 'Old files must keep loading for one release.', 'Migrations are scripts, not code in the loader.'),
                'B': ('defaults live in one file per package.', 'Today they are spread over three modules.', 'A reader should see every default at once.'),
@@ -787,6 +812,15 @@ class OrchLog:
         s.assistant(self.log, t, self.k, s.sid, self.w, s.sid, CLAUDE_MODELS['opus'], [{'type': 'tool_use', 'id': tid, 'name': name, 'input': inp}], 'tool_use')
         s.result(self.log, t + 1.0, self.w, s.sid, tid, out, **kw)
 
+    def parallel(self, t, calls):
+        """Several tool calls of one assistant message (what Claude Code writes when the model calls them together: a line for each block, one message id), then their results.
+        calls = [(name, input, result, tool_use id, extra fields of the result)]."""
+        s = self.syn
+        self.k += 1
+        s.assistant_blocks(self.log, t, self.k, s.sid, self.w, s.sid, CLAUDE_MODELS['opus'], [{'type': 'tool_use', 'id': tid, 'name': name, 'input': inp} for name, inp, _out, tid, _kw in calls], 'tool_use')
+        for i, (_name, _inp, out, tid, kw) in enumerate(calls):
+            s.result(self.log, t + 1.0 + 0.01 * i, self.w, s.sid, tid, out, **kw)
+
     def human(self, t, text):
         s = self.syn
         self.log.add(t, s.line(t, 'user', self.w, s.sid, origin={'kind': 'human'}, message={'role': 'user', 'content': text}))
@@ -828,6 +862,8 @@ class BusySynth(Synth):
     T6 settled a few minutes ago, so its room is still in the office and its three reviewers rest in the lounge."""
     PLAN = ('default_claude_max_20x', 47.0, 61.0, 33.0)
     CODEX_USED = 38.0
+    READ_COMMON = True       # the reviewers read the common brief of the bundle as well as the brief of their topic (a read of the common brief points at the whole bundle, not at one topic)
+    DRAFT_R1 = {}            # (topic, seat) -> minutes ago: a reviewer that has a first draft of its round-1 report on disk and is still working on it
 
     def __init__(self, home, now):
         Synth.__init__(self, home, now)
@@ -960,23 +996,29 @@ class BusySynth(Synth):
         main.tool(m(1.6), 'Read', {'file_path': os.path.join(self.unit['t6_tests'], 'rulings.md')}, self.rulings_text('t6_tests'))
         main.say(m(1.1), 'Status: the nine workers are mid-migration, T3 round 2 and T5 round 1 are running, T6 is closed. One item from T7 is waiting in the alerts.')
 
+    def launch_participants(self, main, key, whos):
+        """The orchestrator starts the reviewers of one topic with one message, the Agent calls side by side: they are launched together."""
+        _k, _title, _q, roles, start, _fin = self.topics[key]
+        calls = []
+        for who in whos:
+            tag, role = self.tag(key, who), roles['ABC'.index(who)][0]
+            calls.append(('Agent', {'description': '%s %s' % (tag, role), 'subagent_type': 'general-purpose', 'model': BUSY_ROLES[who], 'run_in_background': True,
+                                    'prompt': self.spawn_prompt(tag, role, key, who)},
+                          'Async agent launched successfully.\nagentId: %s' % self.agents[tag], self.spawn_use[tag],
+                          {'toolUseResult': {'isAsync': True, 'status': 'async_launched', 'agentId': self.agents[tag]}}))
+        main.parallel(self.m(start), calls)
+
     def topic(self, main, key):
         m = self.m
         _k, title, _q, roles, start, fin = self.topics[key]
         running_topic = key in ('t3_retry', 't5_logging')
+        self.launch_participants(main, key, [w for w in 'ABC'[:len(roles)] if not (key == 't3_retry' and w == 'C')])
         for who in 'ABC':
             if key == 't3_retry' and who == 'C':
                 continue
             tag = self.tag(key, who)
-            _s, r1e, r2s, r2e = self.times(key, who)
             role = roles['ABC'.index(who)][0]
-            model = BUSY_ROLES[who]
-            # orchestrator side: spawn
-            main.tool(m(start - 0.1 * 'ABC'.index(who)), 'Agent', {'description': '%s %s' % (tag, role), 'subagent_type': 'general-purpose', 'model': model,
-                                                                    'run_in_background': True, 'prompt': self.spawn_prompt(tag, role, key, who)},
-                      'Async agent launched successfully.\nagentId: %s' % self.agents[tag], tid=self.spawn_use[tag],
-                      toolUseResult={'isAsync': True, 'status': 'async_launched', 'agentId': self.agents[tag]})
-            self.debate_agent(main, key, who, tag, role, model, running_topic)
+            self.debate_agent(main, key, who, tag, role, BUSY_ROLES[who], running_topic)
         if key == 't3_retry':
             self.codex_debate_launch(main, 1, m(start - 0.4))
             main.say(m(start - 0.3), 'T3 reviewers are launched; C is a Codex cross-check.')
@@ -1009,7 +1051,8 @@ class BusySynth(Synth):
         pkgs = ['route_planner', 'map_server', 'battery_monitor', 'motion_control', 'sensor_fusion', 'diagnostics', 'teleop_bridge']
         s.user(m(start - 0.3), self.spawn_prompt(tag, role, key, who))
         s.say(m(start - 0.6), 'Reading both briefs and the code that touches this question.')
-        s.tool(m(start - 0.9), 'Read', {'file_path': os.path.join(review, 'brief.md')}, self.brief_text())
+        if self.READ_COMMON:
+            s.tool(m(start - 0.9), 'Read', {'file_path': os.path.join(review, 'brief.md')}, self.brief_text())
         s.tool(m(start - 1.2), 'Read', {'file_path': os.path.join(unit, 'brief.md')}, self.topic_brief(key))
         # a few reads of the code
         n_code = 3 if r1e else 6
@@ -1024,6 +1067,8 @@ class BusySynth(Synth):
             else:
                 s.tool(t, 'Read', {'file_path': os.path.join(self.work, 'packages', pkg, 'src', pkg, BUSY_FILES[i % 3])}, '# %s/%s\n' % (pkg, BUSY_FILES[i % 3]))
         if not r1e:                                 # round 1 still running: the last call has no result yet
+            if (key, who) in self.DRAFT_R1:         # ... but a first draft is on disk (a file that is there and not handed in)
+                s.write_report(m(self.DRAFT_R1[(key, who)]), os.path.join(unit, 'r1', who + '.md'), self.report(key, who, 1))
             s.tool(m(0.45 + 0.1 * 'ABC'.index(who)), 'Read', {'file_path': os.path.join(self.work, 'packages', 'acme_msgs', 'src', 'acme_msgs', 'params.py')}, None)
             return
         s.say(m(r1e + 3.0), 'Position is forming; writing the report now.')
@@ -1049,6 +1094,8 @@ class BusySynth(Synth):
             s.tool(m(r2s - 0.5 - 0.4 * i), 'Read', {'file_path': path}, body)
         if r2e is None:                             # T3 round 2 is running: the last call has no result yet
             s.say(m(r2s - 3.0), 'Both reports read; drafting what I accept and what I still contest.')
+            if who in 'AB':                         # A and B have a first draft of round 2 on disk (a file that is there and not handed in); the Codex C is asked to save its answer with -o
+                s.write_report(m(1.8 + 0.4 * 'AB'.index(who)), os.path.join(unit, 'r2', who + '.md'), self.report(key, who, 2))
             s.tool(m(0.6 + 0.15 * 'AB'.index(who)), 'Read', {'file_path': os.path.join(unit, 'r1', 'C.md')}, None)
             return
         s.say(m(r2e + 2.5), 'The other reports settle most of it; writing what I accept and what I still contest.')
@@ -1453,6 +1500,7 @@ def add_codex_orch_scene(info):
 
 
 STOPPED_KIDS = {name: 'c0b5700%d-0000-4000-8000-00000000000%d' % (i, i) for i, name in enumerate(('exited', 'timelimit', 'crash', 'grand', 'great'), 1)}
+TAGGED_PROMPT = 'Answer the retry question as one more reviewer: read the topic folder and write your answer to your seat'     # the `exited` run when it is a debate participant that names its seat
 STOPPED_PROMPTS = {'exited': 'Summarize the open TODOs under docs/ in five bullets', 'timelimit': 'List the stale branches and who last touched them',
                   'crash': 'Check every package for a missing LICENSE file', 'grand': 'Draft the v2 release notes from the settled rulings, grouped by package',
                   'great': 'List every breaking change that the rulings name, one per line'}
@@ -1466,9 +1514,11 @@ def add_stopped_scene(info):
                       (not resumed) · Release notes draft: working, and it starts a `claude -p` run that starts one in turn (a grandchild and a great-grandchild)
       `claude -p` runs  exited (closed without an end turn: interrupted/exited) · timelimit (the background time limit named in the launching call's notice) · crash (the record
                       stops and there is no process: ended) · grand (working, fake process) · great (done)
-      debate          the one participant that is working in the running topic stops on a 529: its cell for the next report is paused; another one stops on a 529 after its
-                      report was written: its cell is a draft that nobody is typing; a finished one hands its report back through SubagentHandback
-    Returns {agents, kids, live, paused, held}; `live` is what start_live gives a fake process (the one working run)."""
+      debate          the one participant that is working in the running topic stops on a 529 (its draft stays, and nobody is typing it); another one stops on a 529 after its report
+                      was written: the same; a finished one hands its report back through SubagentHandback. Except in the docs scene the `exited` run is one more participant of that
+                      topic: its command names the folder and the seat (`BULLPEN_ROOM=… BULLPEN_SEAT=rN/D claude -p …`) and it was cut off before it wrote anything, so its cell is paused
+    Returns {agents, kids, live, paused, held}; `live` is what start_live gives a fake process (the one working run); `paused` is the name of the run whose cell is paused (`exited`;
+    in the docs scene the sub-agent a 529 stopped)."""
     home, now, work, sid = info['home'], info['now'], info['work'], info['orch']
     syn = Synth(home, now)
     syn.sid, syn.work, syn.review = sid, work, info['review']
@@ -1533,9 +1583,11 @@ def add_stopped_scene(info):
     s.say(m(0.4), 'Waiting for the drafting run.')
 
     # --- `claude -p` runs that the orchestrator launched ---
+    rulings = os.path.join(info['units']['t1_env'], 'rulings.md') if 't1_env' in info['units'] else os.path.join(info['review'], 'final', 'naming.md')     # a settled ruling: what the release-notes run collects (no guide of a debate)
+
     def child(name, t, ends, tools, owner_log=None):
         cid, log = STOPPED_KIDS[name], Jsonl(os.path.join(proj, STOPPED_KIDS[name] + '.jsonl'))
-        log.add(t, {'type': 'user', 'timestamp': iso(t), 'cwd': work, 'sessionId': cid, 'entrypoint': 'sdk-cli', 'message': {'role': 'user', 'content': STOPPED_PROMPTS[name]}})
+        log.add(t, {'type': 'user', 'timestamp': iso(t), 'cwd': work, 'sessionId': cid, 'entrypoint': 'sdk-cli', 'message': {'role': 'user', 'content': prompts[name]}})
         for i, (dt, text, tool) in enumerate(tools):
             use = 'toolu_' + hx('stopped-kid', name, str(i), n=24)
             content = ([{'type': 'text', 'text': text}] if text else []) + ([{'type': 'tool_use', 'id': use, 'name': tool[0], 'input': tool[1]}] if tool else [])
@@ -1545,7 +1597,15 @@ def add_stopped_scene(info):
             log.add(t + ends, {'type': 'cost-state', 'timestamp': iso(t + ends), 'sessionId': cid, 'totalDuration': int(ends * 1000)})
         return log
     t1, t2, t3 = m(62), m(58), m(55)
-    call(t1, 'Bash', {'command': 'claude -p "%s"' % STOPPED_PROMPTS['exited'], 'description': 'Ask a helper to summarize the TODOs'}, 'ok', 'toolu_' + hx('stopped-bash', '1', n=24))
+    tagged = not info.get('docs')                                                # the `exited` run is a participant of the running topic that names its seat
+    seat_unit = info['units']['t5_logging' if info.get('busy') else 't2_retry']
+    seat = '%s/D' % max((d for d in os.listdir(seat_unit) if re.fullmatch(r'r\d+', d)), key=lambda d: int(d[1:]))
+    prompts = dict(STOPPED_PROMPTS, exited=TAGGED_PROMPT) if tagged else STOPPED_PROMPTS
+    if tagged:
+        call(t1, 'Bash', {'command': 'BULLPEN_ROOM=%s BULLPEN_SEAT=%s claude -p "%s"' % (seat_unit, seat, TAGGED_PROMPT), 'description': 'A fourth reviewer for the topic'}, 'ok',
+             'toolu_' + hx('stopped-bash', '1', n=24))
+    else:
+        call(t1, 'Bash', {'command': 'claude -p "%s"' % STOPPED_PROMPTS['exited'], 'description': 'Ask a helper to summarize the TODOs'}, 'ok', 'toolu_' + hx('stopped-bash', '1', n=24))
     bg = 'b' + hx('stopped-bg', n=8)
     call(t2, 'Bash', {'command': 'claude -p "%s"' % STOPPED_PROMPTS['timelimit'], 'description': 'Ask a helper for the stale branches', 'run_in_background': True},
          'Command running in background with ID: ' + bg, 'toolu_' + hx('stopped-bash', '2', n=24), toolUseResult={'backgroundTaskId': bg})
@@ -1553,10 +1613,11 @@ def add_stopped_scene(info):
     text = ('<task-notification>\n<task-id>%s</task-id>\n<tool-use-id>%s</tool-use-id>\n<status>failed</status>\n'
             '<summary>Background command "Ask a helper for the stale branches" hit the background time limit and was stopped</summary>\n</task-notification>') % (bg, 'toolu_' + hx('stopped-bash', '2', n=24))
     extra.append(Synth.line(m(27), 'user', work, sid, origin={'kind': 'task-notification'}, message={'role': 'user', 'content': text}))
-    logs = [child('exited', t1 + 3, 40, [(8, 'Reading the docs folder.', ('Grep', {'pattern': 'TODO', 'path': os.path.join(work, 'docs')}))]),              # closed by cost-state, no end turn
+    logs = [child('exited', t1 + 3, 40, [(8, 'Reading the topic folder.', ('Read', {'file_path': os.path.join(seat_unit, 'brief.md')}))] if tagged else
+                  [(8, 'Reading the docs folder.', ('Grep', {'pattern': 'TODO', 'path': os.path.join(work, 'docs')}))]),                                           # closed by cost-state, no end turn
             child('timelimit', t2 + 3, 1790, [(8, 'Listing the branches.', ('Bash', {'command': 'git branch -a'}))]),
             child('crash', t3 + 3, 0, [(8, 'Walking the packages.', ('Glob', {'pattern': 'packages/*/LICENSE*'}))]),                                         # the record just stops
-            child('grand', t_grand + 3, 0, [(15, 'Collecting the rulings.', ('Read', {'file_path': os.path.join(info['review'], 'brief.md')}))]),
+            child('grand', t_grand + 3, 0, [(15, 'Collecting the rulings.', ('Read', {'file_path': rulings}))]),
             child('great', t_great + 3, 60, [(20, 'Done: three breaking changes are named, one per line.', None)])]
     g = logs[3]                                                                  # grand: it starts `great` through Bash (a call in its own record)
     use = 'toolu_' + hx('stopped-kid-bash', n=24)
@@ -1565,7 +1626,7 @@ def add_stopped_scene(info):
           'usage': Synth.usage(3)}))
     g.add(t_great + 1.0, Synth.line(t_great + 1.0, 'user', work, STOPPED_KIDS['grand'], message={'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': use, 'content': 'ok'}]}))
     g.add(now - 12, Synth.line(now - 12, 'assistant', work, STOPPED_KIDS['grand'], message={'id': 'msg_' + hx('stopped-kid-last', n=24), 'model': CLAUDE_MODELS['sonnet'], 'role': 'assistant',
-          'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'toolu_' + hx('stopped-kid-last', n=24), 'name': 'Read', 'input': {'file_path': os.path.join(info['review'], 'brief.md')}}], 'usage': Synth.usage(4)}))
+          'stop_reason': 'tool_use', 'content': [{'type': 'tool_use', 'id': 'toolu_' + hx('stopped-kid-last', n=24), 'name': 'Read', 'input': {'file_path': rulings}}], 'usage': Synth.usage(4)}))
     for lg in logs:
         lg.save()
     for sub in sw.values():
@@ -1618,7 +1679,8 @@ def add_stopped_scene(info):
         lastk = r.get('timestamp') or lastk
         keyed.append((lastk, i, r))
     put(path, ''.join(dump(r) + '\n' for _, _, r in sorted(keyed, key=lambda x: x[:2])), now)
-    return {'agents': {t: syn.agents[t] for t in sw}, 'kids': dict(STOPPED_KIDS), 'live': [(STOPPED_KIDS['grand'], work, t_grand + 3)], 'paused': paused, 'held': held, 'resets': resets}
+    return {'agents': {t: syn.agents[t] for t in sw}, 'kids': dict(STOPPED_KIDS), 'live': [(STOPPED_KIDS['grand'], work, t_grand + 3)], 'paused': 'exited' if tagged else paused, 'cut': paused, 'held': held,
+            'resets': resets, 'seat': (seat_unit, seat) if tagged else None}
 
 
 def parse_iso(text):
@@ -1640,6 +1702,12 @@ def fake_cmdline(pid):
         return None
 
 
+def fake_env(**extra):
+    """The environment of a fake process: PATH and what a scene says its shell left (the ids of the session that started it), and nothing of the machine the tool runs on. A run inside a Claude or Codex
+    session of a developer carries that session's CODEX_THREAD_ID, CLAUDE_CODE_SESSION_ID ...: a fake process that inherited them would name a session of the real machine, and the board would read it."""
+    return dict(PATH=os.environ.get('PATH', ''), **extra)
+
+
 def start_live(info):
     """One fake `claude` process per session (a `sleep` whose argv[0] is `claude`) plus ~/.claude/sessions/<pid>.json. Returns the pids.
     With the busy scene, also one fake `codex` process per Codex rollout, holding that rollout open (so a running turn does not read as ended);
@@ -1651,7 +1719,7 @@ def start_live(info):
     orch_pid = None
     for sid, cwd, name in ((info['orch'], info['work'], 'config loader review' if not info.get('busy') else 'acme-robot v2 migration'), (info['solo'], info['solo_cwd'], 'demo notes')):
         p = subprocess.Popen(['claude', str(LIVE_SECONDS)], executable=sleep, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
+                             stderr=subprocess.DEVNULL, start_new_session=True, env=fake_env())
         put(os.path.join(info['claude'], 'sessions', '%d.json' % p.pid),
             json.dumps({'pid': p.pid, 'sessionId': sid, 'cwd': cwd, 'startedAt': int(info['now'] * 1000), 'kind': 'interactive', 'name': name,
                         'synthHome': True}))        # --stop removes only files that carry this
@@ -1661,7 +1729,7 @@ def start_live(info):
     if info.get('links'):                          # --links: the child that is still running (the board cannot link it: no_matching_call)
         sid, cwd, started = info['links']['live']
         p = subprocess.Popen(['claude', str(LIVE_SECONDS)], executable=sleep, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
+                             stderr=subprocess.DEVNULL, start_new_session=True, env=fake_env())
         put(os.path.join(info['claude'], 'sessions', '%d.json' % p.pid),
             json.dumps({'pid': p.pid, 'sessionId': sid, 'cwd': cwd, 'startedAt': int(started * 1000), 'kind': 'sdk-cli', 'entrypoint': 'sdk-cli', 'name': 'helper',
                         'synthHome': True}))
@@ -1669,7 +1737,7 @@ def start_live(info):
     for sid, cwd, started in (info.get('stopped') or {}).get('live', []):         # --stopped: the run that is still working
         # a shell of a Claude session leaves the session's id and its process number in the environment of what it starts: this run was started from the orchestrator's
         p = subprocess.Popen(['claude', str(LIVE_SECONDS)], executable=sleep, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True,
-                             env=dict(PATH=os.environ.get('PATH', ''), CLAUDE_CODE_SESSION_ID=info['orch'], CLAUDE_PID=str(orch_pid)))
+                             env=fake_env(CLAUDE_CODE_SESSION_ID=info['orch'], CLAUDE_PID=str(orch_pid)))
         put(os.path.join(info['claude'], 'sessions', '%d.json' % p.pid),
             json.dumps({'pid': p.pid, 'sessionId': sid, 'cwd': cwd, 'startedAt': int(started * 1000), 'kind': 'sdk-cli', 'entrypoint': 'sdk-cli', 'name': 'helper', 'synthHome': True}))
         pids.append(p.pid)
@@ -1677,18 +1745,18 @@ def start_live(info):
     if info.get('busy'):
         for path in info['codex_files']:
             with open(path, 'rb') as rollout:
-                p = subprocess.Popen(['codex', str(LIVE_SECONDS)], executable=sleep, stdin=rollout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+                p = subprocess.Popen(['codex', str(LIVE_SECONDS)], executable=sleep, stdin=rollout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, env=fake_env())
             fake_codex.append({'pid': p.pid, 'cmd': 'codex %d' % LIVE_SECONDS})
             pids.append(p.pid)
     co = info.get('codex_orch')
     if co:                                         # --codex-orch: a fake `codex` process holds the root's rollout; a fake `claude` process is the helper, with the environment a Codex shell leaves
         with open(co['paths']['root'], 'rb') as rollout:
-            p = subprocess.Popen(['codex', str(LIVE_SECONDS)], executable=sleep, stdin=rollout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            p = subprocess.Popen(['codex', str(LIVE_SECONDS)], executable=sleep, stdin=rollout, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True, env=fake_env())
         fake_codex.append({'pid': p.pid, 'cmd': 'codex %d' % LIVE_SECONDS})
         pids.append(p.pid)
         for sid, cwd, started, env in co['live']:
             p = subprocess.Popen(['claude', str(LIVE_SECONDS)], executable=sleep, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 start_new_session=True, env=dict(env, PATH=os.environ.get('PATH', '')))
+                                 start_new_session=True, env=fake_env(**env))
             put(os.path.join(info['claude'], 'sessions', '%d.json' % p.pid),
                 json.dumps({'pid': p.pid, 'sessionId': sid, 'cwd': cwd, 'startedAt': int(started * 1000), 'kind': 'sdk-cli', 'entrypoint': 'sdk-cli', 'name': 'helper', 'synthHome': True}))
             pids.append(p.pid)

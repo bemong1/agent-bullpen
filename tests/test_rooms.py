@@ -1,17 +1,26 @@
-"""Rooms: agents of one orchestrator that work together in a folder (a meeting, an agenda, a plan ...) are shown like a debate, found by the structure of the records
-and the disk alone: a guide that two or more of them are pointed at by their first instruction, and a file of its own each (or messages only). Hand-built agents over a
-temporary repository; the generator's `room` bundle (tools/scenarios) covers the same rules over the axis values.
+"""Rooms: agents of one orchestrator that work together in a folder (a meeting, an agenda, a plan ...) are shown like a debate. A room is found by structure alone (CONTRACT J13, J14, J15):
+the records say which agents were launched together (`launch(group)`), which of them carry the same room tag (`tag(room, seat)`), the files each of them wrote with a sure write (`writes=`), what
+they read (`reads=`) and whom they sent a message to (`sent_to=`); the disk says which folder it is. No sentence is read: what an agent was told cannot even be given.
+
+  - a sure room: two or more agents with the same room tag on a folder that has no round folder
+  - an unsure room (an estimate: never the current debate, never final): agents launched together that each wrote a file of their own in a folder or one below it; or, with no markdown written,
+    the same document read in one folder and a message that went through (a room of participants only)
+  - what is no room: one agent, a file all of them write, a place everybody reads (the top of a repository, its `docs`), a folder that is a debate or holds debates, the output of a launch command,
+    most of them changing the work outside the folder, agents not launched together (one after the other)
+
+Hand-built facts over a temporary repository, judged by `units.assign` (and, for what the board shows, by `debates.judge`); the generator's `room` bundle (tools/scenarios) and the contract cases
+C28 and C39-C47 cover the same rules over the axis values.
 
     python3 -m unittest tests.test_rooms
 """
 import os
 import sys
-import tempfile
 import types
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from judge_support import Fixture, agent, launch, plan, rd, tag, wr  # noqa: E402
 from compat import server  # noqa: E402
 
 from board import debates, units as U  # noqa: E402
@@ -19,657 +28,643 @@ from board import debates, units as U  # noqa: E402
 GUIDE = '# Weekly sync\n\nTopics:\n\n- schedule\n- budget\n'
 
 
-def write(path, text='x\n'):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, 'w') as f:
-        f.write(text)
-    return path
-
-
-class Repo(unittest.TestCase):
-    """A repository (`.git` at its top) with the room folder `docs/meeting` and its guide `agenda.md`."""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        self.top = os.path.join(os.path.realpath(self.tmp.name), 'repo')
-        os.makedirs(os.path.join(self.top, '.git'))
-        self.folder = os.path.join(self.top, 'docs', 'meeting')
-        self.guide = write(os.path.join(self.folder, 'agenda.md'), GUIDE)
-        self.n = 0
-
-    def agent(self, text, desc='', writes=(), sent=(), start=None, last=None):
-        self.n += 1
-        a = server.Agent('a%016d' % self.n, {'description': desc} if desc else {})
-        a.origin, a.spawn_ts, a.first_ts, a.last_ts, a.cwd = 'subagent', start or 100.0 + self.n, start or 100.0 + self.n, last or 200.0, self.top
-        a.spawn_prompt = text
-        for p in writes:
-            a.writes.append({'ts': 150.0, 'path': p, 'ok': True})
-        a.sent = [{'ts': 160.0, 'to': to, 'summary': '', 'text': 'x'} for to in sent]
-        return a
-
-    def judge(self, agents, status='running'):
-        """`status` is one status for all of them, or {agent: status}."""
-        s = types.SimpleNamespace(agents={a.id: a for a in agents}, _file_cache={}, _head_cache={}, cwd=self.top)
-        return debates.judge(s, status if isinstance(status, dict) else {a.id: status for a in agents})
-
-    def assertNoRoom(self, agents, status='running'):
-        jd = self.judge(agents, status)
-        self.assertEqual([t for t in self.topics(jd) if t.get('room')], [])
-        self.assertEqual([x for x in jd.diag if x['code'] == 'debate_in_misc'], [])
-        return jd
-
-    def topics(self, jd):
-        return [t for d in jd.debates for t in d['topics']]
-
-    def ask(self, text, name, guide=None, own=None):
-        """A first instruction: read the guide, write `name` (an absolute path) as the own file."""
-        return 'Read `%s` and follow it. %s' % (guide or self.guide, ('Write your notes to `%s`.' % own) if own else '')
-
-    def pair(self, one='A.md', two='B.md', below=False, **kw):
-        base = os.path.join(self.folder, 'out') if below else self.folder
-        a = self.agent(self.ask('', 'a', own=os.path.join(base, one)), **kw)
-        b = self.agent(self.ask('', 'b', own=os.path.join(base, two)), **kw)
-        return a, b
-
-
-class Cells(Repo):
-    def test_two_participants_with_a_file_each_beside_the_guide_are_a_room(self):
-        a, b = self.pair()
-        jd = self.judge([a, b])
-        (tp,) = self.topics(jd)
-        self.assertEqual((tp['dir'], tp['title'], tp['room'], tp['kind'], tp['rounds']), (self.folder, 'Weekly sync', 'cells', 'rounds', [1]))
-        self.assertEqual(tp['guide'], self.guide)
-        self.assertEqual([(r['p'], r['agents'], [(c['round'], c['state'], c['path']) for c in r['cells']]) for r in tp['rows']],
-                         [('A', [a.id], [(1, 'writing', os.path.join(self.folder, 'A.md'))]), ('B', [b.id], [(1, 'writing', os.path.join(self.folder, 'B.md'))])])
-        self.assertEqual({k: sorted(v) for k, v in jd.agent_units.items()}, {a.id: [self.folder], b.id: [self.folder]})
-
-    def test_files_one_folder_below_the_guide_and_a_mixed_room(self):
-        a, b = self.pair(below=True)
-        c = self.agent(self.ask('', 'c', own=os.path.join(self.folder, 'notes_C.md')))
-        (tp,) = self.topics(self.judge([a, b, c]))
-        self.assertEqual({r['p']: os.path.relpath(r['cells'][0]['path'], self.folder) for r in tp['rows']}, {'A': 'out/A.md', 'B': 'out/B.md', 'notes_C': 'notes_C.md'})
-
-    def test_the_file_is_what_the_participant_wrote_when_the_instruction_names_none(self):
-        a = self.agent('Read `%s`. Save your notes in a file.' % self.guide, writes=[os.path.join(self.folder, 'x', 'notes.md')])
-        b = self.agent('Read `%s`. Save your notes in a file.' % self.guide, writes=[os.path.join(self.folder, 'y.md')])
-        write(os.path.join(self.folder, 'x', 'notes.md'))
-        write(os.path.join(self.folder, 'y.md'))
-        (tp,) = self.topics(self.judge([a, b], 'done'))
-        self.assertEqual({r['p']: r['cells'][0]['state'] for r in tp['rows']}, {'notes': 'done', 'y': 'done'})
-
-    def test_the_seat_is_the_marker_then_the_tag_then_the_file(self):
-        a = self.agent('You are participant B (Budget). ' + self.ask('', 'a', own=os.path.join(self.folder, 'notes_B.md')))
-        b = self.agent(self.ask('', 'b', own=os.path.join(self.folder, 'notes_C.md')), desc='C Risk notes')
-        c = self.agent(self.ask('', 'c', own=os.path.join(self.folder, 'notes_D.md')))
-        (tp,) = self.topics(self.judge([a, b, c]))
-        self.assertEqual({r['p']: os.path.basename(r['cells'][0]['path']) for r in tp['rows']}, {'B': 'notes_B.md', 'C': 'notes_C.md', 'notes_D': 'notes_D.md'})
-
-    def test_a_room_that_is_working_has_a_draft_and_a_finished_one_has_a_done_cell(self):
-        a, b = self.pair()
-        write(os.path.join(self.folder, 'A.md'), 'one\ntwo\n')
-        (tp,) = self.topics(self.judge([a, b]))
-        self.assertEqual({r['p']: r['cells'][0]['state'] for r in tp['rows']}, {'A': 'draft', 'B': 'writing'})
-        (tp,) = self.topics(self.judge([a, b], 'done'))
-        self.assertEqual({r['p']: r['cells'][0]['state'] for r in tp['rows']}, {'A': 'done', 'B': 'missing'})
-
-    def test_no_participant_file_and_no_guide_is_taken_for_the_conclusion(self):
-        a, b = self.pair()
-        write(os.path.join(self.folder, 'A.md'), 'a\n')
-        write(os.path.join(self.folder, 'B.md'), 'b\n')
-        (tp,) = self.topics(self.judge([a, b], 'done'))
-        self.assertEqual((tp['final']['exists'], tp['final']['rel']), (False, None))
-        write(os.path.join(self.folder, 'minutes.md'), 'we decided\n')
-        os.utime(os.path.join(self.folder, 'minutes.md'), (9e9, 9e9))
-        (tp,) = self.topics(self.judge([a, b], 'done'))
-        self.assertEqual(tp['final']['rel'], 'minutes.md')                      # a document of its own is
-
-    def test_a_guide_of_any_name_in_the_folder_makes_the_title(self):
-        os.unlink(self.guide)
-        for name in ('brief.md', 'README.md', 'plan.md', 'whatever-this-is.md'):
-            guide = write(os.path.join(self.folder, name), '# Title of %s\n' % name)
-            a = self.agent(self.ask('', 'a', guide=guide, own=os.path.join(self.folder, 'A.md')))
-            b = self.agent(self.ask('', 'b', guide=guide, own=os.path.join(self.folder, 'B.md')))
-            (tp,) = self.topics(self.judge([a, b]))
-            self.assertEqual((tp['title'], tp['room']), ('Title of %s' % name, 'cells'), name)
-            os.unlink(guide)
-
-    def test_a_participant_that_points_at_no_guide_is_not_one_of_them(self):
-        a, b = self.pair()
-        c = self.agent('Write your notes to `%s`.' % os.path.join(self.folder, 'C.md'))
-        (tp,) = self.topics(self.judge([a, b, c]))
-        self.assertEqual([r['p'] for r in tp['rows']], ['A', 'B'])
-
-
-    def test_two_files_of_one_name_keep_two_seats_by_the_folder_they_are_in(self):
-        a = self.agent(self.ask('', 'a', own=os.path.join(self.folder, 'left', 'report.md')))
-        b = self.agent(self.ask('', 'b', own=os.path.join(self.folder, 'right', 'report.md')))
-        (tp,) = self.topics(self.judge([a, b]))
-        self.assertEqual({r['p']: (r['agents'], os.path.relpath(r['cells'][0]['path'], self.folder)) for r in tp['rows']},
-                         {'left/report': ([a.id], 'left/report.md'), 'right/report': ([b.id], 'right/report.md')})
-
-    def test_a_room_inside_a_folder_with_a_brief_is_one_of_its_topics(self):
-        write(os.path.join(self.top, 'docs', 'brief.md'), '# The whole review\n')
-        a, b = self.pair()
-        jd = self.judge([a, b])
-        self.assertEqual([(d['root'], [t['dir'] for t in d['topics']]) for d in jd.debates], [(os.path.join(self.top, 'docs'), [self.folder])])
-
-
-class Closed(Repo):
-    """A room that is a topic of a bundle (the folder above it has a brief.md): the bundle's conclusion document closes it."""
+class Room(Fixture):
+    """A repository (`.git` at its top) with the room folder `docs/meeting` and its guide `brief.md`."""
 
     def setUp(self):
         super().setUp()
-        self.bundle = os.path.join(self.top, 'work', 'bundle')
-        write(os.path.join(self.bundle, 'brief.md'), '# The whole review\n\nEvery pass is a folder below.\n')
-        self.folder = os.path.join(self.bundle, 'step2')
-        self.guide = write(os.path.join(self.folder, 'change_plan.md'), '# Edit pass\n\nEach edits a part.\n')
+        self.top = self.p('repo')
+        os.makedirs(os.path.join(self.top, '.git'))
+        self.folder = self.p('repo', 'docs', 'meeting')
+        self.guide = self.file('repo/docs/meeting/brief.md', GUIDE, 50.0)
 
-    def done(self, name='CLOSING.md', mtime=9e9, text='Everything is in; the step2/ folder is closed.\n'):
-        a, b = self.pair(one='edits/A.md', two='edits/B.md', start=100.0, last=200.0)
-        for p in ('A', 'B'):
-            write(os.path.join(self.folder, 'edits', p + '.md'), '# %s\n\nedited\n' % p)
-        path = write(os.path.join(self.bundle, name), text) if name else None
-        if path:
-            os.utime(path, (mtime, mtime))
-        return a, b
+    def doc(self, rel, text='x\n', mtime=200.0):
+        """A file below the room folder, on disk."""
+        return self.file('repo/docs/meeting/' + rel, text, mtime)
 
-    def topic(self, agents, status='done'):
-        (d,) = self.judge(agents, status).debates
-        self.assertEqual(d['root'], self.bundle)
-        (tp,) = d['topics']
-        return tp
+    def member(self, aid, rel=None, group='m1', at=200.0, **kw):
+        """An agent launched with the others of `group` that wrote the file `rel` of its own (default `<aid>.md`) below the room folder with a Write tool at `at`."""
+        path = self.doc(rel or aid + '.md', mtime=at)
+        kw.setdefault('status', 'running')
+        return agent(aid, writes=[wr(path, at)], launch=launch(group, 't' + aid), **kw)
+
+    def pair(self, one='A.md', two='B.md', below=False, **kw):
+        base = 'out/' if below else ''
+        return self.member('A', base + one, **kw), self.member('B', base + two, at=201.0, **kw)
+
+    def tagged(self, aid, seat=None, own=True, **kw):
+        """An agent with the room tag of the folder (and its seat) that wrote its own file `<seat or aid>.md` when `own`."""
+        kw.setdefault('status', 'running')
+        writes = [wr(self.doc((seat or aid) + '.md'), 200.0)] if own else []
+        return agent(aid, writes=writes, tag=tag(self.folder, seat), **kw)
+
+    def shown(self, *agents, **kw):
+        """What the board shows (debates.judge) of the facts of the agents."""
+        sf = self.sf(*agents, **kw)
+        s = types.SimpleNamespace(agents={}, _file_cache={}, _head_cache={}, cwd=self.top)
+        with mock.patch.object(debates, 'session_facts', lambda s_, statuses, fresh=False: sf):
+            return debates.judge(s, {a.id: a.status for a in agents})
+
+    @staticmethod
+    def topics(jd):
+        return [t for d in jd.debates for t in d['topics']]
+
+    def assertNoRoom(self, jd):
+        self.assertEqual(jd.rooms, {})
+        self.assertNotIn('room', jd.listed.values())
+        return jd
+
+    def states(self, jd):
+        return {c.stem: c.state for c in jd.cells.values() if c.unit == self.folder}
+
+
+class Cells(Room):
+    def test_two_participants_with_a_file_each_beside_the_guide_are_a_room(self):
+        a, b = self.pair()
+        jd = self.assign(a, b)
+        room = jd.rooms[self.folder]
+        self.assertEqual((room.kind, room.sure, room.why, room.members, room.guide), ('cells', False, 'launch', ['A', 'B'], self.guide))
+        self.assertEqual(room.files, {'A': self.p('repo/docs/meeting/A.md'), 'B': self.p('repo/docs/meeting/B.md')})
+        self.assertEqual({k: (c.owner, c.agent, c.evidence, c.state) for k, c in jd.cells.items()},
+                         {(self.folder, '-', 'A'): ('A', 'A', 'tool', 'draft'), (self.folder, '-', 'B'): ('B', 'B', 'tool', 'draft')})
+        self.assertEqual(jd.agent_units, {'A': {self.folder}, 'B': {self.folder}})
+        self.assertEqual((jd.listed, jd.roots), ({self.folder: 'room'}, {self.folder: [self.folder]}))
+
+    def test_the_board_gets_the_room_as_a_topic(self):
+        a, b = self.pair()
+        j = self.shown(a, b)
+        (tp,) = self.topics(j)
+        self.assertEqual((tp['dir'], tp['title'], tp['room'], tp['kind'], tp['rounds']), (self.folder, 'Weekly sync', 'cells', 'rounds', [1]))
+        self.assertEqual((tp['guide'], tp['room_sure'], tp['room_why']), (self.guide, False, 'launch'))
+        self.assertEqual([(r['p'], r['agents'], [(c['round'], c['state'], c['path'], c['owner']) for c in r['cells']]) for r in tp['rows']],
+                         [('A', ['A'], [(1, 'draft', self.p('repo/docs/meeting/A.md'), 'A')]), ('B', ['B'], [(1, 'draft', self.p('repo/docs/meeting/B.md'), 'B')])])
+        self.assertEqual({k: sorted(v) for k, v in j.agent_units.items()}, {'A': [self.folder], 'B': [self.folder]})
+
+    def test_a_room_needs_no_guide(self):
+        os.unlink(self.guide)
+        a, b = self.pair()
+        jd = self.assign(a, b)
+        self.assertEqual((jd.rooms[self.folder].kind, jd.rooms[self.folder].guide), ('cells', None))
+        (tp,) = self.topics(self.shown(a, b))
+        self.assertEqual((tp['room'], tp['guide'], tp['title']), ('cells', None, 'meeting'))
+
+    def test_files_one_folder_below_the_guide_and_a_mixed_room(self):
+        a, b = self.pair(below=True)
+        jd = self.assign(a, b)
+        (room,) = jd.rooms.values()
+        self.assertEqual((room.folder, room.members), (self.p('repo/docs/meeting/out'), ['A', 'B']))      # the folder that holds the files themselves
+        c = self.member('C', 'notes_C.md', at=202.0)
+        self.assertEqual(self.assign(a, b, c).rooms, {})                                                  # files in two folders make no room (the orchestrator's answer O1)
+
+    def test_the_file_is_what_the_participant_wrote(self):
+        a = agent('A', writes=[wr(self.doc('notes.md'), 150.0)], launch=launch('m1', 't1'), status='done')
+        b = agent('B', writes=[wr(self.doc('y.md'), 150.0)], launch=launch('m1', 't2'), status='done')
+        jd = self.assign(a, b)
+        self.assertEqual(self.states(jd), {'notes': 'done', 'y': 'done'})
+        self.assertEqual({r['p']: r['cells'][0]['state'] for r in self.topics(self.shown(a, b))[0]['rows']}, {'notes': 'done', 'y': 'done'})
+
+    def test_the_seat_is_the_tag_then_the_file(self):
+        a = agent('A', writes=[wr(self.doc('B.md'), 150.0)], tag=tag(self.folder, 'B'), status='running')
+        b = agent('B', tag=tag(self.folder, 'C'), status='running', start=101.0)                      # nothing written yet: its seat names the file
+        c = agent('C', writes=[wr(self.doc('notes_D.md'), 150.0)], tag=tag(self.folder), status='running', start=102.0)        # no seat: the file it wrote
+        jd = self.assign(a, b, c)
+        room = jd.rooms[self.folder]
+        self.assertEqual((room.sure, room.why, room.members), (True, 'tag', ['A', 'B', 'C']))
+        self.assertEqual({k[2]: (c.owner, c.agent, c.evidence, c.state) for k, c in jd.cells.items()},
+                         {'B': ('A', 'A', 'tool', 'draft'), 'C': (None, 'B', 'tag', 'writing'), 'notes_D': ('C', 'C', 'tool', 'draft')})
+
+    def test_a_room_of_a_tag_shows_the_file_of_even_one_member(self):
+        jd = self.assign(self.tagged('A'), self.tagged('B', own=False))
+        room = jd.rooms[self.folder]
+        self.assertEqual((room.kind, room.sure, sorted(room.files)), ('cells', True, ['A']))
+        self.assertEqual(self.states(jd), {'A': 'draft'})
+        self.assertNoRoom(self.assign(self.member('A'), agent('B', launch=launch('m1', 'tB'))))          # the launch alone makes a room only for the files of two of them
+
+    def test_a_room_that_is_working_has_a_draft_and_a_finished_one_has_a_done_cell(self):
+        for status, want in (('running', {'A': 'draft', 'B': 'writing'}), ('done', {'A': 'done', 'B': 'missing'})):
+            a, b = self.tagged('A', 'A', status=status), self.tagged('B', 'B', own=False, status=status)       # B holds its seat and has written nothing
+            jd = self.assign(a, b)
+            self.assertEqual(self.states(jd), want, status)
+            self.assertEqual({r['p']: r['cells'][0]['state'] for r in self.topics(self.shown(a, b))[0]['rows']}, want, status)
+
+    def test_no_participant_file_and_no_guide_is_taken_for_the_conclusion(self):
+        a, b = self.tagged('A', status='done'), self.tagged('B', status='done')
+        jd = self.assign(a, b)
+        f = jd.finals[self.folder]
+        self.assertEqual((f.confirmed, f.path, f.candidates, f.why), (False, None, [], ['none']))        # the files of the participants and the guide are no conclusion
+        minutes = self.doc('minutes.md', 'we decided\n', 300.0)
+        jd = self.assign(a, b, orch=[wr(minutes, 300.0)])
+        f = jd.finals[self.folder]
+        self.assertEqual((f.confirmed, f.path, f.by, f.why), (True, minutes, 'orch', []))                # a document of its own written after them is
+        (tp,) = self.topics(self.shown(a, b, orch=[wr(minutes, 300.0)]))
+        self.assertEqual((tp['final']['exists'], tp['final']['rel']), (True, 'minutes.md'))
+
+    def test_only_a_brief_a_readme_or_an_index_is_the_guide(self):
+        os.unlink(self.guide)
+        for name in ('brief.md', 'README.md', 'index.md'):
+            guide = self.doc(name, '# Title of %s\n' % name, 50.0)
+            a, b = self.pair()
+            jd = self.assign(a, b)
+            self.assertEqual(jd.rooms[self.folder].guide, guide, name)
+            (tp,) = self.topics(self.shown(a, b))
+            self.assertEqual((tp['title'], tp['room'], tp['guide']), ('Title of %s' % name, 'cells', guide), name)
+            os.unlink(guide)
+        for name in ('agenda.md', 'plan.md', 'whatever-this-is.md'):                                      # a name settles nothing: no guide, and no title
+            other = self.doc(name, '# Title of %s\n' % name, 50.0)
+            a, b = self.pair()
+            self.assertIsNone(self.assign(a, b).rooms[self.folder].guide, name)
+            (tp,) = self.topics(self.shown(a, b))
+            self.assertEqual((tp['title'], tp['guide']), ('meeting', None), name)
+            os.unlink(other)
+
+    def test_an_agent_that_was_not_launched_with_them_is_not_one_of_them(self):
+        a, b = self.pair()
+        for launched in (launch('m2', 't9'), None):                                                    # another call, or none that is known
+            c = agent('C', writes=[wr(self.doc('C.md'), 202.0)], launch=launched, status='running')
+            jd = self.assign(a, b, c)
+            self.assertEqual(jd.rooms[self.folder].members, ['A', 'B'])
+            self.assertEqual(sorted(k[2] for k in jd.cells), ['A', 'B'])
+            (tp,) = self.topics(self.shown(a, b, c))
+            self.assertEqual([r['p'] for r in tp['rows']], ['A', 'B'])
+
+    def test_two_files_of_one_name_keep_two_seats_by_the_folder_they_are_in(self):
+        a = agent('A', writes=[wr(self.doc('left/report.md'), 200.0)], tag=tag(self.folder), status='running')
+        b = agent('B', writes=[wr(self.doc('right/report.md'), 201.0)], tag=tag(self.folder), status='running')
+        jd = self.assign(a, b)
+        self.assertEqual({k[2]: c.owner for k, c in jd.cells.items()}, {'left/report': 'A', 'right/report': 'B'})
+        (tp,) = self.topics(self.shown(a, b))
+        self.assertEqual({r['p']: (r['agents'], os.path.relpath(r['cells'][0]['path'], self.folder)) for r in tp['rows']},
+                         {'left/report': (['A'], 'left/report.md'), 'right/report': (['B'], 'right/report.md')})
+
+    def test_a_room_inside_a_folder_with_a_brief_is_listed_once(self):
+        self.file('repo/docs/brief.md', '# The whole review\n', 50.0)
+        a, b = self.pair()
+        jd = self.assign(a, b)
+        self.assertEqual(list(jd.rooms), [self.folder])
+        self.assertEqual([(d['root'], [t['dir'] for t in d['topics']]) for d in self.shown(a, b).debates], [(self.folder, [self.folder])])
+
+    def test_an_estimated_room_is_never_the_current_debate_and_a_tag_makes_a_sure_one(self):
+        a, b = self.pair()
+        jd = self.assign(a, b)
+        self.assertEqual((jd.order, jd.current), ([self.folder], None))
+        self.assertEqual([d['current'] for d in self.shown(a, b).debates], [False])
+        jd = self.assign(self.tagged('A'), self.tagged('B'))
+        self.assertEqual((jd.rooms[self.folder].sure, jd.current), (True, self.folder))
+        self.assertEqual([(d['current'], d['sure']) for d in self.shown(self.tagged('A'), self.tagged('B')).debates], [(True, True)])
+
+
+class Closed(Room):
+    """The final of a room (J15): the one document written in the room's folder after all the files, by a sure write, that nothing competes with. Only a room that a tag made is closed: a room that
+    the launch makes is an estimate, and an estimate confirms nothing."""
+
+    def done(self, how='tag', status='done'):
+        if how == 'tag':
+            return self.tagged('A', status=status), self.tagged('B', status=status)
+        return self.pair(status=status)
+
+    def final(self, agents, *orch, jd=None):
+        jd = self.assign(*agents, orch=list(orch))
+        return jd.finals[self.folder], jd
+
+    def closing(self, name='CLOSING.md', ts=300.0, folder=None, mtime=None):
+        path = self.file(os.path.join(folder or 'repo/docs/meeting', name), 'Everything is in; the folder is closed.\n', ts if mtime is None else mtime)
+        return wr(path, ts), path
 
     def test_a_room_with_every_file_in_and_a_closing_document_after_it_is_closed(self):
-        tp = self.topic(self.done())
-        self.assertEqual((tp['room'], [c['state'] for r in tp['rows'] for c in r['cells']]), ('cells', ['done', 'done']))
-        self.assertEqual((tp['final']['exists'], tp['final']['auto'], tp['final']['rel'], tp['final']['path']),
-                         (True, True, '../CLOSING.md', os.path.join(self.bundle, 'CLOSING.md')))
+        ev, path = self.closing()
+        f, jd = self.final(self.done(), ev)
+        self.assertEqual((f.confirmed, f.path, f.by, f.why, f.candidates, jd.closable), (True, path, 'orch', [], [path], {self.folder: True}))
+        self.assertEqual(sorted(self.states(jd).values()), ['done', 'done'])
+        (tp,) = self.topics(self.shown(*self.done(), orch=[ev]))
+        self.assertEqual((tp['final']['exists'], tp['final']['rel'], tp['final']['by'], tp['closable']), (True, 'CLOSING.md', 'orch', True))
 
-    def test_a_document_from_before_the_files_or_with_no_conclusion_name_closes_nothing(self):
-        self.assertFalse(self.topic(self.done(mtime=1.0))['final']['exists'])
-        self.assertFalse(self.topic(self.done(name='notes.md'))['final']['exists'])
-        self.assertFalse(self.topic(self.done(name=None))['final']['exists'])
+    def test_a_document_from_before_the_files_or_with_no_document_closes_nothing(self):
+        ev, path = self.closing(ts=150.0)                                                              # the files were written at 200 and 201
+        f, jd = self.final(self.done(), ev)
+        self.assertEqual((f.confirmed, f.path, f.candidates, f.why, jd.closable), (False, None, [], ['none'], {self.folder: False}))
+        f, jd = self.final(self.done())
+        self.assertEqual((f.confirmed, f.why, f.candidates), (False, ['none'], []))
+
+    def test_the_name_of_the_document_does_not_decide(self):
+        for name in ('notes.md', 'CLOSING.md', 'ruling.md', 'x.md'):
+            ev, path = self.closing(name)
+            f, jd = self.final(self.done(), ev)
+            self.assertEqual((f.confirmed, f.path), (True, path), name)                                  # the name only puts the candidates in order, and here there is one
+            os.remove(path)                                                                              # (a document that is left behind with no record would compete with the next one)
+
+    def test_a_document_written_before_a_later_change_of_the_files_is_withdrawn(self):
+        ev, path = self.closing()
+        a, b = self.done()
+        late = wr(self.doc('A.md', mtime=400.0), 400.0, kind='update')                                   # a participant changed its file after the conclusion
+        f, jd = self.final((agent('A', writes=[*a.writes, late], tag=a.tag, status='done'), b), ev)
+        self.assertEqual((f.confirmed, f.why), (False, ['none']))
+
+    def test_two_documents_after_the_files_are_no_final(self):
+        ev1, p1 = self.closing('CLOSING.md', 300.0)
+        ev2, p2 = self.closing('notes.md', 301.0)
+        f, jd = self.final(self.done(), ev1, ev2)
+        self.assertEqual((f.confirmed, f.why, sorted(f.candidates)), (False, ['several'], sorted([p1, p2])))
 
     def test_a_room_still_working_is_not_closed(self):
-        a, b = self.done()
-        self.assertFalse(self.topic([a, b], 'running')['final']['exists'])
+        ev, path = self.closing()
+        f, jd = self.final(self.done(status='running'), ev)
+        self.assertIn('live_participant', f.why)
+        self.assertEqual((f.confirmed, jd.closable), (False, {self.folder: False}))
 
-    def test_the_conclusion_a_table_names_is_the_final_whatever_stands_above(self):
-        self.done()
-        write(os.path.join(self.bundle, 'brief.md'), '# The whole review\n\n| 주제 | 폴더 | 선행 | 최종 산출물 |\n|---|---|---|---|\n| Edit | `step2/` | — | `final/edit.md` |\n')
-        tp = self.topic(self.done())
-        self.assertEqual((tp['final']['rel'], tp['final']['exists'], tp['final']['auto']), ('final/edit.md', False, False))
+    def test_a_document_above_the_room_is_no_final_of_it(self):
+        ev, path = self.closing('CLOSING.md', folder='repo/docs')                                       # in the folder around the room, as a bundle's conclusion stands
+        f, jd = self.final(self.done(), ev)
+        self.assertEqual((f.confirmed, f.candidates, f.why), (False, [], ['none']))
+
+    def test_a_room_that_the_launch_made_is_never_closed(self):
+        ev, path = self.closing()
+        f, jd = self.final(self.done('launch'), ev)
+        self.assertEqual((f.confirmed, f.why, f.candidates, jd.closable), (False, ['estimated_room'], [path], {self.folder: False}))
 
 
-class NotARoom(Repo):
+class NotARoom(Room):
     def test_a_document_one_of_the_agents_wrote_is_a_result_not_a_guide(self):
-        report = write(os.path.join(self.folder, 'phase.md'), '# Phase report\n')
-        first = self.agent('Write your report to `%s`.' % report, writes=[report])
-        a = self.agent('Read `%s`. Write your notes to `%s`.' % (report, os.path.join(self.folder, 'A.md')))
-        b = self.agent('Read `%s`. Write your notes to `%s`.' % (report, os.path.join(self.folder, 'B.md')))
-        self.assertNoRoom([first, a, b])
-        self.assertNoRoom([a, b, self.agent('Write your report to `%s`.' % report)])             # told to write it, not yet there
+        report = self.doc('phase.md', '# Phase report\n', 150.0)
+        first = agent('first', writes=[wr(report, 150.0)], launch=launch('m0', 't0'), status='done', last=160.0)          # launched on its own, before them
+        a, b = self.pair()
+        jd = self.assign(first, a, b)
+        self.assertEqual(jd.rooms[self.folder].members, ['A', 'B'])                                      # it is no one of them, and its report is no file of theirs
+        self.assertNotIn('phase', {k[2] for k in jd.cells})
+        self.assertNoRoom(self.assign(first, a))                                                         # one launched with it, with a file of its own: no room of two
+        c = agent('C', planned=[plan(report)], launch=launch('m1', 'tC'), status='running')               # told to write it, not yet there
+        jd = self.assign(a, b, c)
+        self.assertEqual((jd.rooms[self.folder].members, sorted(k[2] for k in jd.cells)), (['A', 'B'], ['A', 'B']))
+        self.assertNoRoom(self.assign(a, c))                                                             # what is only asked for is no file of its own
 
     def test_one_agent(self):
-        self.assertNoRoom([self.agent(self.ask('', 'a', own=os.path.join(self.folder, 'A.md')))])
+        self.assertNoRoom(self.assign(self.member('A')))
+        self.assertNoRoom(self.assign(self.tagged('A')))                                                 # one tag is no room
+        other = self.p('repo', 'docs', 'other')
+        os.makedirs(other)
+        self.assertNoRoom(self.assign(self.tagged('A'), agent('B', writes=[wr(self.file('repo/docs/other/B.md'), 200.0)], tag=tag(other))))      # two tags on two folders
 
     def test_the_documents_of_a_repository_everybody_reads(self):
-        for name in ('README.md', 'CLAUDE.md', 'AGENTS.md', 'docs/guide.md'):
-            guide = write(os.path.join(self.top, name), '# Doc\n')
-            top, docs = os.path.dirname(guide), os.path.dirname(guide)
-            a = self.agent('Read `%s`. Write your notes to `%s`.' % (guide, os.path.join(docs, 'A.md')))
-            b = self.agent('Read `%s`. Write your notes to `%s`.' % (guide, os.path.join(docs, 'B.md')))
-            self.assertNoRoom([a, b])                                       # even with the files beside it
-            self.assertNoRoom([self.agent('Read `%s`.' % guide, sent=['x']), self.agent('Read `%s`.' % guide)])
+        for folder in (self.top, self.p('repo', 'docs')):
+            rel = os.path.relpath(folder, self.root)
+            a = agent('A', writes=[wr(self.file(rel + '/A.md', mtime=200.0), 200.0)], launch=launch('m1', 't1'))
+            b = agent('B', writes=[wr(self.file(rel + '/B.md', mtime=201.0), 201.0)], launch=launch('m1', 't2'))
+            self.assertNoRoom(self.assign(a, b))                                                         # even with the files beside it
+            guide = self.file(rel + '/README.md', '# Doc\n', 50.0)
+            a = agent('A', reads=[rd(guide)], launch=launch('m1', 't1'), sent_to=('B',))
+            b = agent('B', reads=[rd(guide)], launch=launch('m1', 't2'))
+            self.assertNoRoom(self.assign(a, b))                                                         # nor with a talk about what they read
+        self.file('repo/notes/README.md', '# Doc\n', 50.0)                                              # (the same, in a folder of the repository that nobody reads: a room)
+        a = agent('A', writes=[wr(self.file('repo/notes/A.md', mtime=200.0), 200.0)], launch=launch('m1', 't1'))
+        b = agent('B', writes=[wr(self.file('repo/notes/B.md', mtime=201.0), 201.0)], launch=launch('m1', 't2'))
+        self.assertEqual(list(self.assign(a, b).rooms), [self.p('repo', 'notes')])
 
     def test_one_file_that_all_of_them_write(self):
-        mins = os.path.join(self.folder, 'minutes.md')
-        self.assertNoRoom([self.agent(self.ask('', 'a', own=mins)), self.agent(self.ask('', 'b', own=mins))])
-        write(mins)
-        self.assertNoRoom([self.agent(self.ask('', 'a'), writes=[mins]), self.agent(self.ask('', 'b'), writes=[mins])], 'done')
+        mins = self.doc('minutes.md')
+        self.assertNoRoom(self.assign(*(agent(i, planned=[plan(mins)], launch=launch('m1', 't' + i)) for i in 'AB')))                # told to write it, not yet there
+        both = [agent(i, writes=[wr(mins, 150.0 + k)], launch=launch('m1', 't' + i), status='done') for k, i in enumerate('AB')]
+        self.assertNoRoom(self.assign(*both))
+        own = [agent(a.id, writes=[*a.writes, wr(self.doc('%s.md' % a.id), 160.0)], launch=a.launch, status='done') for a in both]
+        jd = self.assign(*own)                                                                           # with a file of its own each, they are a room, and minutes.md is no seat of it
+        self.assertEqual((jd.rooms[self.folder].members, sorted(k[2] for k in jd.cells)), (['A', 'B'], ['A', 'B']))
 
     def test_files_outside_the_room(self):
-        for sub in ('out/x/%s.md', '../elsewhere/%s.md'):
-            a = self.agent(self.ask('', 'a', own=os.path.normpath(os.path.join(self.folder, sub % 'A'))))
-            b = self.agent(self.ask('', 'b', own=os.path.normpath(os.path.join(self.folder, sub % 'B'))))
-            self.assertNoRoom([a, b])
-        code = [self.agent('Read `%s`. Implement your part in `%s`.' % (self.guide, os.path.join(self.top, 'svc_%s' % x, 'src', 'part.py')),
-                           writes=[write(os.path.join(self.top, 'svc_%s' % x, 'src', 'part.py'))]) for x in 'ab']
-        self.assertNoRoom(code, 'done')
+        code = [agent(i, writes=[wr(self.file('repo/svc_%s/src/part.py' % i), 190.0)], launch=launch('m1', 't' + i), status='done') for i in 'ab']
+        self.assertNoRoom(self.assign(*code))                                                            # only markdown is a file of a room
+        far = [agent(i, writes=[wr(self.doc('%s/x/%s.md' % (d, i)), 190.0)], launch=launch('m1', 't' + i)) for i, d in (('A', 'out'), ('B', 'other'))]
+        self.assertNoRoom(self.assign(*far))                                                             # two folders below, in two places: no folder holds both
+        mine = [agent(i, writes=[wr(self.doc('%s.md' % i, mtime=190.0), 190.0, evidence='planned', proof='sha', span=(100.0, 300.0), text='x\n')], launch=launch('m1', 't' + i), status='done')
+                for i in 'AB']
+        self.assertNoRoom(self.assign(*mine))                                                            # what a launch command saved is no file of its own
 
     def test_a_guide_of_each_ones_own_that_is_missing_or_that_a_later_message_names(self):
-        own = [self.agent('Read `%s`. Write your notes to `%s`.' % (write(os.path.join(self.folder, 'agenda_%s.md' % x)), os.path.join(self.folder, '%s.md' % x))) for x in 'AB']
-        self.assertNoRoom(own)
-        gone = os.path.join(self.folder, 'gone.md')
-        self.assertNoRoom([self.agent('Read `%s`. Write your notes to `%s`.' % (gone, os.path.join(self.folder, '%s.md' % x))) for x in 'AB'])
-        late = []
-        for x in 'AB':
-            a = self.agent('Write your notes to `%s`.' % os.path.join(self.folder, '%s.md' % x))
-            a.received.append({'ts': 120.0, 'text': 'Read `%s` and follow it.' % self.guide})
-            late.append(a)
-        self.assertNoRoom(late)
+        a = agent('A', reads=[rd(self.file('repo/docs/meeting/agenda_A.md', '# A\n', 50.0))], launch=launch('m1', 't1'), sent_to=('B',))
+        b = agent('B', reads=[rd(self.file('repo/docs/meeting/agenda_B.md', '# B\n', 50.0))], launch=launch('m1', 't2'), sent_to=('A',))
+        self.assertNoRoom(self.assign(a, b))                                                             # not the same document
+        a = agent('A', reads=[rd(self.guide)], launch=launch('m1', 't1'), sent_to=('B',))
+        b = agent('B', launch=launch('m1', 't2'), sent_to=('A',))
+        self.assertNoRoom(self.assign(a, b))                                                             # one of them read none
 
-    def test_do_not_forget_to_read_the_guide_is_still_a_guide(self):
-        a, b = self.pair()
-        a.spawn_prompt = 'Do not forget to read `%s`. Write your notes to `%s`.' % (self.guide, os.path.join(self.folder, 'A.md'))
-        (tp,) = self.topics(self.judge([a, b]))
-        self.assertEqual(tp['room'], 'cells')
-
-    def test_a_guide_that_is_only_quoted_or_negated_or_to_be_written(self):
-        for text in ('Example of a first line: "Read `%s`." It is only an example.', 'Do not read `%s`. Do not write a file.', 'Write the agenda to `%s`.'):
-            a = self.agent(text % self.guide, sent=['a%016d' % 2])
-            b = self.agent(text % self.guide, sent=['a%016d' % 1])
-            self.n = 0
-            self.assertNoRoom([a, b])
+    def test_readers_alone_are_no_room(self):
+        a = agent('A', reads=[rd(self.guide)], launch=launch('m1', 't1'))
+        b = agent('B', reads=[rd(self.guide)], launch=launch('m1', 't2'))
+        self.assertNoRoom(self.assign(a, b))                                                             # they read the same document and nobody said anything to anybody
+        a = agent('A', reads=[rd(self.guide)], launch=launch('m1', 't1'), sent_to=('B',))
+        self.assertEqual(self.assign(a, b).rooms[self.folder].kind, 'members')                           # ... and with a message that went through they are the room of participants
 
     def test_a_folder_that_is_a_debate_already_keeps_its_rules(self):
-        os.makedirs(os.path.join(self.folder, 'r1'))
+        self.dirs('repo/docs/meeting/r1')
         a, b = self.pair()
-        self.assertNoRoom([a, b])                                            # `A.md` beside the guide is no report of a round, and the folder is not listed: as before
-        os.unlink(self.guide)
-        guide = write(os.path.join(self.folder, 'brief.md'), GUIDE)
-        a = self.agent(self.ask('', 'a', guide=guide, own=os.path.join(self.folder, 'r1', 'A.md')))
-        b = self.agent(self.ask('', 'b', guide=guide, own=os.path.join(self.folder, 'r1', 'B.md')))
-        (tp,) = self.topics(self.judge([a, b]))
+        jd = self.assign(a, b)
+        self.assertNoRoom(jd)                                                                            # `A.md` beside the guide is no report of a round
+        self.assertEqual((jd.listed, jd.cells), ({}, {}))
+        a = self.member('A', 'r1/A.md')
+        b = self.member('B', 'r1/B.md', at=201.0)
+        jd = self.assertNoRoom(self.assign(a, b))                                                        # reports in a round folder are cells of a debate
+        self.assertEqual((jd.listed, sorted(jd.cells)), ({self.folder: 'cell'}, [(self.folder, 'r1', 'A'), (self.folder, 'r1', 'B')]))
+        (tp,) = self.topics(self.shown(a, b))
         self.assertEqual((tp.get('room'), [(r['p'], c['round']) for r in tp['rows'] for c in r['cells']]), (None, [('A', 1), ('B', 1)]))
+        jd = self.assertNoRoom(self.assign(agent('A', tag=tag(self.folder)), agent('B', tag=tag(self.folder))))      # the room tag of a folder with a round is for the debate
+        self.assertEqual(jd.listed, {self.folder: 'tag'})
+
+    def test_a_write_that_is_not_a_sure_whole_file_is_no_file_of_its_own(self):
+        a = self.member('A')
+        b_file = self.doc('B.md', mtime=100.0)                                                           # on disk from before
+        sure = wr(b_file, 201.0)
+        self.assertEqual(list(self.assign(a, agent('B', writes=[sure], launch=launch('m1', 'tB'))).rooms), [self.folder])                      # (the control: a Write that worked)
+        for name, ev in (('failed', wr(b_file, 201.0, ok=False)), ('result unknown', wr(b_file, 201.0, ok=None)),
+                         ('edit of a file that was there', wr(b_file, 201.0, kind='update')), ('append', wr(b_file, 201.0, kind='append')),
+                         ('shell, save not seen in its window', wr(b_file, 201.0, evidence='shell', proof='window', span=(150.0, 152.0))),     # the file is from time 100
+                         ('shell, that did not decide its exit status and failed', wr(b_file, 201.0, evidence='shell', ok=None, proof='window', span=(200.0, 202.0)))):
+            b = agent('B', writes=[ev], launch=launch('m1', 'tB'))
+            self.assertNoRoom(self.assign(a, b))
+        saved = self.doc('B.md', mtime=151.0)
+        b = agent('B', writes=[wr(saved, 201.0, evidence='shell', proof='window', span=(150.0, 152.0))], launch=launch('m1', 'tB'))
+        self.assertEqual(list(self.assign(a, b).rooms), [self.folder])                                   # a masked place counts when the file was saved in the time of the command
 
     def test_a_flat_review_that_declares_its_result_files_keeps_its_rules(self):
-        flat = os.path.join(self.top, 'docs', 'review')
-        guide = write(os.path.join(flat, 'brief.md'), '# Review\n\nReviewers and their result files: `sol.md` (reviewer sol) and `opus.md` (reviewer opus).\n')
-        a = self.agent('Read `%s`. Write your findings to `%s`.' % (guide, os.path.join(flat, 'sol.md')))
-        b = self.agent('Read `%s`. Write your findings to `%s`.' % (guide, os.path.join(flat, 'opus.md')))
-        (tp,) = self.topics(self.judge([a, b]))
-        self.assertEqual((tp['kind'], tp.get('room'), sorted(r['p'] for r in tp['rows'])), ('flat', None, ['opus', 'sol']))
+        """A brief that says who writes which result file is only text: it makes no flat debate (the kind is gone), and no room of two agents that nobody launched together (C45 limit)."""
+        self.file('repo/docs/review/brief.md', '# Review\n\nReviewers and their result files: `sol.md` (reviewer sol) and `opus.md` (reviewer opus).\n', 50.0)
+        sol, opus = self.file('repo/docs/review/sol.md', mtime=200.0), self.file('repo/docs/review/opus.md', mtime=210.0)
+        jd = self.assign(agent('sol', writes=[wr(sol, 200.0)], launch=None, status='done'), agent('opus', writes=[wr(opus, 210.0)], launch=None, status='done'))
+        self.assertEqual((jd.rooms, jd.listed, jd.cells), ({}, {}, {}))                                  # nothing is listed
+        jd = self.assign(agent('sol', writes=[wr(sol, 200.0)], launch=launch('m1', 't1'), status='done'), agent('opus', writes=[wr(opus, 210.0)], launch=launch('m1', 't2'), status='done'))
+        (room,) = jd.rooms.values()                                                                      # launched together they are a room, an estimate: never the current debate
+        self.assertEqual((room.folder, room.sure, room.members, jd.current), (self.p('repo/docs/review'), False, ['opus', 'sol'], None))
+
+    def test_a_folder_that_holds_debates_is_no_room(self):
+        self.dirs('repo/runs/x/r1')
+        pair = [agent(i, writes=[wr(self.file('repo/runs/%s.md' % i, mtime=200.0), 200.0)], launch=launch('m1', 't' + i)) for i in 'PQ']
+        self.assertNoRoom(self.assign(*pair))                                                            # a bundle's folder is the folder of its topics
+        os.rmdir(self.p('repo/runs/x/r1'))
+        self.assertEqual(list(self.assign(*pair).rooms), [self.p('repo/runs')])                           # ... and the same two, with no debate below, are a room
 
     def test_messages_alone_are_not_a_meeting_when_the_orchestrator_sends_them_or_a_participant_has_a_file(self):
-        a, b = self.agent('Read `%s`. Answer in your reply only.' % self.guide), self.agent('Read `%s`. Answer in your reply only.' % self.guide)
-        a.orch_msgs.append({'ts': 130.0, 'summary': '', 'text': 'keep it short'})
-        self.assertNoRoom([a, b])                                            # nobody told anybody anything
-        a, b = self.agent('Read `%s`. Answer in your reply only.' % self.guide), self.agent('Read `%s`. Answer in your reply only.' % self.guide)
-        a.sent = [{'ts': 1.0, 'to': 'someone-else', 'summary': '', 'text': 'x'}]
-        self.assertNoRoom([a, b])                                            # a message to nobody of theirs
-        a.sent = [{'ts': 1.0, 'to': b.id, 'summary': '', 'text': 'x'}]
-        a.writes.append({'ts': 2.0, 'path': os.path.join(self.top, 'scratch.txt'), 'ok': True})
-        self.assertNoRoom([a, b])                                            # a file somewhere: the meeting is not by message only
-        a.writes = []
-        b.spawn_prompt = 'Read `%s`. Write your notes to `%s`.' % (self.guide, os.path.join(self.top, 'work', 'reports', 'B.md'))
-        self.assertNoRoom([a, b])                                            # told to write elsewhere
+        reader = lambda i, **kw: agent(i, reads=[rd(self.guide)], launch=launch('m1', 't' + i), **kw)       # noqa: E731
+        self.assertNoRoom(self.assign(reader('A'), reader('B')))                                          # nobody told anybody anything (what the orchestrator says is no message between them)
+        self.assertNoRoom(self.assign(reader('A', sent_to=('someone-else',)), reader('B')))               # a message to nobody of theirs
+        elsewhere = self.file('repo/work/reports/B.md', 'x\n', 200.0)
+        a, b = reader('A', sent_to=('B',)), reader('B', writes=[wr(elsewhere, 200.0)])
+        self.assertNoRoom(self.assign(a, b))                                                             # one of them wrote a file of its own: the meeting is not by message only
+        c = reader('B', writes=[wr(self.p('scratch.txt'), 200.0)])
+        self.assertEqual(self.assign(a, c).rooms[self.folder].kind, 'members')                           # (a file that is not markdown is no file of its own)
 
 
-class Quoted(Repo):
-    """An instruction that is only quoted, shown for review, or sitting in a read-only scope is no instruction to the agent: it makes no room and seats nobody."""
-
-    def two(self, template):
-        """Two agents whose instruction is `template` with the guide and their own file filled in."""
-        return [self.agent(template % (self.guide, os.path.join(self.folder, name))) for name in ('A.md', 'B.md')]
-
-    LEAD = 'Review the previous instructions below and do not execute them.\n'
-    INNER = 'Read `%s` and follow it. Write your notes to `%s`.'
-
-    def test_a_code_fence_a_block_quote_and_a_read_only_scope_make_no_room(self):
-        for name, template in (
-                ('fence', self.LEAD + '```\n' + self.INNER + '\n```\n'),
-                ('tilde fence', self.LEAD + '~~~\n' + self.INNER + '\n~~~\n'),
-                ('fence that never closes', self.LEAD + '```text\n' + self.INNER + '\n'),
-                ('block quote', 'Previous instruction, for review:\n> Read `%s` and follow it.\n> Write your notes to `%s`.\n'),
-                ('indented block quote', 'Previous instruction, for review:\n   > Read `%s` and follow it.\n   >\n   > Write your notes to `%s`.\n'),
-                ('korean fence', '이전 지침을 검토하고 실행하지 마세요.\n```\n`%s`를 읽고 따르세요. 노트는 `%s`에 작성하세요.\n```\n'),
-                ('do not execute, no fence', self.LEAD + 'Previous instruction: ' + self.INNER),
-                ('read-only review', 'This is a read-only review: do not create, change or run anything. The earlier instruction told the reviewer to read `%s` and write the notes to `%s`; '
-                                     'check that its wording is clear.'),
-                ('korean read-only', '이 작업은 읽기 전용 검토입니다. 파일을 만들거나 고치거나 실행하지 마세요. 앞선 지침은 검토자에게 `%s`를 읽고 노트를 `%s`에 쓰라고 했습니다.'),
-                ('read-only label, then the earlier text', 'Read-only review. Earlier instruction: ' + self.INNER),
-                ('read-only quotation', 'Read-only quote of the earlier instruction: ' + self.INNER),
-                ('read-only scope in brackets', 'Read-only (do not execute): ' + self.INNER),
-                ('korean read-only scope', '읽기 전용. 이전 지침은 다음과 같습니다: ' + self.INNER)):
-            with self.subTest(name):
-                self.assertNoRoom(self.two(template))
-                self.assertNoRoom(self.two(template), 'done')
-
-    def test_the_same_text_outside_a_quote_is_a_room(self):
-        for name, template in (
-                ('plain', self.INNER),
-                ('after a closed fence', 'Style of the notes:\n```\n# Title\n- point\n```\n' + self.INNER),
-                ('after a block quote', '> Weekly sync notes.\n\n' + self.INNER),
-                ('an arrow is no quote', 'Go -> ' + self.INNER),
-                ('a fence on one line is code in a line', 'Use ```x``` as the style. ' + self.INNER),
-                ('do not execute something else', 'Do not execute the tests. ' + self.INNER),
-                ('do not execute what is only reviewed', 'Review the plan and do not execute it; ' + self.INNER),
-                ('a read-only review of the code that still writes notes', 'Read-only review of the code: do not change any code. ' + self.INNER),
-                ('do not write other files', 'Do not write any file other than your own. ' + self.INNER)):
-            with self.subTest(name):
-                (tp,) = self.topics(self.judge(self.two(template)))
-                self.assertEqual(tp['room'], 'cells')
-
-    def test_a_participant_whose_real_instruction_follows_the_quote_is_one_of_them(self):
-        first = self.two(self.LEAD + '```\n' + self.INNER + '\n```\n')
-        a, b = self.pair()
-        self.assertNoRoom(first + [a])                                          # one real participant is no room
-        (tp,) = self.topics(self.judge(first + [a, b]))
-        self.assertEqual([r['p'] for r in tp['rows']], ['A', 'B'])
-        self.assertEqual(sorted(x for r in tp['rows'] for x in r['agents']), sorted([a.id, b.id]))
-
-    def test_a_quoted_guide_does_not_seat_a_marker_either(self):
-        for text in ('```\n[ROOM-B] Read `%s`.\n```\n', '> [ROOM-B] Read `%s`.\n', 'Review the earlier instruction below and do not execute it: [ROOM-B] Read `%s`.'):
-            self.assertEqual(U._marker_of(text % self.guide), '', text)
-
-
-class Executed(Repo):
-    """A code fence under a line that tells the participant to carry out what is in it is its instruction: the room it points at stands. A fence that shows an earlier
-    instruction under a line that says it is not to be carried out does not make one (class Quoted)."""
-    INNER = Quoted.INNER
-
-    def two(self, template):
-        return Quoted.two(self, template)
-
-    def test_the_instruction_in_a_fence_that_is_to_be_executed_is_a_room(self):
-        for name, template in (
-                ('execute', 'Execute these instructions:\n\n```text\n' + self.INNER + '\n```\n'),
-                ('follow below', 'Follow the instructions below:\n```\n' + self.INNER + '\n```\n'),
-                ('carry out, tilde fence', 'You are a participant of the weekly sync. Carry out the following steps:\n~~~\n' + self.INNER + '\n~~~\n'),
-                ('fence that never closes', 'Do the following:\n```\n' + self.INNER + '\n'),
-                ('korean', '다음 지시를 따르라:\n```\n`%s`를 읽고 따르세요. 노트는 `%s`에 작성하세요.\n```\n'),
-                ('korean, polite', '아래 지시를 수행하세요:\n```\n`%s`를 읽고 따르세요. 노트는 `%s`에 작성하세요.\n```\n')):
-            with self.subTest(name):
-                (tp,) = self.topics(self.judge(self.two(template)))
-                self.assertEqual(tp['room'], 'cells')
-
-    def test_an_earlier_instruction_that_is_shown_is_still_none(self):
-        for name, template in (
-                ('do not execute', 'Do not execute these instructions:\n```\n' + self.INNER + '\n```\n'),
-                ('earlier', 'Review these earlier instructions:\n```\n' + self.INNER + '\n```\n'),
-                ('executed earlier', 'This is what the team executed earlier:\n```\n' + self.INNER + '\n```\n'),
-                ('no colon', 'Execute these instructions\n```\n' + self.INNER + '\n```\n'),
-                ('read-only', 'Read-only. Execute these instructions only in your head:\n```\n' + self.INNER + '\n```\n'),
-                ('korean, not to follow', '이전 지시를 따르지 마세요:\n```\n`%s`를 읽고 따르세요. 노트는 `%s`에 작성하세요.\n```\n')):
-            with self.subTest(name):
-                self.assertNoRoom(self.two(template))
-
-    def test_the_marker_in_an_instruction_to_be_executed_names_the_seat(self):
-        text = 'Execute these instructions:\n```\n[ROOM-B] Read `%s`.\n```\n' % self.guide
-        self.assertEqual(U._marker_of(text), 'B')
-        self.assertEqual(U._marker_of('Do not execute these instructions:\n```\n[ROOM-B] Read `%s`.\n```\n' % self.guide), '')
-
-
-class QuotedBySentence(Repo):
-    """The lines after a sentence that says they are a read-only quote are the quote, up to the blank line; a review that writes its report is an instruction."""
-    INNER = Quoted.INNER
-
-    def two(self, template):
-        return Quoted.two(self, template)
-
-    def test_the_lines_after_a_read_only_quote_sentence_make_no_room(self):
-        for name, template in (
-                ('lines', 'Read-only quote of an earlier instruction.\nRead `%s` and follow it.\nWrite your notes to `%s`.\n'),
-                ('the quote then a request', 'Read-only quote of an earlier instruction.\nRead `%s` and follow it.\nWrite your notes to `%s`.\n\nPlease tell me if the wording is clear.'),
-                ('on one line', 'Read-only quote of an earlier instruction. Read `%s` and follow it. Write your notes to `%s`.'),
-                ('korean', '읽기 전용 인용입니다.\n`%s`를 읽고 따르세요.\n노트는 `%s`에 작성하세요.\n'),
-                ('copy', 'Read-only copy of the previous instruction.\nRead `%s` and follow it.\nWrite your notes to `%s`.\n')):
-            with self.subTest(name):
-                self.assertNoRoom(self.two(template))
-                self.assertNoRoom(self.two(template), 'done')
-
-    def test_what_follows_the_blank_line_is_the_participants_own(self):
-        template = 'Read-only quote of an earlier instruction.\nRead `%s` and follow it.\nWrite your notes to `%s`.\n\nNow your own task: read `%s` and write your notes to `%s`.'
-        agents = []
-        for name in ('A.md', 'B.md'):
-            own = os.path.join(self.folder, name)
-            agents.append(self.agent(template % (self.guide, os.path.join(self.folder, 'Z.md'), self.guide, own)))
-        (tp,) = self.topics(self.judge(agents))
-        self.assertEqual(sorted(r['p'] for r in tp['rows']), ['A', 'B'])
-
-    def test_a_review_that_writes_its_report_is_an_instruction(self):
-        for name, template in (
-                ('a review of the code', 'Read-only review of the code. Read `%s` and follow it. Write your notes to `%s`.'),
-                ('a review of the earlier instruction, the report in its own line', 'Read-only review of the earlier instruction.\nRead `%s` and follow it.\nWrite your notes to `%s`.'),
-                ('quote is a verb', 'Read-only: quote the lines you checked in your notes.\nRead `%s` and follow it.\nWrite your notes to `%s`.'),
-                ('korean review', '읽기 전용 검토입니다.\n`%s`를 읽고 따르세요.\n노트는 `%s`에 작성하세요.\n')):
-            with self.subTest(name):
-                (tp,) = self.topics(self.judge(self.two(template)))
-                self.assertEqual(tp['room'], 'cells')
-
-
-class Delivered(Repo):
+class Delivered(Room):
     """A message that failed to go (its tool result was an error) is no talk: nothing was said to the other participant."""
 
     def meeting(self, *oks):
-        a = self.agent('Read `%s`. Settle the open items with the other participants by message; write no file.' % self.guide, desc='B Budget')
-        b = self.agent('Read `%s`. Settle the open items with the other participants by message; write no file.' % self.guide, desc='C Risk')
+        """Two agents of one launch that read the guide, and the messages they sent (`oks`: True, False, None, 'absent' for a record with no result, 'none' for no message)."""
+        a, b = (server.Agent('a%016d' % i, {'description': d}) for i, d in ((1, 'B Budget'), (2, 'C Risk')))
+        for x in (a, b):
+            x.spawn_ts = x.first_ts = 100.0
+            x.last_ts = 200.0
+            x.cwd = self.top
+            x.launch = launch('m1', 't' + x.id)
+            x.ev.add_read(rd(self.guide))
         a.sent = [{'ts': 160.0, 'to': b.id, 'summary': '', 'text': 'my view', **({} if oks[0] == 'absent' else {'ok': oks[0]})}]
         b.sent = [] if oks[1] == 'none' else [{'ts': 161.0, 'to': a.id, 'summary': '', 'text': 'mine', **({} if oks[1] == 'absent' else {'ok': oks[1]})}]
         return a, b
 
+    def judge(self, a, b):
+        s = types.SimpleNamespace(agents={a.id: a, b.id: b}, _file_cache={}, _head_cache={}, cwd=self.top)
+        return debates.judge(s, {a.id: 'running', b.id: 'running'})
+
     def test_a_failed_message_is_no_meeting_and_the_others_are(self):
-        self.assertNoRoom(self.meeting(False, 'none'))
-        self.assertNoRoom(self.meeting(False, False))
+        for oks in ((False, 'none'), (False, False)):
+            jd = self.judge(*self.meeting(*oks))
+            self.assertEqual([t for t in self.topics(jd) if t.get('room')], [], oks)
         for oks in ((True, 'none'), ('absent', 'none'), (None, 'none'), (False, True), (False, 'absent')):
-            (tp,) = self.topics(self.judge(list(self.meeting(*oks))))
+            (tp,) = self.topics(self.judge(*self.meeting(*oks)))
             self.assertEqual(tp['room'], 'members', oks)
 
+    def test_what_the_judgment_is_given_is_the_messages_that_went_through(self):
+        a, b = self.meeting(False, True)
+        s = types.SimpleNamespace(agents={a.id: a, b.id: b}, _file_cache={}, _head_cache={}, cwd=self.top)
+        sf = debates.session_facts(s, {})
+        self.assertEqual({f.id: f.sent_to for f in sf.agents}, {a.id: (), b.id: (a.id,)})
 
-class Together(Repo):
-    """A room is where the participants work at the same time and in the room's folder: agents run one after the other, or editing code elsewhere, are not in a meeting."""
 
-    def report(self, name):
-        return os.path.join(self.folder, 'impl', name + '.md')
+class Together(Room):
+    """A room is where the agents that were launched together work in the room's folder: agents launched one after the other, or changing code elsewhere, are not in a meeting. There is no rule
+    of time: the records of when they ran say nothing of whether they were launched together (CONTRACT J14: no 60 seconds, no `_present_together`)."""
 
     def code(self, name):
-        return os.path.join(self.top, 'src', name, 'part.py')
+        return self.p('repo', 'src', name, 'part.py')
 
-    def implementers(self, told=True, wrote=True, report=True, names='xyz', **kw):
-        """One agent each: reads the guide, changes the code of its own part and writes its report (a file one folder below the guide)."""
-        out = []
-        for name in names:
-            text = 'Read `%s` and follow it.' % self.guide
-            if told:
-                text += ' Implement your part in `%s`.' % self.code(name) + (' Write a short report to `%s`.' % self.report(name) if report else '')
-            writes = ([self.code(name)] + ([self.report(name)] if report else [])) if wrote else []
-            for p in writes:
-                write(p)
-            out.append(self.agent(text, writes=writes, **kw))
-        return out
-
-    def reporter(self, name, code=False):
-        """An agent that reads the guide and writes its report one folder below it (and, with `code`, also the code of its part elsewhere)."""
-        paths = ([self.code(name)] if code else []) + [self.report(name)]
-        for p in paths:
-            write(p)
-        return self.agent('Read `%s` and follow it. Write a short report to `%s`.' % (self.guide, self.report(name)), writes=paths)
+    def reporter(self, name, code=None, group='m1', report=True, **kw):
+        """An agent of `group` that wrote its report one folder below the guide; `code` ('tool', 'shell', 'planned') is how it also wrote the code of its part elsewhere in the repository."""
+        writes = []
+        if code:
+            ev = dict(tool={}, shell=dict(evidence='shell', proof='exit'), planned=dict(evidence='planned', proof='sha', span=(100.0, 300.0), text='x\n'))
+            writes.append(wr(self.file('repo/src/%s/part.py' % name, mtime=190.0), 190.0, **ev[code]))
+        if report:
+            writes.append(wr(self.doc('impl/%s.md' % name), 200.0))
+        kw.setdefault('status', 'done')
+        return agent(name, writes=writes, launch=launch(group, 't' + name), **kw)
 
     def test_agents_that_only_write_their_reports_below_the_guide_are_a_room(self):
-        (tp,) = self.topics(self.judge([self.reporter(n) for n in 'xyz'], 'done'))
-        self.assertEqual((tp['room'], sorted(r['p'] for r in tp['rows'])), ('cells', ['x', 'y', 'z']))
+        jd = self.assign(*(self.reporter(n) for n in 'xyz'))
+        (room,) = jd.rooms.values()
+        self.assertEqual((room.folder, room.members, sorted(k[2] for k in jd.cells)), (self.p('repo/docs/meeting/impl'), ['x', 'y', 'z'], ['x', 'y', 'z']))
 
     def test_agents_that_change_code_elsewhere_and_report_beside_the_plan_are_no_room(self):
-        self.assertNoRoom(self.implementers(told=True, wrote=True), 'done')                 # told and wrote
-        self.assertNoRoom(self.implementers(told=True, wrote=False), 'running')             # told: nothing is written yet
-        self.assertNoRoom(self.implementers(told=False, wrote=True), 'done')                # the instruction names no path: what they wrote says it
-        self.assertNoRoom(self.implementers(told=True, wrote=False, report=False), 'running')
+        self.assertNoRoom(self.assign(*(self.reporter(n, 'tool') for n in 'xyz')))                       # wrote the code with a tool, and the report
+        self.assertNoRoom(self.assign(*(self.reporter(n, 'shell') for n in 'xyz')))                      # ... with a shell command that decides its own exit status
+        self.assertNoRoom(self.assign(*(agent(n, planned=[plan(self.doc('impl/%s.md' % n))], launch=launch('m1', 't' + n)) for n in 'xyz')))        # asked to report: nothing is written yet
+        self.assertEqual(len(self.assign(*(self.reporter(n, 'planned') for n in 'xyz')).rooms), 1)       # the output of a launch command is no change of the work
 
     def test_the_majority_decides_one_that_edits_elsewhere_does_not_end_the_room(self):
-        (tp,) = self.topics(self.judge([self.reporter('x'), self.reporter('y'), self.reporter('z', code=True)], 'done'))
-        self.assertEqual(sorted(r['p'] for r in tp['rows']), ['x', 'y', 'z'])                # one of three
-        self.assertNoRoom([self.reporter('x'), self.reporter('y', code=True), self.reporter('z', code=True)], 'done')        # two of three
-        (tp,) = self.topics(self.judge([self.reporter('x'), self.reporter('y', code=True)], 'done'))                         # one of two is half, not more than half
-        self.assertEqual(sorted(r['p'] for r in tp['rows']), ['x', 'y'])
+        jd = self.assign(self.reporter('x'), self.reporter('y'), self.reporter('z', 'tool'))
+        self.assertEqual(sorted(r.members for r in jd.rooms.values()), [['x', 'y', 'z']])                # one of three
+        self.assertNoRoom(self.assign(self.reporter('x'), self.reporter('y', 'tool'), self.reporter('z', 'tool')))        # two of three
+        jd = self.assign(self.reporter('x'), self.reporter('y', 'tool'))                                 # one of two is half, not more than half
+        self.assertEqual(sorted(r.members for r in jd.rooms.values()), [['x', 'y']])
 
     def test_agents_that_run_one_after_the_other_are_no_room(self):
-        a, b = self.pair(start=100.0, last=150.0)
-        b.spawn_ts = b.first_ts = 300.0
-        b.last_ts = 360.0
-        self.assertNoRoom([a, b], 'done')
-        self.assertNoRoom([a, b], {a.id: 'done', b.id: 'running'})                           # the second one still working does not give the first more time
-        b.spawn_ts = b.first_ts = 149.0                                                       # starts before the first one is over: they were there together
-        (tp,) = self.topics(self.judge([a, b], 'done'))
-        self.assertEqual(tp['room'], 'cells')
-        b.spawn_ts = b.first_ts = 150.0                                                       # starts the moment the first ended: not together (the latest start < the earliest end)
-        self.assertNoRoom([a, b], 'done')
+        a = self.member('A', start=100.0, last=150.0, status='done')
+        later = lambda **kw: self.member('B', group='m2', at=301.0, start=300.0, last=360.0, **kw)         # noqa: E731  (launched by another call, later)
+        self.assertNoRoom(self.assign(a, later(status='done')))
+        self.assertNoRoom(self.assign(a, later(status='running')))                                        # still working: no more time for the first
+        self.assertNoRoom(self.assign(a, self.member('B', group='m2', at=151.0, start=149.0, last=360.0, status='running')))      # even when it starts before the first one is over
+        b = self.member('B', group='m1', at=301.0, start=300.0, last=360.0, status='done')                # the same two, launched together (and one after the other: it is no matter)
+        self.assertEqual(list(self.assign(a, b).rooms), [self.folder])
+        unknown = lambda x: agent(x.id, writes=x.writes, launch=None, status='done')                       # noqa: E731  (a launch that is not known is no group, and two of them are not one)
+        self.assertNoRoom(self.assign(a, unknown(b)))
+        self.assertNoRoom(self.assign(unknown(a), unknown(b)))
 
     def test_a_running_agent_is_there_until_now_and_one_that_cannot_be_seen_is_there_until_its_last_record(self):
-        a, b = self.pair(start=100.0, last=150.0)
-        b.spawn_ts = b.first_ts = 300.0
-        self.assertNoRoom([a, b], {a.id: 'unknown', b.id: 'running'})                        # `unknown`: its last record is when it was last known to be there
-        a.last_ts = 500.0
-        (tp,) = self.topics(self.judge([a, b], {a.id: 'running', b.id: 'running'}))
-        self.assertEqual(tp['room'], 'cells')
+        a = self.member('A', start=100.0, last=150.0)
+        b = self.member('B', at=301.0, start=300.0, last=360.0)                                          # started after the first one's last record: launched together, so in the room
+        for sa, sb in (('running', 'running'), ('unknown', 'running'), ('done', 'done'), ('done', 'unknown'), ('stalled', 'interrupted')):
+            jd = self.assign(agent('A', writes=a.writes, launch=a.launch, status=sa, start=100.0, last=150.0), agent('B', writes=b.writes, launch=b.launch, status=sb, start=300.0, last=360.0))
+            self.assertEqual(len(jd.rooms), 1, (sa, sb))                                                 # whatever the state, whenever they ran: nothing in the room is told by time
 
     def test_an_agent_whose_time_the_records_do_not_give_is_in_no_room(self):
         a, b = self.pair()
-        a.spawn_ts = a.first_ts = 0                                                          # no start
-        self.assertNoRoom([a, b], 'done')
-        a, b = self.pair()
-        a.last_ts = 0                                                                        # no end, and not running: it cannot be placed
-        self.assertNoRoom([a, b], 'done')
-        (tp,) = self.topics(self.judge([a, b], 'running'))                                   # a running one is there until now whatever its last record says
-        self.assertEqual(tp['room'], 'cells')
+        unplaced = agent('B', writes=b.writes, launch=None, status='done')                               # what cannot be told is its launch: it is in no room
+        self.assertNoRoom(self.assign(a, unplaced))
+        for kw in (dict(start=0.0), dict(last=0.0)):                                                      # no start, no end: the time is no input of a room
+            blank = agent('A', writes=a.writes, launch=a.launch, status='done', **kw)
+            self.assertEqual(self.assign(blank, b).rooms[self.folder].members, ['A', 'B'], kw)
 
     def test_the_most_that_were_there_at_one_time_are_the_room(self):
-        a, b = self.pair(start=100.0, last=200.0)
-        late = self.agent(self.ask('', 'c', own=os.path.join(self.folder, 'C.md')), start=900.0, last=950.0)
-        (tp,) = self.topics(self.judge([a, b, late], 'done'))
-        self.assertEqual(sorted(r['p'] for r in tp['rows']), ['A', 'B'])                     # the one that came an hour later is in no room with them
+        a, b = self.pair(start=100.0, last=200.0, status='done')
+        late = self.member('C', 'C.md', group='m2', at=901.0, start=900.0, last=950.0, status='done')   # launched by a call of its own an hour later
+        self.assertEqual(self.assign(a, b, late).rooms[self.folder].members, ['A', 'B'])
+        same = self.member('C', 'C.md', group='m1', at=901.0, start=900.0, last=950.0, status='done')    # launched with them, however late it came
+        self.assertEqual(self.assign(a, b, same).rooms[self.folder].members, ['A', 'B', 'C'])
 
 
-class Scratch(Repo):
-    """Only a file of the work that an agent changes outside the guide's folder is a change of the work: what a shell command saved (a redirect, a log), and the files an
-    agent keeps in a folder for scratch work outside the repository, are not. A room of reviewers stays one when most of them do that."""
+class Scratch(Room):
+    """Only a file of the work that an agent changes outside the guide's folder is a change of the work: what a launch command saved (a redirect, a log), a shell command that cannot be told to have
+    worked, and the files an agent keeps in a folder for scratch work outside the repository, are not. A room of reviewers stays one when most of them do that."""
 
     def scratch(self, *parts):
-        return os.path.join(os.path.dirname(self.top), 'scratch', *parts)
+        return self.p('scratch', *parts)
 
-    def reviewers(self, names='ABC', extra=None):
-        """Each reads the guide and writes its notes beside it (the Write tool); `extra(name, agent)` adds what else it does."""
+    def reviewers(self, names='ABC', extra=None, tops=False, cwd=''):
+        """Each is launched with the others, and writes its notes beside the guide (the Write tool); `extra(name)` is the other writes of it."""
         out = []
         for name in names:
-            own = os.path.join(self.folder, name + '.md')
-            write(own)
-            a = self.agent('Read `%s` and follow it. Write your notes to `%s`.' % (self.guide, own), writes=[own])
-            if extra:
-                extra(name, a)
-            out.append(a)
+            writes = [wr(self.doc(name + '.md'), 200.0)] + (extra(name) if extra else [])
+            out.append(agent(name, writes=writes, launch=launch('m1', 't' + name), status='running', cwd=cwd))
         return out
 
-    def rooms(self, agents, status='running'):
-        return [t for t in self.topics(self.judge(agents, status)) if t.get('room')]
+    def rooms(self, agents, **kw):
+        return list(self.assign(*agents, **kw).rooms.values())
 
     def test_what_a_launch_command_saves_is_no_change_of_the_work(self):
-        def log(name, a):
-            a.redirects = [{'fd': 1, 'op': '>', 'path_resolved': os.path.join(self.top, 'logs', name + '.txt')}]
-            a.out_paths = [{'ts': 100.0, 'path': os.path.join(self.top, 'logs', name + '.out')}]
+        def log(name):
+            out = []
+            for ext, proof in (('txt', 'window'), ('out', 'sha')):
+                path = self.file('repo/logs/%s.%s' % (name, ext), 'x\n', 150.0)
+                out.append(wr(path, 160.0, evidence='planned', proof=proof, span=(100.0, 160.0), text='x\n'))
+            return out
         for names in ('AB', 'ABC'):
-            (tp,) = self.rooms(self.reviewers(names, log))
-            self.assertEqual(sorted(r['p'] for r in tp['rows']), list(names))
+            (room,) = self.rooms(self.reviewers(names, log))
+            self.assertEqual(room.members, list(names))
 
     def test_files_a_shell_command_wrote_are_no_change_of_the_work_either(self):
-        def shell(name, a):
-            a.shell_writes = [{'ts': 151.0, 'paths': [os.path.join(self.top, 'docs', 'other', name + '.md')], 'id': 'x', 'ok': None}]
-        for p in ('A', 'B', 'C'):
-            write(os.path.join(self.top, 'docs', 'other', p + '.md'))
-        (tp,) = self.rooms(self.reviewers('ABC', shell))
-        self.assertEqual(sorted(r['p'] for r in tp['rows']), ['A', 'B', 'C'])
+        def shell(name):            # a shell command whose result the record does not give (`ok` None, a place where a later command can hide a failure)
+            return [wr(self.file('repo/docs/other/%s.md' % name, mtime=151.0), 151.0, evidence='shell', ok=None, proof='window', span=(150.0, 152.0))]
+        (room,) = self.rooms(self.reviewers('ABC', shell))
+        self.assertEqual(room.members, ['A', 'B', 'C'])
+
+    def test_a_shell_write_that_is_sure_is_a_change_of_the_work(self):
+        def shell(name):
+            return [wr(self.file('repo/src/%s.py' % name, mtime=151.0), 151.0, evidence='shell', proof='exit')]
+        self.assertEqual(self.rooms(self.reviewers('ABC', shell)), [])
+        self.assertEqual(len(self.rooms(self.reviewers('ABC', lambda n: shell(n) if n == 'A' else []))), 1)
 
     def test_a_file_in_a_folder_for_scratch_work_outside_the_repository_is_no_change_of_the_work(self):
-        def scratch(name, a):
-            for p in (self.scratch('repro_%s.py' % name), self.scratch('draft_%s.md' % name)):
-                write(p)
-                a.writes.append({'ts': 152.0, 'path': p, 'ok': True})
+        def scratch(name):
+            return [wr(self.file('scratch/%s' % rel, mtime=252.0), 252.0) for rel in ('repro_%s.py' % name, 'draft_%s.md' % name)]       # after the notes: the first file of its own is what stands for it
         for names in ('AB', 'ABC'):
-            (tp,) = self.rooms(self.reviewers(names, scratch))
-            self.assertEqual(sorted(r['p'] for r in tp['rows']), list(names))
-        self.assertEqual(len(self.rooms(self.reviewers('ABC', scratch), 'done')), 1)
+            (room,) = self.rooms(self.reviewers(names, scratch))
+            self.assertEqual((room.folder, room.members), (self.folder, list(names)))
+        agents = self.reviewers('ABC', scratch)
+        for a in agents:
+            a.status = 'done'
+        self.assertEqual(len(self.rooms(agents)), 1)
 
     def test_a_copy_the_instruction_tells_to_keep_in_a_scratch_folder_is_no_change_of_the_work(self):
         agents = []
         for name in 'AB':
-            own = os.path.join(self.folder, name + '.md')
-            agents.append(self.agent('Read `%s` and follow it. Write your notes to `%s`. Keep a scratch copy in `%s`.' % (self.guide, own, self.scratch(name + '.md'))))
-        (tp,) = self.rooms(agents)
-        self.assertEqual(sorted(r['p'] for r in tp['rows']), ['A', 'B'])
+            copy_ = self.scratch(name + '.md')
+            agents.append(agent(name, writes=[wr(self.doc(name + '.md'), 200.0)], planned=[plan(copy_)], launch=launch('m1', 't' + name), status='running'))      # asked to keep a copy there
+        (room,) = self.rooms(agents)
+        self.assertEqual(room.members, ['A', 'B'])
+        agents = [agent(a.id, writes=[*a.writes, wr(self.file('scratch/%s.md' % a.id, mtime=205.0), 205.0)], planned=a.planned, launch=a.launch, status='running') for a in agents]      # and kept it
+        (room,) = self.rooms(agents)
+        self.assertEqual(room.members, ['A', 'B'])
 
     def test_a_file_of_the_work_in_the_repository_still_is(self):
-        def work(name, a):
-            p = os.path.join(self.top, 'src', name, 'part.py')
-            write(p)
-            a.writes.append({'ts': 152.0, 'path': p, 'ok': True})
+        def work(name):
+            return [wr(self.file('repo/src/%s/part.py' % name, mtime=152.0), 152.0)]
         self.assertEqual(self.rooms(self.reviewers('AB', work)), [])
-        self.assertEqual(len(self.rooms(self.reviewers('ABC', lambda n, a: work(n, a) if n == 'A' else None))), 1)         # one of three is not most of them
+        self.assertEqual(len(self.rooms(self.reviewers('ABC', lambda n: work(n) if n == 'A' else []))), 1)       # one of three is not most of them
 
     def test_a_file_in_the_checkout_the_agent_works_in_is_the_work_whichever_repository_holds_the_guide(self):
-        other = os.path.join(os.path.dirname(self.top), 'checkout')
+        other = self.p('checkout')
         os.makedirs(os.path.join(other, '.git'))
-        agents = []
-        for name in 'AB':
-            own = os.path.join(self.folder, name + '.md')
-            code = os.path.join(other, 'src', name + '.py')
-            write(code)
-            a = self.agent('Read `%s` and follow it. Write your notes to `%s`.' % (self.guide, own), writes=[own, code])
-            a.cwd = other
-            agents.append(a)
-        self.assertEqual(self.rooms(agents), [])
+        def code(name):
+            return [wr(self.file('checkout/src/%s.py' % name, mtime=152.0), 152.0)]
+        tops = lambda cwd: (U.repo_top(cwd),) if cwd else ()                                              # noqa: E731
+        self.assertEqual(self.rooms(self.reviewers('AB', code, cwd=other), tops_of=tops), [])
+        self.assertEqual(len(self.rooms(self.reviewers('AB', code), tops_of=tops)), 1)                    # an agent that does not work in that checkout has changed nothing of its work
 
     def test_when_the_guide_is_in_no_repository_the_files_below_it_are_still_the_work_whatever_repository_the_agent_started_in(self):
-        bare = os.path.join(os.path.dirname(self.top), 'plain')
-        guide = write(os.path.join(bare, 'plan', 'agenda.md'), GUIDE)
         agents = []
         for name in 'ABC':
-            own = os.path.join(bare, 'plan', name + '.md')
-            probe = os.path.join(bare, 'plan', 'verify', 'probes', name + '.py')
-            a = self.agent('Read `%s` and follow it. Write your notes to `%s`.' % (guide, own), writes=[own, probe])
-            a.cwd = self.top                                                              # it was started in a repository elsewhere
-            agents.append(a)
-        s = types.SimpleNamespace(agents={a.id: a for a in agents}, _file_cache={}, _head_cache={}, cwd=self.top)
-        with mock.patch.object(U, 'SCRATCH_DIRS', (os.path.join(os.path.dirname(self.top), 'scratch') + os.sep,)):          # the temporary folder of the machine is here
-            jd = debates.judge(s, {a.id: 'running' for a in agents})
-        self.assertEqual([t for d in jd.debates for t in d['topics'] if t.get('room')], [])          # probes beside a plan: parallel work
+            own = self.file('plain/plan/%s.md' % name, mtime=200.0)
+            probe = self.file('plain/plan/verify/probes/%s.py' % name, mtime=190.0)
+            agents.append(agent(name, writes=[wr(own, 200.0), wr(probe, 190.0)], launch=launch('m1', 't' + name), status='running', cwd=self.top))      # it was started in a repository elsewhere
+        tops = lambda cwd: (U.repo_top(cwd),) if cwd else ()                                              # noqa: E731
+        with mock.patch.object(U, 'SCRATCH_DIRS', (self.scratch() + os.sep,)):
+            self.assertEqual(self.rooms(agents, tops_of=tops), [])                                        # probes beside a plan: parallel work
 
     def test_without_a_repository_a_scratch_folder_is_still_left_out(self):
-        bare = os.path.join(os.path.dirname(self.top), 'plain')
-        guide = write(os.path.join(bare, 'plan', 'agenda.md'), GUIDE)
-        agents = []
-        for name in 'AB':
-            own = os.path.join(bare, 'plan', name + '.md')
-            a = self.agent('Read `%s` and follow it. Write your notes to `%s`.' % (guide, own), writes=[own])
-            a.cwd = bare
-            agents.append(a)
-        s = types.SimpleNamespace(agents={a.id: a for a in agents}, _file_cache={}, _head_cache={}, cwd=bare)
-        rooms = lambda: [t for d in debates.judge(s, {a.id: 'running' for a in agents}).debates for t in d['topics'] if t.get('room')]
-        with mock.patch.object(U, 'SCRATCH_DIRS', (os.path.join(os.path.dirname(self.top), 'scratch') + os.sep,)):          # the temporary folder of the machine is here
-            for a in agents:
-                a.writes.append({'ts': 152.0, 'path': self.scratch('repro_%s.py' % a.id), 'ok': True})
-            self.assertEqual(len(rooms()), 1)
-            for a in agents:                                                                  # a file of the project beside the folder is one
-                a.writes.append({'ts': 153.0, 'path': os.path.join(bare, 'src', a.id + '.py'), 'ok': True})
-            self.assertEqual(rooms(), [])
+        def agents(extra):
+            out = []
+            for name in 'AB':
+                own = self.file('plain/plan/%s.md' % name, mtime=200.0)
+                out.append(agent(name, writes=[wr(own, 200.0)] + extra(name), launch=launch('m1', 't' + name), status='running', cwd=self.p('plain')))
+            return out
+        with mock.patch.object(U, 'SCRATCH_DIRS', (self.scratch() + os.sep,)):
+            self.assertEqual(len(self.rooms(agents(lambda n: [wr(self.file('scratch/repro_%s.py' % n, mtime=152.0), 152.0)]))), 1)
+            self.assertEqual(self.rooms(agents(lambda n: [wr(self.file('elsewhere/src/%s.py' % n, mtime=153.0), 153.0)])), [])        # a file of the project beside the folder is one
 
 
-class Members(Repo):
+class Members(Room):
+    """A room of participants only (D6): agents launched together that wrote no markdown, read the same document of one folder and talked to each other (a message that went through). Nothing is
+    written, so the room has no cell and no round, and nobody holds a seat."""
+
     def talk(self):
-        a = self.agent('Read `%s`. Settle the open items with the other participants by message; write no file.' % self.guide, desc='B Budget')
-        b = self.agent('Read `%s`. Settle the open items with the other participants by message; write no file.' % self.guide, desc='C Risk')
+        a, b = (server.Agent('a%016d' % i, {'description': d}) for i, d in ((1, 'B Budget'), (2, 'C Risk')))
+        for x in (a, b):
+            x.spawn_ts = x.first_ts = 100.0
+            x.last_ts = 200.0
+            x.cwd = self.top
+            x.launch = launch('m1', 't' + x.id)
+            x.ev.add_read(rd(self.guide))
         a.sent = [{'ts': 160.0, 'to': b.id, 'summary': '', 'text': 'my view'}]
         b.sent = [{'ts': 161.0, 'to': a.id, 'summary': '', 'text': 'mine'}]
         return a, b
 
+    def judge(self, a, b):
+        s = types.SimpleNamespace(agents={a.id: a, b.id: b}, _file_cache={}, _head_cache={}, cwd=self.top)
+        return debates.judge(s, {a.id: 'running', b.id: 'running'})
+
     def test_a_meeting_by_message_is_a_room_of_participants_only(self):
         a, b = self.talk()
-        jd = self.judge([a, b])
+        jd = self.judge(a, b)
         (tp,) = self.topics(jd)
-        self.assertEqual((tp['dir'], tp['title'], tp['room'], tp['rounds']), (self.folder, 'Weekly sync', 'members', []))
+        self.assertEqual((tp['dir'], tp['title'], tp['room'], tp['rounds'], tp['guide'], tp['room_sure']), (self.folder, 'Weekly sync', 'members', [], self.guide, False))
         self.assertEqual([(r['agents'], r['cells']) for r in tp['rows']], [([a.id], []), ([b.id], [])])
-        self.assertEqual(jd.assignments, [])                                  # nobody holds a seat, whatever their tags say
-        self.assertEqual({k: sorted(v) for k, v in jd.agent_units.items()}, {a.id: [self.folder], b.id: [self.folder]})
-        self.assertEqual([x for x in jd.diag if x['code'] == 'debate_in_misc'], [])
+        self.assertEqual(jd.assignments, [])                                  # nobody holds a seat
+        self.assertEqual(list(jd.cells), [])
+        self.assertFalse(tp['final']['confirmed'])
 
-    def test_one_message_one_way_is_enough_and_the_names_of_the_others_can_be_used(self):
+    def test_one_message_one_way_is_enough_and_only_the_id_of_the_other_names_it(self):
         a, b = self.talk()
         b.sent = []
-        a.sent = [{'ts': 160.0, 'to': 'C Risk', 'summary': '', 'text': 'x'}]            # by its description
-        (tp,) = self.topics(self.judge([a, b]))
+        a.sent = [{'ts': 160.0, 'to': b.id, 'summary': '', 'text': 'x'}]                 # by its id
+        (tp,) = self.topics(self.judge(a, b))
         self.assertEqual(tp['room'], 'members')
-        a.sent = [{'ts': 160.0, 'to': 'c', 'summary': '', 'text': 'x'}]                  # by its tag
-        (tp,) = self.topics(self.judge([a, b]))
-        self.assertEqual(tp['room'], 'members')
+        for to in ('C Risk', 'c', 'opus5.5'):                                             # by its description, its role letter or its model name: nobody that is known (O14)
+            a.sent = [{'ts': 160.0, 'to': to, 'summary': '', 'text': 'x'}]
+            self.assertEqual([t for t in self.topics(self.judge(a, b)) if t.get('room')], [], to)
+        a.sent = [{'ts': 160.0, 'to': a.id, 'summary': '', 'text': 'x'}]                 # to itself: to nobody
+        self.assertEqual([t for t in self.topics(self.judge(a, b)) if t.get('room')], [])
+
+    def test_the_same_document_and_two_launches_are_needed(self):
+        a, b = self.talk()
+        b.launch = launch('m2', 'tb')                                                      # launched apart
+        self.assertEqual([t for t in self.topics(self.judge(a, b)) if t.get('room')], [])
+        b.launch = launch('m1', 'tb')
+        b.ev.reads.clear()
+        b.ev.add_read(rd(self.file('repo/docs/meeting/other.md', '# Other\n', 50.0)))       # another document
+        self.assertEqual([t for t in self.topics(self.judge(a, b)) if t.get('room')], [])
 
     def test_the_judgment_is_made_again_when_a_message_is_sent(self):
         a, b = self.talk()
@@ -681,22 +676,38 @@ class Members(Repo):
         self.assertNotEqual(before, after)
 
 
-class Viewer(Repo):
-    def test_the_guide_and_the_documents_of_a_room_open_in_the_document_view_and_nothing_else(self):
-        a, b = self.pair()
-        write(os.path.join(self.folder, 'A.md'))
-        write(os.path.join(self.top, 'docs', 'other.md'))
+class Viewer(Room):
+    """The document view opens what the room on the screen holds (views.allowed_file reads the debates the page shows: the room's folder is its root)."""
+
+    def session(self, shown):
         s = server.Session.__new__(server.Session)
         s.lock = __import__('threading').RLock()
-        s.agents = {a.id: a, b.id: b}
-        s.debates = lambda statuses: (debates.judge(types.SimpleNamespace(agents=s.agents, _file_cache={}, _head_cache={}, cwd=self.top), statuses).debates, {})
+        s.agents = {}
+        s.debates = lambda statuses: (shown.debates, {})
+        return s
+
+    def test_the_guide_and_the_documents_of_a_room_open_in_the_document_view_and_nothing_else(self):
+        a, b = self.pair()
+        self.file('repo/docs/other.md', 'x\n', 200.0)
+        s = self.session(self.shown(a, b))
         self.assertEqual(s.allowed_file(self.guide), os.path.realpath(self.guide))
-        self.assertEqual(s.allowed_file(os.path.join(self.folder, 'A.md')), os.path.realpath(os.path.join(self.folder, 'A.md')))
-        self.assertIsNone(s.allowed_file(os.path.join(self.top, 'docs', 'other.md')))                # beside the room's folder, not in it
+        self.assertEqual(s.allowed_file(self.p('repo/docs/meeting/A.md')), os.path.realpath(self.p('repo/docs/meeting/A.md')))
+        self.assertIsNone(s.allowed_file(self.p('repo/docs/other.md')))                                # beside the room's folder, not in it
 
 
-class ViewerOfTheRoomOnScreen(Repo):
+class ViewerOfTheRoomOnScreen(Room):
     """The document view opens what the room on the screen holds: the room is the one the page shows, judged with the statuses the page was built with."""
+
+    def agent_of(self, aid, group, start, last, own=None, status='running'):
+        """A real agent of a session (its events as the collector keeps them), launched by the call of `group`."""
+        a = server.Agent('a%016d' % aid, {})
+        a.spawn_ts = a.first_ts = start
+        a.last_ts = last
+        a.cwd = self.top
+        a.launch = launch(group, 't%d' % aid)
+        if own:
+            a.ev.add_write(wr(own, start + 5.0, agent=a.id))
+        return a
 
     def session(self, agents, statuses):
         s = server.Session.__new__(server.Session)
@@ -704,43 +715,32 @@ class ViewerOfTheRoomOnScreen(Repo):
         s.agents = {a.id: a for a in agents}
         s._file_cache, s._head_cache, s.cwd = {}, {}, self.top
         s._verdicts = {aid: types.SimpleNamespace(status=st) for aid, st in statuses.items()}
+        s.refresh_facts = lambda statuses: None                        # the facts (launch keys, tags) are given here, not made again from records: that is the collection's (S1) test
         return s
 
     def test_a_room_of_two_that_work_in_turns_while_both_are_running_opens_its_guide(self):
-        a = self.agent(self.ask('', 'a', own=os.path.join(self.folder, 'A.md')), start=100.0, last=110.0)
-        b = self.agent(self.ask('', 'b', own=os.path.join(self.folder, 'B.md')), start=200.0, last=210.0)
-        write(os.path.join(self.folder, 'A.md'))
+        a = self.agent_of(1, 'm1', 100.0, 110.0, self.doc('A.md'))
+        b = self.agent_of(2, 'm1', 200.0, 210.0, self.doc('B.md'))
+        for st in ('running', 'done'):                                                                  # no rule of time: the room is there when they are over too
+            s = self.session([a, b], {a.id: st, b.id: st})
+            shown = [t for d in s.debates({a.id: st, b.id: st})[0] for t in d['topics']]
+            self.assertEqual([t.get('room') for t in shown], ['cells'], st)
+            self.assertEqual(s.allowed_file(self.guide), os.path.realpath(self.guide), st)
+            self.assertEqual(s.allowed_file(self.p('repo/docs/meeting/A.md')), os.path.realpath(self.p('repo/docs/meeting/A.md')), st)
+            self.assertIsNone(s.allowed_file(self.p('repo/docs/other.md')), st)
+        b = self.agent_of(2, 'm2', 200.0, 210.0, self.doc('B.md'))                                      # launched by another call: they never were together, and nothing opens
         s = self.session([a, b], {a.id: 'running', b.id: 'running'})
-        shown = [t for d in s.debates({a.id: 'running', b.id: 'running'})[0] for t in d['topics']]
-        self.assertEqual([t.get('room') for t in shown], ['cells'])                        # the page has the room: running agents are together until now
-        self.assertEqual(s.allowed_file(self.guide), os.path.realpath(self.guide))
-        self.assertEqual(s.allowed_file(os.path.join(self.folder, 'A.md')), os.path.realpath(os.path.join(self.folder, 'A.md')))
-        self.assertIsNone(s.allowed_file(os.path.join(self.top, 'docs', 'other.md')))
-        s = self.session([a, b], {a.id: 'done', b.id: 'done'})                              # when both have finished they never met: no room on the page, nothing opens
         self.assertIsNone(s.allowed_file(self.guide))
 
     def test_the_view_does_not_make_up_a_state_for_the_page(self):
-        a = self.agent(self.ask('', 'a', own=os.path.join(self.folder, 'A.md')), start=100.0, last=110.0)
-        b = self.agent(self.ask('', 'b', own=os.path.join(self.folder, 'B.md')), start=200.0, last=210.0)
+        a = self.agent_of(1, 'm1', 100.0, 110.0, self.doc('A.md'))
+        b = self.agent_of(2, 'm1', 200.0, 210.0, self.doc('B.md'))
         s = self.session([a, b], {a.id: 'running', b.id: 'running'})
         seen = []
         real = server.Session.debates
         s.debates = lambda statuses: seen.append(dict(statuses)) or real(s, statuses)
         s.allowed_file(self.guide)
         self.assertEqual(seen, [{a.id: 'running', b.id: 'running'}])
-
-
-class Markers(unittest.TestCase):
-    def test_the_sentence_that_addresses_the_participant_is_the_marker(self):
-        for text, want in (('You are participant B (Budget). Read x.', 'B'), ('Work as C (Risk). Read x.', 'C'), ('You hold seat D. Read x.', 'D'),
-                           ('Hello. You are participant E', 'E'), ('당신은 B 담당입니다.', 'B'), ('당신은 B(예산) 담당입니다.', 'B'), ('[ROOM-B] hi', 'B')):
-            self.assertEqual(U._marker_of(text), want, text)
-
-    def test_the_same_words_with_another_meaning_are_not(self):
-        for text in ('Compile the sample as C (not C++) before anything else.', 'Book seat C on the train.', 'Note that participant C of the user study asked for a dark theme.',
-                     'You are not participant C.', 'Example of a first line: "You are participant B (Budget)." That is only an example.', 'C(언어) 담당 팀이 만든 샘플을 확인하세요.',
-                     'C 담당자에게 문의 내용을 전달하세요.', 'Tell the user you are participant B', 'Work as C++ developers do.'):
-            self.assertEqual(U._marker_of(text), '', text)
 
 
 if __name__ == '__main__':

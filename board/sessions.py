@@ -1,6 +1,7 @@
 """Reading sessions and building their state: CodexLinker (the Codex agents inside a Claude session), Session (one Claude session), CodexSession (a standalone Codex conversation)."""
 
 import collections
+import contextlib
 import glob
 import hashlib
 import json
@@ -10,22 +11,26 @@ import threading
 import time
 
 from . import affil, lineage, procs
-from .facts import Redirect
+from . import fingerprint as fp
+from .facts import Hint, LaunchKey, Planned, Redirect, Tag, WriteEvent
 from . import runstate as RS
 from .util import (
-    CLAUDE_HOME, FILE_MAX, PROJECTS, STALL_SEC, Tail, as_text, line_error, open_safe, parse_records, parse_ts,
+    CLAUDE_HOME, CODEX_SESSIONS, FILE_MAX, PROJECTS, STALL_SEC, Tail, as_text, line_error, open_safe, parse_records, parse_ts,
     stat_plain, strip_reminders, trunc,
 )
 from .tokens import TokenMeter, claude_model_short, cx_model_short
 from .codex_parse import (
-    CX_MAX_READ, CX_PROMPT_MIN, CX_WINDOW, codex_call, codex_say_text, codex_user_text, cx_alive, cx_open, cx_procs, cx_start_offset,
+    CX_CALL_ID_RE, CX_MAX_READ, CX_PROMPT_MIN, CX_WINDOW, codex_call, codex_say_text, codex_user_text, cx_alive, cx_open, cx_procs, cx_start_offset,
 )
+from .codex_facts import shell_command
+from .codex_scan import FrontScan
 from .codex_index import CODEX
-from .link import LINKS, SCRIPTY_RE, _cx_expand, bash_scripts, cx_parse_call
+from .link import LINKS, SCRIPTY_RE, _cx_expand, bash_scripts, certain, cx_parse_call
 from .agents import (
-    Agent, CodexAgent, ForkSkip, cx_record_usage, cx_reprice, cx_rows, cx_sync_base, cx_sync_guardians, model_numbers, shell_mkdirs, shell_writes, tool_brief,
+    Agent, ClaudeCalls, CodexAgent, EventLog, ForkSkip, ORCH_WINDOWS_KEEP, OpenExecs, cx_item, cx_record_usage, cx_reprice, cx_rows, cx_sync_base, cx_sync_guardians, launch_pieces, model_numbers, outside_heredocs, parse, piece_env, script_env,
+    shell_mkdirs, shell_writes, tool_brief,
 )
-from .debates import REPORT_RE, brief_table, judge as judge_debates, read_head, writer_table
+from .debates import REPORT_RE, brief_table, judge as judge_debates, read_head
 from . import units as U
 from . import views
 
@@ -42,8 +47,58 @@ _WALK_SLOT = threading.Semaphore(1)
 LATER_AFTER = 10         # seconds after the first link scan is ready: the latest the work that waits for the first picture starts, whether or not a picture was built
 ORCH_HINTS_MAX = 64      # the folders the orchestrator's own writes put on the list of debates that the page keeps (the oldest are let go: `listing_capped`)
 ORCH_PENDING_MAX = 256   # the writes of the main record that wait for their result
+UNOBSERVED = object()                # what a launcher's environment is when nobody saw it
+RUN_SLACK = 1.0                      # seconds: the instruction of a run is stamped at its start or a little after
 HINT_WORDS_RE = re.compile(r'(?<![\w])(?:r|round)\d+(?![\w])|(?:brief|README|index)\.md')        # a shell command that says none of these cannot point the list at a folder
+
+
+
+def _literal_instruction(piece):
+    """The instruction a piece of a launching command (`agents.launch_pieces`) gives its agent when it is one literal word (`claude -p "do this"`, `codex exec "do this"`), else None: no word, more than one,
+    or one with a variable or a substitution in it (the text of a file, the input of a pipe): the instruction may be anything."""
+    from . import link as L
+    words = piece['words']
+    if piece.get('loose'):
+        return None                                              # (found by looking through the words: nothing says which is its instruction)
+    if piece['tool'] == 'claude':
+        pos = L.parse_claude_args(words)['pos']
+    else:
+        j = 0
+        while j < len(words) and words[j] is not None and words[j] not in ('exec', 'e'):
+            j += 2 if words[j] in L.CODEX_VALUE_OPTS and '=' not in words[j] else 1
+        pos, j = [], j + 1
+        while j < len(words):
+            w = words[j]
+            if w is not None and w.startswith('-') and w != '-':
+                j += 2 if w in L.CX_OPT_ARG and '=' not in w else 1
+            else:
+                pos.append(w)
+                j += 1
+    if len(pos) != 1 or pos[0] is None or pos[0] == '-' or '$' in pos[0] or '`' in pos[0]:
+        return None
+    return pos[0]
+
+
+def _same_instruction(arg, first):
+    """Whether the literal instruction of a launching command (`arg`) is the one an agent began with (`first`): the same normalising and the same comparison the link makes of them (`affil.launch_ok`)."""
+    from . import link as L
+    return affil.Instr(0, 0, first).same_as(fp.clip(fp.normalize(arg), L.LIT_ARG_MAX))
+
+
+def _may_have(piece, prompt, sid=None):
+    """Whether a piece of a launching command may have started an agent that began (the run its call started) with `prompt` and has the id `sid`: a piece that resumes another session did not start it, and
+    otherwise its literal instruction is that text, or it has none (it may be any)."""
+    if sid and piece['tool'] == 'claude' and not piece.get('loose'):
+        from . import link as L
+        resumed = L.parse_claude_args(piece['words']).get('resume')
+        if resumed and resumed != sid:
+            return False
+    lit = _literal_instruction(piece)
+    return lit is None or not prompt or _same_instruction(lit, prompt)
 USER_DUP_SEC = 120       # if the same user instruction is recorded again within this time, it counts once
+TAG_ROOM, TAG_SEAT = 'BULLPEN_ROOM', 'BULLPEN_SEAT'     # the two variables a user may set to tell where an agent works (lineage.TAG_NAMES)
+TAG_SEAT_RE = re.compile(r'(?:(?:r|round)\d+/)?[^\s/]+')       # a seat: `name` or `rN/name`
+ENDED = ('done', 'failed', 'killed', 'ended')       # the states of an agent whose run is over
 
 
 class LaterWork:
@@ -171,6 +226,7 @@ class CodexLinker:
         self._sha = {}
         self._cmd_seen = {}      # Codex thread id -> the item ids of its commands that were looked at (the commands of a Codex thread are calls like the Bash calls of the main record)
         self._in_events = {}     # (thread id, turn number) -> the spawn or orch_msg event made for the turn (a call found later is told to it)
+        self.cmds = {}           # command item id -> (text, folder) of the commands of Codex threads that name BULLPEN_ROOM or BULLPEN_SEAT (read for the room tag of what they launched)
 
     # ---- from this session's main record ----
     def note_bash(self, d, ts, b, tree=None, node=None):
@@ -178,6 +234,8 @@ class CodexLinker:
         c = cx_parse_call(ts, b.get('id'), b.get('input') or {}, d.get('cwd'))
         if c and c['id'] not in self.calls:
             c['tree'], c['node'] = tree or self.s.id, node
+            msg = (d.get('message') or {}).get('id') if isinstance(d.get('message'), dict) else None
+            c['grp'], c['prov'] = msg if isinstance(msg, str) else None, 'claude'          # the group the call was made in (the message.id of its line) and the provider of the record: what a launch key is made of
             self.calls[c['id']] = c
             self.order.append(c)
 
@@ -318,13 +376,17 @@ class CodexLinker:
                 text = c['cmd'] if c['cmd'] is not None else CODEX.cmd_text(tid, c['item_id'])
                 if not isinstance(text, str):
                     continue                                                          # no text (not a shell command, over the limit, not kept): its time is a gap for the link index
+                group = (c.get('exec') or (c['item_id'],))[0]                            # the exec call the command ran in, else the command itself
+                if 'BULLPEN_' in text:
+                    self.cmds[c['item_id']] = (text, c['cwd'])                         # a command that may carry a room tag: kept for reading it when the agent it launched is known
                 if tid == self.s.id and c['status'] == 'completed' and c['exit_code'] == 0:
-                    self.s._note_orch_shell(text, c['cwd'], c['end'])                  # the page's own thread: what its shell wrote or made points the list of debates at a folder
+                    self.s._note_orch_shell(text, c['cwd'], c['end'], c['item_id'], ('codex', self.s.id, None, group))        # the page's own thread: what its shell wrote or made points the list of debates at a folder
                 scripts = bash_scripts(text, c['cwd']) if (not sub or SCRIPTY_RE.search(text)) else []       # (a sub-agent's command is read for a script only when it names one)
                 cc = cx_parse_call(c['start'], c['item_id'], {'command': text}, c['cwd'], scripts=scripts)
                 if cc and cc['id'] not in self.calls:
                     cc['tree'] = (self.agents[tid].runtime or (None,))[0] if sub else tid       # the root thread whose tree this command ran in
                     cc['node'] = tid if sub else None
+                    cc['grp'], cc['prov'] = group, 'codex'
                     cc['end'] = {'ts': c['end'], 'status': c['status'], 'exit': c['exit_code']}      # a command is recorded when its process ends
                     self.calls[cc['id']] = cc
                     self.order.append(cc)
@@ -363,6 +425,8 @@ class CodexLinker:
                 elif kind == 'started':
                     armed.discard(c['agent_path'])
                     a = subs.get(c['agent_thread_id'])
+                    if a is not None and c['call_id']:
+                        a.launch_src = (host, c['call_id'], c['ts'])
                     if a is not None and ('spawn', a.id) not in self.emitted:
                         self.emitted.add(('spawn', a.id))
                         self._spawn(a, c)
@@ -584,6 +648,8 @@ class CodexLinker:
                     if out:
                         hit_before = t['out']
                         self._drop_argv(a, t)                                      # the record of the command wins over the command line of the process
+                        if t.get('out_src') == 'cand':                             # ... and over a file that was only found around the instruction
+                            t['out_src'], t['out_state'] = None, None
                         t['out'] = out
                         if t.get('out_state') != 'confirmed' or t['out'] != hit_before:                         # (a path that the report already confirmed stays confirmed: it is written once)
                             t['out_state'] = 'planned'
@@ -644,13 +710,47 @@ class CodexLinker:
                 paths = [t['out']] if t['out'] else self._cand_files(t)
                 hit = next((p for p in paths if self._sha_file(p) == t['sha']), None)
                 if hit:
+                    found = not t['out']                                                # a file found by looking around the folders of the instruction: shown, no more (O13, D8)
                     t['out'], t['out_state'] = hit, 'confirmed'
+                    if found:
+                        t['out_src'] = 'cand'
                     if not any(w['path'] == hit and w['ts'] == t['end'] for w in a.writes):
                         a.writes.append({'ts': t['end'], 'path': hit})
-                    self._set_out(a, t, hit)
+                    if not found:
+                        self._set_out(a, t, hit)
                     changed = True
                 elif now - t['end'] > 60:
                     t['given_up'] = True          # the -o file appears within 1 second of the end. After 1 minute it is not looked at again
+        if self._plan(a):
+            changed = True
+        return changed
+
+    @staticmethod
+    def _plan(a):
+        """What the debate judgment is told of the -o files of a Codex thread: a `Planned` for every turn that names one (a requirement of that run) and, when the turn has ended, one write event for it:
+        `ok` is whether the turn ended well, `proof` is `sha` with the sha1 of its last message (`window` when it has none), and the window the judgment checks is from the call that launched the turn to
+        its end. Nothing here looks at the file: the judgment does (J1). A path only the command line of a live process gave (`argv`) is a requirement but no event; a path that was found by looking
+        around the folders of the instruction (`_cand_files`, `out_src` 'cand') is neither: it is shown, and the judgment never reads it (D8). A plan that is given up (`_revoke_argv`) is taken away with its event."""
+        changed = False
+        for t in a.turns:
+            n, out = t['n'], t.get('out') if t.get('out_src') != 'cand' else None        # (a file found around the instruction is no requirement)
+            src = 'argv' if t.get('out_src') == 'argv' else 'command'
+            at = (t.get('bash_ts') if src == 'command' else t.get('start')) or t.get('start') or 0.0
+            want = (out, src, at, t.get('call')) if out else None
+            if t.get('pl') != want:
+                a.ev.drop_planned(lambda p, n=n: p.run != n)
+                if want:
+                    a.ev.add_planned(Planned(a.id, out, '-o', t.get('call'), n, src, at))
+                t['pl'], changed = want, True
+            ev_want = (out, at, t['end'], t['status'] == 'done', t['sha']) if (want and src == 'command' and t.get('end')) else None
+            if t.get('pl_want') != ev_want:
+                if t.get('pl_ev') is not None:
+                    a.ev.remove_write(t['pl_ev'])
+                t['pl_ev'] = None
+                if ev_want:
+                    t['pl_ev'] = a.ev.add_write(WriteEvent(a.id, out, t['end'], 'replace', 'planned', ev_want[3], t.get('call'), n, 'sha' if t['sha'] else 'window', (at, t['end']),
+                                                           (t['sha'],) if t['sha'] else ()))
+                t['pl_want'], changed = ev_want, True
         return changed
 
     def verdict(self, a, now):
@@ -726,11 +826,24 @@ class Session:
         self.cx_turn = RS.TurnMarks()         # a Codex thread's turn: `task_started` and what it does open it, `task_complete` and `turn_aborted` close it
         self._diag = None                     # the diagnostics of the last state() (board/diag.py)
         self.orch_hints = {}                  # folder -> the time of the orchestrator's last successful write that points at it (units.listing_hint): the debate list looks there, nothing else
+        self.orch_hint_facts = {}             # folder -> facts.Hint: the same time and the calls and groups of the writes (what `orch_hints` becomes for the new judgment; the key set is the same)
         self.orch_hints_gen = 0               # counts the changes of orch_hints (the debate judgment is made again)
         self.orch_hints_dropped = False       # an older folder was let go for the limit
-        self._orch_pending = collections.OrderedDict()      # tool_use id -> (time, [(path, is a folder)]) of a Write, Edit, MultiEdit or Bash of the main record that has no result yet
+        self._orch_pending = collections.OrderedDict()      # tool_use id -> (time, [(path, is a folder)], message.id) of a Write, Edit, MultiEdit or Bash of the main record that has no result yet
+        # what the debate judgment reads (board/facts.py): the orchestrator's own write events and command windows ('orch'), kept the way an agent's are
+        self.orch_log = EventLog(ORCH_WINDOWS_KEEP)
+        self.orch_calls = ClaudeCalls('orch', self.orch_log, lambda: None)
+        self.spawn_cmds = {}                  # tool_use id -> (text, folder) of the Bash calls of the main record that name BULLPEN_ROOM or BULLPEN_SEAT
+        self._tag_cmds = {}                   # call id -> its command read once (agents.launch_pieces): (text, folder, pieces, setters, gives)
         self.walked_units, self.walk_capped, self.walk_gen = [], False, 0
         self._walk_thread, self._walk_at = None, time.monotonic() - WALK_EVERY + 5       # the first walk comes a few seconds after the session is opened
+
+    orch_events = property(lambda self: self.orch_log.events())
+    orch_windows = property(lambda self: self.orch_log.windows)
+    orch_windows_dropped = property(lambda self: self.orch_log.windows_dropped)
+    orch_writes_dropped = property(lambda self: self.orch_log.writes_dropped)       # only written down: the judgment of a room counts the agents' alone
+    orch_lost = property(lambda self: self.orch_log.lost)
+    facts_gen = property(lambda self: self.orch_log.gen if getattr(self, 'orch_log', None) is not None else 0)       # goes up when anything of the orchestrator's side the debate judgment reads changes (an event, a window, a hint)
 
     # ---------- reading ----------
     def poll(self):
@@ -740,6 +853,7 @@ class Session:
             if self._read_team():
                 changed = True
             self._walk_later()
+            self._front_later()
             if changed:
                 self._agent_events()
                 if not self._sorted:      # once, at the first read: the agent-side events are slotted in time order
@@ -754,6 +868,8 @@ class Session:
         restarted, lines = tail_records(self.tail)
         if restarted:
             self.runs, self.ledger = RS.RunTracker(self.id), RS.Ledger()
+            self.orch_log.reset_record()
+            self.orch_calls.reset()
         for recs, torn in lines:
             count_torn(self.runs, recs, torn)
             for d in recs:
@@ -764,6 +880,7 @@ class Session:
                     rc = RS.rec(d)
                     self.runs.feed(d, rc)
                     self.ledger.feed(d, rc)
+                    self.orch_calls.pump(self.ledger)
                 except Exception as e:   # noqa: BLE001 — a field of the wrong type must not stop the session from opening
                     failed = e
                 try:
@@ -811,14 +928,14 @@ class Session:
                 a, self.agent_tails[csid] = self._cli_gone.pop(csid)
                 a.cli, a.spawn_ts = o, o['bash_ts']
                 self.agents[csid] = a
-                a.redirects = self._redirects_of(csid)
+                a.redirects, a.run_redirects = self._redirects_of(csid), self._redirects_by_run(csid)
                 self._cli_retitle(a, o)
                 changed = True
                 continue
             if csid in self.agents:
                 a = self.agents[csid]
                 a.cli = o
-                a.redirects = self._redirects_of(csid)
+                a.redirects, a.run_redirects = self._redirects_of(csid), self._redirects_by_run(csid)
                 if self._cli_retitle(a, o):
                     changed = True
                 continue
@@ -828,7 +945,7 @@ class Session:
             a = Agent(csid, {'description': o['bash_desc'] or 'claude -p'})
             a.origin, a.spawn_ts, a.cli, a.cli_desc, a.cli_node = 'cli', o['bash_ts'], o, o['bash_desc'], o.get('node')
             a.relay = _Relay(self.codex, csid, None)
-            a.redirects = self._redirects_of(csid)
+            a.redirects, a.run_redirects = self._redirects_of(csid), self._redirects_by_run(csid)
             self.agents[csid] = a
             self.agent_tails[csid] = Tail(paths[0])
             self._cli_spawn[csid] = self._cli_spawn_ev[csid] = self._event(o['bash_ts'], 'spawn', self.launcher_of(a), csid, o['bash_desc'] or 'Claude Code 실행', '', agent=csid,
@@ -975,6 +1092,19 @@ class Session:
         cand = [L for L in dec.call.launches if L.reader and affil.launch_ok(L, dec.child, run)]
         return list(cand[0].redirects) if len(cand) == 1 else []
 
+    def _redirects_by_run(self, csid):
+        """The output redirects of the launching command of every run of a `claude -p` child ([the list of run 0, of run 1 ...]): the launches of the call the evidence names for that run that can be that
+        run's (`_redirects_of`'s veto, run by run); a run no call is named for has none. The first is what `_redirects_of` says."""
+        dec = LINKS.decisions.get(csid)
+        if dec is None or dec.call is None or not dec.child.runs:
+            return []
+        out = []
+        for k, run in enumerate(dec.child.runs):
+            call = dec.call if k == 0 else (dec.calls[k] if k < len(dec.calls) else None)
+            cand = [L for L in call.launches if L.reader and affil.launch_ok(L, dec.child, run)] if call is not None else []
+            out.append(list(cand[0].redirects) if len(cand) == 1 else [])
+        return out
+
     def _event(self, ts, kind, frm, to, title, text='', agent=None, extra=None, title_key=None, questions=None, text_key=None):
         """Appends a feed event. `title` and `text` are the old Korean fields (unchanged). The fields below are added after them:
         title_key = the dictionary key of the title when the server wrote it (title_i18n {key, params}; title_is_default is true for a stand-in title, false for a
@@ -1065,11 +1195,16 @@ class Session:
                     name, inp = b.get('name', ''), b.get('input') or {}
                     self._orch_tool(ts, name, tool_brief(name, inp))
                     self._orch_pend(b, name, inp, d, ts)
+                    if isinstance(inp, dict):
+                        cwd = d.get('cwd') if isinstance(d.get('cwd'), str) and d.get('cwd') else self.cwd
+                        self.orch_calls.use(ts, b, name, inp, cwd)
+                        if name == 'Bash' and b.get('id') and isinstance(inp.get('command'), str) and 'BULLPEN_' in inp['command']:
+                            self.spawn_cmds[b['id']] = (inp['command'], cwd)
                     if name == 'Bash':
                         self.codex.note_bash(d, ts, b)
                     if name == 'Agent':
                         self.spawns[b.get('id')] = {'ts': ts, 'description': inp.get('description', ''),
-                                                    'prompt': inp.get('prompt', '')}
+                                                    'prompt': inp.get('prompt', ''), 'msg': m.get('id') if isinstance(m.get('id'), str) else None}
                         agent = next((a for a in self.agents.values() if a.tool_use_id == b.get('id')), None)
                         if agent:
                             agent.spawn_ts = ts
@@ -1110,6 +1245,7 @@ class Session:
             for b in (c if isinstance(c, list) else []):
                 if isinstance(b, dict) and b.get('type') == 'tool_result':
                     self.codex.note_result(b.get('tool_use_id'), d, ts)
+                    self.orch_calls.result(ts, b, d, self.ledger)
                     self._orch_done(b.get('tool_use_id'), bool(b.get('is_error')))
                     q = self.pending_q.pop(b.get('tool_use_id'), None)
                     if q is not None:                    # the user's answer to a choice question
@@ -1154,7 +1290,7 @@ class Session:
     @staticmethod
     def _shell_hints(text, cwd):
         """[(path, is a folder)] a shell command writes (a markdown file by a redirect or tee) or makes (mkdir): what `units.listing_hint` may take."""
-        if not HINT_WORDS_RE.search(text):
+        if not HINT_WORDS_RE.search(outside_heredocs(text)):          # (the body of a heredoc is a text the command writes, not words of the command)
             return []
         return [(p, False) for p in shell_writes(text, cwd, True)] + [(p, True) for p in shell_mkdirs(text, cwd)]
 
@@ -1171,7 +1307,8 @@ class Session:
             return
         got = [(p, isdir) for p, isdir in got if isinstance(p, str) and U.listing_hint(p, isdir)]
         if got:
-            self._orch_pending[tid] = (ts, got)
+            msg = (d.get('message') or {}).get('id') if isinstance(d.get('message'), dict) else None
+            self._orch_pending[tid] = (ts, got, msg if isinstance(msg, str) else None)
             while len(self._orch_pending) > ORCH_PENDING_MAX:
                 self._orch_pending.popitem(last=False)
 
@@ -1180,7 +1317,7 @@ class Session:
         got = self._orch_pending.pop(tid, None) if tid else None
         if got and not failed:
             for p, isdir in got[1]:
-                self._note_orch_write(p, got[0], isdir)
+                self._note_orch_write(p, got[0], isdir, tid, ('claude', self.id, None, got[2]) if got[2] else None)
 
     def _orch_item(self, ts, it):
         """A `FileChange` of the Codex orchestrator's own thread that was completed: a file it added or changed (one it deleted points nowhere; a move counts at its new path)."""
@@ -1192,31 +1329,50 @@ class Session:
             elif kind not in ('add', 'update'):
                 continue
             if isinstance(path, str):
-                self._note_orch_write(path, ts)
+                call = it.get('id') if isinstance(it.get('id'), str) else None
+                self._note_orch_write(path, ts, False, call, ('codex', self.id, None, call) if call else None)
 
-    def _note_orch_shell(self, text, cwd, ts):
+    def _note_orch_shell(self, text, cwd, ts, call=None, group=None):
         """A shell command of the Codex orchestrator's own thread that worked (exit 0): the folders it wrote into or made."""
         for p, isdir in self._shell_hints(text, cwd):
-            self._note_orch_write(p, ts, isdir)
+            self._note_orch_write(p, ts, isdir, call, group)
 
-    def _note_orch_write(self, path, ts, is_dir=False):
+    def _note_orch_write(self, path, ts, is_dir=False, call=None, group=None):
         """A successful write of the orchestrator itself: the folder it points at (units.listing_hint) is where the list of debates looks next, once the disk says it is a debate
-        of a shape the list takes (units.written_debate). At most ORCH_HINTS_MAX folders are kept: the ones written last (by the time of the write, not by the order they were read in)."""
+        of a shape the list takes (units.written_debate). At most ORCH_HINTS_MAX folders are kept: the ones written last (by the time of the write, not by the order they were read in).
+        `call` and `group` (a LaunchKey.gkey() of the record) say which call made the write: an agent launched by the same call or the same message was launched together with it."""
         folder = U.listing_hint(path, is_dir)
         if folder is None:
             return
         old = self.orch_hints.get(folder)
         self.orch_hints[folder] = max(old or 0.0, ts or 0.0)
         changed = old is None or self.orch_hints[folder] != old
+        was = self.orch_hint_facts.get(folder)
+        self.orch_hint_facts[folder] = Hint(self.orch_hints[folder], (was.calls if was else frozenset()) | ({call} if call else frozenset()),
+                                            (was.groups if was else frozenset()) | ({group} if group else frozenset()))
+        changed = changed or was != self.orch_hint_facts[folder]
         while len(self.orch_hints) > ORCH_HINTS_MAX:                        # the one written longest ago goes, whatever the order the records were read in (a late result, a file change before a command)
-            self.orch_hints.pop(min(self.orch_hints, key=lambda k: (self.orch_hints[k], k)))
+            gone = min(self.orch_hints, key=lambda k: (self.orch_hints[k], k))
+            self.orch_hints.pop(gone)
+            self.orch_hint_facts.pop(gone, None)
             self.orch_hints_dropped, changed = True, True
         if changed:
             self.orch_hints_gen += 1
+            self.orch_log.bump()
+
+    def _first_writers(self):
+        """path -> the agent that wrote to that path first (by write time, then by id if equal): who a report that another agent read is by, for the feed. Not a judgment of who holds a cell (units.assign)."""
+        best = {}
+        for a in self.agents.values():
+            for w in a.writes:
+                k = (w['ts'] or 0, a.id)
+                if w['path'] not in best or k < best[w['path']]:
+                    best[w['path']] = k
+        return {path: k[1] for path, k in best.items()}
 
     def _agent_events(self):
         """What passed between agents: messages sent to other agents (agent_msg), reading other participants' reports (xread). The conversation of claude -p child sessions (_cli_talk) is also produced here."""
-        writer, names = writer_table(self), {}
+        writer, names = self._first_writers(), {}
         for a in self.agents.values():
             names[a.id] = a.id
             for t in (a.tag, a.auto_tag):
@@ -1418,62 +1574,426 @@ class Session:
             return False
         return self.agent_status(parent, alive, now, seen) in ('done', 'failed', 'killed', 'ended')       # an interrupted parent may resume: it is not over
 
-    # ---------- debates ----------
-    def _debate_key(self, statuses):
-        """What the debate judgment reads from the session, as a small comparable value: the statuses, the walk's generation, the launcher's folder and, per agent,
-        the sizes of the things its instructions, reads, writes and messages to other agents (a room of participants only is made of them) are made of. A judgment is reused while this is the same and the folders on disk are too."""
-        per = tuple((a.id, a.tag, a.cwd, a.spawn_ts, a.first_ts, a.last_ts, a.spawn_prompt is not None, len(a.received), len(a.orch_msgs), len(a.reads),
-                     len(a.writes), sum(1 for w in a.writes if w.get('ok') is not None), len(a.shell_writes), sum(1 for w in a.shell_writes if w.get('ok') is not None),
-                     tuple(o['path'] for o in a.out_paths), len(a.redirects), (a.cli or {}).get('sid'), len(a.sent), sum(1 for m in a.sent if m.get('ok') is not None))
-                    for a in self.agents.values())
-        return (tuple(sorted(statuses.items())), getattr(self, 'walk_gen', 0), getattr(self, 'orch_hints_gen', 0), getattr(self, 'cwd', ''), per)
+    # ---------- what the debate judgment reads of the agents that no record line says (0.3.0) ----------
+    def refresh_facts(self, statuses=None):
+        """Brings up to date what the judgment reads of every agent that is made from more than one record: the run it is in, the call that launched it (`launch`), its room tag (`room_tag`) and, for a
+        `claude -p` child, the output it was told to write (`planned`) with the event of that output when its run is over. `statuses` {agent id: state} is the state the page works from. Each of
+        them goes up `facts_gen` when it changed (J19). Reads the process table for the environment of a live child and nothing else outside the records."""
+        statuses = statuses or {}
+        with getattr(self, 'lock', None) or contextlib.nullcontext():
+            env = {}
+            for a in list(self.agents.values()):
+                try:
+                    run, start = self._run_of(a)
+                    a.set_fact('run', run)
+                    a.set_fact('run_start', start)
+                    a.set_fact('launch', self._launch_of(a))
+                    a.set_fact('room_tag', self._tag_of(a, env))
+                    if a.origin == 'cli':
+                        self._plan_cli(a, statuses.get(a.id))
+                except Exception as e:   # noqa: BLE001 — one agent whose facts cannot be made must not stop the page
+                    self.parse_errors += 1
+                    line_error(a.id, None, e)
 
     @staticmethod
-    def _disk_signature(debates):
-        """The state of the debate folders and files a judgment looked at, read from its own result: the cells, finals, documents and briefs, and every folder
-        among them (a file made or removed there changes the folder's time). One stat each; no glob."""
-        paths, dirs = [], set()
-        for d in debates:
-            dirs.update((d['root'], os.path.join(d['root'], 'final')))
-            paths.append(os.path.join(d['root'], 'brief.md'))
-            paths += [f['path'] for f in d['finals']]
-            for t in d['topics']:
-                dirs.add(t['dir'])
-                paths += [os.path.join(t['dir'], n) for n in ('brief.md', 'README.md', 'index.md')]
-                if t['final']['path']:
-                    paths.append(t['final']['path'])
-                paths += [x['path'] for x in t['docs']]
-                for r in t['rows']:
-                    for c in r['cells']:
-                        paths.append(c['path'])
-                        dirs.add(os.path.dirname(c['path']))
-        sig = []
-        for p in sorted(dirs) + sorted(set(paths)):
-            try:
-                st = os.stat(p)
-                sig.append((p, st.st_mtime_ns, st.st_size))
-            except OSError:
-                sig.append((p, None, None))
-        return tuple(sig)
+    def _run_of(a):
+        """(number, start) of the last run of an agent: the Claude run tracker's last epoch, the Codex thread's last turn."""
+        if a.provider == 'codex':
+            t = a.turns[-1] if getattr(a, 'turns', None) else None
+            return (t['n'], t['start'] or 0.0) if t else (None, 0.0)
+        runs = getattr(a.runs, 'runs', None)
+        r = runs[-1] if runs else None
+        return (r.epoch, r.start_ts or 0.0) if r else (None, 0.0)
+
+    def _launch_of(self, a):
+        """The LaunchKey of the call that launched an agent (2.3), or None when it is not known: no call, or a link that was only guessed (a `time` or `content_short` link says no call)."""
+        if a.provider == 'claude' and a.origin == 'subagent':
+            if not a.tool_use_id:
+                return None
+            if a.parent_agent:                                   # started by a sub-agent: the call is in that sub-agent's record
+                owner = self.agents.get(a.parent_agent)
+                tree, node, msgs = ((owner.host or self.id) if owner else self.id), a.parent_agent, (owner.spawn_msgs if owner else {})
+            elif a.host:                                         # started by a `claude -p` child of the page: in the main record of that child
+                owner = self.agents.get(a.host)
+                tree, node, msgs = a.host, None, (owner.spawn_msgs if owner else {})
+            else:
+                tree, node, msgs = self.id, None, {k: v.get('msg') for k, v in self.spawns.items()}
+            msg = msgs.get(a.tool_use_id)
+            return LaunchKey('claude', tree, node, msg, a.tool_use_id) if msg else None
+        if a.origin == 'cli' and a.cli:
+            o = a.cli
+            dec = LINKS.decisions.get(a.id)
+            span = dec.call.span if dec is not None and dec.call is not None else None
+            call = o.get('call')
+            if not call or span is None or span.call_id != call or not span.msg_id or not certain(o.get('rule')):
+                return None
+            calls, sure = o.get('calls') or [], o.get('calls_certain') or []
+            if calls and calls[0] == call and sure and not sure[0]:
+                return None                                      # the call was only counted by order
+            return LaunchKey('codex' if o.get('parent_kind') == 'codex' else 'claude', o['sid'], o.get('node'), span.msg_id, call)
+        if a.provider == 'codex' and a.origin == 'exec' and a.link:
+            link = a.link
+            c = self.codex.calls.get(link.get('call') or '')
+            if c is None or not c.get('grp') or not certain(link.get('rule')) or not self.codex._of(c, link):
+                return None
+            return LaunchKey(c.get('prov') or 'claude', link.get('sid'), link.get('node'), c['grp'], c['id'])
+        if a.provider == 'codex' and a.origin == 'subagent' and a.launch_src and a.runtime:
+            host, call, ts = a.launch_src
+            return LaunchKey('codex', a.runtime[0], host, '%s:%s' % (self._turn_of(host, ts), call), call)
+        return None
+
+    @staticmethod
+    def _turn_of(thread, ts):
+        """The number of the turn of a Codex thread that was open at `ts` (its place among the turns the index knows), '-' when none was."""
+        e = CODEX.get(thread)
+        for n in range((len(e['turns']) if e else 0) - 1, -1, -1):
+            t = e['turns'][n]
+            if t['start'] is not None and t['start'] <= ts and (t['end'] is None or ts <= t['end']):
+                return str(n)
+        return '-'
+
+    # ---- room tags (2.4) ----
+    def _cmd_text(self, call):
+        """(text, folder) of a command that named BULLPEN_ROOM or BULLPEN_SEAT and has this call id, from the record that holds it; None when there is none."""
+        if call in self.spawn_cmds:
+            return self.spawn_cmds[call]
+        if call in self.codex.cmds:
+            return self.codex.cmds[call]
+        for a in self.agents.values():
+            if call in a.calls.cmds:
+                return a.calls.cmds[call]
+        return None
+
+    def _last_call(self, a):
+        """The call that launched the agent last (a resumed child or thread has more than one), or None."""
+        if a.origin == 'cli' and a.cli:
+            calls = self.launch_calls(a.cli)
+            return calls[-1] if calls else None
+        if a.provider == 'codex':
+            return next((t['call'] for t in reversed(a.turns) if t.get('call')), (a.link or {}).get('call'))
+        return None
+
+    def _command_tag(self, call, tool, prompt, sid=None):
+        """(room, seat, folder, given) the command of a launch gives to the agent it started: what is read is the piece of the command that started *that* agent (`agents.launch_pieces`), and of its environment
+        only what was delivered to it (`agents.piece_env`): `VAR=value cmd` and `env VAR=value cmd` in front of it, else what the shell had exported before it in the same shell (`export VAR=value`) and
+        nothing taken away since (`unset`, `env -u`, `env -i`); a variable that was only assigned is not exported and reaches no child. A command that starts one agent of this kind is that piece; one that starts
+        several gives each its own piece, told by the instruction the agent began with (`prompt`): a piece may be the agent's when its literal instruction is that text or when it has no literal one (a variable, a
+        file, the input of a pipe: it may be anything); when that does not tell them apart the values of the pieces must be the same for all of them, else nobody is given a value (a tag of another agent is
+        worse than none). A command that starts agents like this one and has none that can be this agent starts nobody that has a tag (a resume is told by the id it resumes and by the first instruction of
+        the run it began, `sid` is the id of the agent). A command whose launch is not in its text (it has no such piece: a script) gives what every command that could have started it gives (`agents.script_env`),
+        when it is one value. A name with a `$` left is not given a value. `given` says which names the command gives that agent at all (a value that is only inherited has none). The room as written; a relative
+        one counts from the folder the shell was in where the piece stands. None when the command is not known."""
+        got = self._cmd_text(call)
+        if got is None:
+            return None
+        parsed = self._tag_cmds.get(call)
+        if parsed is None:
+            parsed = self._tag_cmds[call] = (got[0], got[1]) + launch_pieces(got[0])
+        text, cwd, pieces, setters, others = parsed
+        names = (TAG_ROOM, TAG_SEAT)
+        mine = [p for p in pieces if p['tool'] == tool]
+        cands = [(p, piece_env(p, setters, names)) for p in mine if _may_have(p, prompt, sid)]
+        at, env = None, {}
+        if mine and not cands:                                       # the text starts agents like this one and none of them is this agent: what it was started by is not in the text
+            return (None, None, None, {TAG_ROOM: False, TAG_SEAT: False})
+        if not cands:                                                # the launch is not in the text: a script, `xargs`
+            env = script_env(others, setters, names)
+        else:
+            if any(pe[1] != cands[0][1] for pe in cands):            # several pieces that cannot be told apart and give different things
+                return (None, None, None, {TAG_ROOM: False, TAG_SEAT: False})
+            at, env = cands[0][0]['at'], cands[0][1]
+        from . import link as L
+        base = os.path.normpath(cwd) if isinstance(cwd, str) and os.path.isabs(cwd) else None
+        P = parse(text)                                              # (`at` is a place in the text the pieces were read from: this one)
+        here = L.shell_cwd(P.text, P.code, len(P.text) if at is None else at, P.assigns(), base) or base
+        return (env.get(TAG_ROOM), env.get(TAG_SEAT), here, {n: n in env for n in names})
+
+    @staticmethod
+    def _run_instruction(a, call):
+        """The first instruction of the run that the call `call` started: a child that was resumed has one run for each call, and the command of a resume names the instruction of the run it began, not
+        the one the child began with. The first instruction of the child when the call is its first or the run is not known."""
+        first = Session._first_instruction(a)
+        calls = (a.cli or {}).get('calls') or [] if a.origin == 'cli' else []
+        runs = getattr(a.runs, 'runs', None) or []
+        if call in calls:
+            k = len(calls) - 1 - calls[::-1].index(call)
+            if 0 < k < len(runs) and runs[k].start_ts is not None:
+                said = next((t['text'] for t in a.talk if t['kind'] == 'in' and t['ts'] is not None and t['ts'] >= runs[k].start_ts - RUN_SLACK), None)
+                return said.strip() if isinstance(said, str) and said.strip() else None
+        return first
+
+    @staticmethod
+    def _first_instruction(a):
+        """The first instruction a `claude -p` child or a `codex exec` thread was given, or None."""
+        said = next((t['text'] for t in a.talk if t['kind'] == 'in'), None) if a.origin == 'cli' else None
+        text = said if said is not None else getattr(a, 'spawn_prompt', None)
+        return text.strip() if isinstance(text, str) and text.strip() else None
+
+    def _pids_of(self, a):
+        """The live processes of a `claude -p` child or a `codex exec` thread (empty when there are none or they cannot be told)."""
+        if a.origin == 'cli':
+            p = self._cli_procs.get(a.id)
+            return list(p.pids) if p is not None and p.alive else []
+        found = procs.codex_pids(CODEX_SESSIONS) or []
+        return [i['pid'] for i in found if a.path in i['fds'] or a.id.encode() in b' '.join(i['argv'])]
+
+    def _orch_tag_env(self):
+        """BULLPEN_ROOM and BULLPEN_SEAT in the environment of the orchestrator's own process, as {name: value}; None when that cannot be read."""
+        if self.provider == 'codex':
+            found = procs.codex_pids(CODEX_SESSIONS) or []
+            pids = [i['pid'] for i in found if self.path in i['fds'] or self.id.encode() in b' '.join(i['argv'])]
+        else:
+            alive, pid, _name = self.alive()
+            pids = [pid] if alive and pid else []
+        return self._environ(pids)
+
+    @staticmethod
+    def _environ(pids):
+        """The tag variables the processes `pids` agree on, {name: value}; None when there is no process or one of them cannot be read."""
+        got = [procs.env_values(pid, lineage.TAG_NAMES) for pid in pids]
+        if not got or any(g is None for g in got):
+            return None
+        out = {}
+        for name in (TAG_ROOM, TAG_SEAT):
+            values = {g[name] for g in got if g.get(name)}
+            if len(values) == 1:
+                out[name] = next(iter(values))
+        return out
+
+    def _launcher_env(self, a, memo):
+        """BULLPEN_ROOM and BULLPEN_SEAT as the agent that launched `a` has them, {name: value}: from its live process, else what its environment said while it lived, else its tag (the room as the
+        folder it is). None when the one that launched it is the orchestrator itself (its environment is read apart) or a sub-agent. `UNOBSERVED` when it is one of the agents of the page and nothing of its
+        environment was ever seen (it ended before it was looked at, and its own command named no tag), or when it is not one of them: what it passed on is not known."""
+        o = (a.cli if a.origin == 'cli' else a.link) or {}
+        node, tree = o.get('node'), o.get('sid')
+        if node:
+            who = self.agents.get(node)
+        elif tree and tree != self.id:
+            who = self.agents.get(tree)
+        else:
+            return None                                              # the orchestrator
+        if who is None:
+            return UNOBSERVED
+        if who is a or who.origin not in ('cli', 'exec'):
+            return None
+        got = {}
+        env = self._environ(self._pids_of(who))
+        if env:
+            got.update(env)
+        cached = getattr(who, 'tag_env', None)
+        for name, value in zip((TAG_ROOM, TAG_SEAT), cached or ()):
+            if value:
+                got.setdefault(name, value)
+        tag = self._tag_of(who, memo)                                # (the launcher's own tag first: it may not have been worked out yet)
+        if tag is not None:
+            got.setdefault(TAG_ROOM, tag.room)
+            if tag.seat:
+                got.setdefault(TAG_SEAT, tag.seat)
+        if env is None and cached is None and tag is None:
+            return UNOBSERVED
+        return got
+
+    def _tag_of(self, a, memo):
+        """The facts.Tag of a `claude -p` child or a `codex exec` thread: from the environment of its live process when that can be read, else from the command that launched it last (2.4). A value
+        the orchestrator's own environment has too, or the one that launched it has (a grandchild has the tag of the child that started it), and the command does not give, was only inherited: it is
+        not a tag. The room must be a folder that exists and is no place a debate cannot be (too broad, the folders the tools keep); a seat is `name` or `rN/name` (a `.md` tail is cut). When the
+        environment of the orchestrator cannot be read, a value that only the environment gives is taken for inherited, whatever it is (a missed tag, not a room made of children that were never
+        together). What an ended agent's environment said is kept for the call it was read for: a run started by another call (a resume) that gives no tag has none. None for an agent that cannot
+        have one (a sub-agent has no process of its own)."""
+        if a.origin not in ('cli', 'exec'):
+            return None
+        done = memo.setdefault('tags', {})
+        if a.id in done:
+            return done[a.id]
+        if a.id in memo.setdefault('busy', set()):                   # (a launcher that is launched by its own child: no tag from it)
+            return None
+        memo['busy'].add(a.id)
+        try:
+            tag = done[a.id] = self._tag_of_now(a, memo)
+        finally:
+            memo['busy'].discard(a.id)
+        return tag
+
+    def _tag_of_now(self, a, memo):
+        call = self._last_call(a)
+        if getattr(a, 'tag_env', None) and getattr(a, 'tag_env_call', None) != call:
+            a.tag_env = None                                         # what was read for an earlier call says nothing of the run this one started
+        cmd = self._command_tag(call, 'claude' if a.origin == 'cli' else 'codex', self._run_instruction(a, call), a.id) if call else None
+        env = self._environ(self._pids_of(a))
+        if env is not None:
+            if env and 'orch' not in memo:
+                memo['orch'] = self._orch_tag_env()
+            orch = memo.get('orch')
+            launcher = self._launcher_env(a, memo) if env else None
+            for name in list(env):
+                inherited = orch is None or orch.get(name) == env[name] or launcher is UNOBSERVED or (isinstance(launcher, dict) and launcher.get(name) and (
+                    launcher[name] == env[name] or (name == TAG_ROOM and os.path.realpath(launcher[name]) == os.path.realpath(env[name]))))
+                if inherited and not (cmd and cmd[3][name]):
+                    del env[name]                                  # the same value as the orchestrator's own (or the environment of the orchestrator cannot be read, so it cannot be told from it) or as the one that launched it: inherited, nobody set it for this agent
+            a.tag_env, a.tag_env_call = (env.get(TAG_ROOM), env.get(TAG_SEAT)), call
+            room, seat, source, here = env.get(TAG_ROOM), env.get(TAG_SEAT), 'environ', a.cwd
+        elif cmd is not None and (cmd[0] or cmd[1]):
+            room, seat, source, here = cmd[0], cmd[1], 'command', cmd[2]
+        elif cmd is None and getattr(a, 'tag_env', None):
+            room, seat, source, here = a.tag_env[0], a.tag_env[1], 'environ', a.cwd         # the process is gone: what its environment said while it lived
+        else:
+            return None
+        if not room:
+            return None
+        if not os.path.isabs(room):
+            if not here:
+                return None
+            room = os.path.join(here, room)
+        real = os.path.realpath(room)
+        if not os.path.isdir(real) or U.too_broad(real) or (real + os.sep).startswith(tuple(U.STATE_DIRS)):
+            return None
+        if seat:
+            seat = seat[:-3] if seat.endswith('.md') else seat
+            seat = seat if TAG_SEAT_RE.fullmatch(seat) else None
+        return Tag(real, seat or None, source, a.run)
+
+    # ---- the output a `claude -p` child was told to write (W4) ----
+    def _launcher_window(self, o, call=None):
+        """The command window (facts.CmdWindow) of the Bash call that launched a `claude -p` child (`call`: the call of one of its runs, else the call the link names), in the record of the launcher, or None."""
+        call, node, tree = call or o.get('call'), o.get('node'), o.get('sid')
+        log = self.agents[node].ev if node in self.agents else self.orch_log if tree == self.id else self.agents[tree].ev if tree in self.agents else None
+        if log is None or not call:
+            return None
+        return next((w for w in reversed(log.windows) if w.call == call), None)
+
+    def _launcher_window_ok(self, o, call=None):
+        """Whether the Bash call that launched a `claude -p` child ended well: its command window in the record of the launcher (True worked, False failed, None not known)."""
+        w = self._launcher_window(o, call)
+        return w.ok if w is not None else None
+
+    def _open_execs(self, tree, node):
+        """The exec calls that have not ended of the Codex thread whose shell may have started a child (`tree` the thread of the page, `node` a sub-agent thread of it), or None."""
+        for host in ([self.agents.get(node)] if node else []) + [self if tree == self.id else self.agents.get(tree)]:
+            execs = getattr(host, '_cx_execs', None)
+            if isinstance(execs, OpenExecs):
+                return execs
+        return None
+
+    def _open_redirects(self, a):
+        """([(path, op)], call id, time) of the one command of the thread that started a `claude -p` child that has not ended: the exec call it runs in has its text (`tools.exec_command({cmd: \"…\"})`)
+        while the record of the command itself is written when it ends. Only a command made before the child began, that starts one `claude -p` here (not a loop of them) that can be this child's
+        (it runs in the child's folder, and what it is told is what the child began with), and only when it is the one such command of the thread: else nothing is said (a requirement of another
+        child is worse than none). The redirects are those of the launch, as `_redirects_of` reads them from the record of the command."""
+        o = a.cli or {}
+        execs = self._open_execs(o.get('sid'), o.get('node'))
+        if execs is None:
+            return None
+        from . import link as L
+        first, here, found = self._first_instruction(a), os.path.realpath(a.cwd) if a.cwd else None, []
+        for call_id, ts, cmd, where in execs.commands():
+            if a.first_ts is not None and ts > a.first_ts + 1.0:
+                continue                                             # called after the child began: it did not start it
+            for d in L.launch_facts(cmd, L.shell_code(cmd), where, None, 'claude'):
+                if not d['persist'] or d['n'] > 1 or (d['arg'] is not None and first is not None and not affil.Instr(0, 0, first).same_as(d['arg'])):          # (`arg` is normalised: the instruction is compared as the link compares it)
+                    continue
+                if d['cwd'] and here and os.path.realpath(d['cwd']) != here:
+                    continue
+                found.append((call_id, ts, d))
+        if len(found) != 1:
+            return None
+        call_id, ts, d = found[0]
+        reds = [(os.path.normpath(r.path_resolved), r.op) for r in d['redirects'] if r.fd == 1 and r.op in ('>', '>>') and r.path_resolved]
+        return (reds, call_id, ts) if reds else None
+
+    def _plan_cli(self, a, status):
+        """A `Planned` for every output redirect (`> f`, `>> f`) of the command that launched a `claude -p` child (`_redirects_of`: when one launch could be the child's), and, once its run is over,
+        one write event for each: `ok` is whether the launching call ended well; when the last text of the child is known the event is `content` (the sha1 of the text and of the text with a
+        new line, which is what the shell writes) and, when it is not, `window`; `>>` is an `append` (the file is the old text and the new, nothing to compare) and no owner. A child that was resumed
+        has a launching command for every run: each run has its own requirements and events, made of its own call and time, its own end and its own last text (`_redirects_by_run`). Nothing here looks at the
+        file: the judgment does (J1)."""
+        o = a.cli or {}
+        runs = getattr(a.runs, 'runs', None) or []
+        calls, sure = o.get('calls') or [], o.get('calls_certain') or []
+        per = list(a.run_redirects) if a.run_redirects else [a.redirects]
+        plan = []                                                    # per run: (reds, at, call, epoch, end, text)
+        for k, redirects in enumerate(per):
+            call = o.get('call') if k == 0 else (calls[k] if k < len(calls) and (sure[k] if k < len(sure) else True) else None)
+            if k and not call:
+                continue                                             # a run whose launching call is not known (or was only counted by order): no requirement of it
+            at = (o.get('bash_ts') or 0.0) if k == 0 else (getattr(self._launcher_window(o, call), 't0', None) or (runs[k].start_ts if k < len(runs) else 0.0) or 0.0)
+            reds = [(os.path.normpath(r.path_resolved), r.op) for r in redirects if r.fd == 1 and r.op in ('>', '>>') and r.path_resolved]
+            if k == 0 and not reds and not call:                     # the call that started it is not on record yet (a Codex shell writes its command when it ends): its exec call is
+                got = self._open_redirects(a)
+                if got:
+                    reds, call, at = got
+            epoch = runs[k].epoch if k < len(runs) else k + 1
+            last = k >= len(per) - 1 and k >= len(runs) - 1          # the last run of the child
+            lo, hi = (runs[k].start_ts if k < len(runs) else None), (runs[k + 1].start_ts if k + 1 < len(runs) else None)
+            ends = [t for t in a.talk if t['kind'] == 'end' and (lo is None or (t['ts'] or 0.0) >= lo) and (hi is None or (t['ts'] or 0.0) < hi)]
+            if last:
+                end = a.last_ts if status in ENDED and a.last_ts else None
+            else:
+                end = max([t['ts'] for t in ends] or [None], key=lambda x: x or 0.0) or (runs[k].last_ts if k < len(runs) else None)
+            plan.append((tuple(dict.fromkeys(reds)), at, call, epoch, end, ends[-1]['text'] if ends else None))
+        want = tuple((reds, at, call, epoch) for reds, at, call, epoch, _end, _text in plan)
+        event_want = tuple((w, end, self._launcher_window_ok(o, w[2]) if end else None, text) for w, (_r, _a, _c, _e, end, text) in zip(want, plan) if end) or None
+        if a.plan_want and a.plan_want[0] == want and a.plan_want[1] == event_want:
+            return
+        if a.plan_want is None or a.plan_want[0] != want:
+            a.ev.drop_planned(lambda p: False)
+            for reds, at, call, epoch in want:
+                for path, op in reds:
+                    a.ev.add_planned(Planned(a.id, path, op, call, epoch, 'command', at))
+        for ev in a.plan_events:
+            a.ev.remove_write(ev)
+        made = []
+        for (reds, at, call, epoch), end, ok, text in (event_want or ()):
+            for path, op in reds:
+                if op == '>>' or text is None:
+                    ev = WriteEvent(a.id, path, end, 'append' if op == '>>' else 'replace', 'planned', ok, call, epoch, 'window', (at, end))
+                else:
+                    ev = WriteEvent(a.id, path, end, 'replace', 'planned', ok, call, epoch, 'content', (at, end),
+                                    (hashlib.sha1(text.encode('utf-8', 'replace')).hexdigest(), hashlib.sha1((text + '\n').encode('utf-8', 'replace')).hexdigest()))
+                got = a.ev.add_write(ev)
+                if got is not None:
+                    made.append(got)
+        a.plan_want, a.plan_events = (want, event_want), tuple(made)
+
+    # ---------- debates ----------
+    def _debate_key(self, statuses):
+        """What the debate judgment reads from the session, as a small comparable value: the statuses, the walk's generation, the folder the session was started in and the generation of everything the
+        collectors keep for it (`facts_gen` of the session and of each agent: it goes up when an event, a window, a read, a plan, a launch, a tag or a run changes, so a window whose end was set
+        later is told from one that was not). What the judgment reads of an agent that is no event: its names (the ones a message to it can use), its folder, when it started and was last heard of
+        (`_over_before`), and how many messages it sent that did not fail (a room of participants only is made of them). A judgment is reused while this is the same and the disk is too. The facts
+        that come from more than one record are brought up to date first (`refresh_facts`)."""
+        refresh = getattr(self, 'refresh_facts', None)
+        if refresh is not None:                                  # (a stand-in for a session in a test has none)
+            refresh(statuses)
+        per = tuple((a.id, a.tag, a.auto_tag, a.description, a.cwd, (a.cli or {}).get('cwd'), a.spawn_ts, a.first_ts, a.last_ts, len(a.sent), sum(1 for m in a.sent if m.get('ok') is False),
+                     getattr(a, 'facts_gen', 0)) for a in self.agents.values())
+        return (tuple(sorted(statuses.items())), getattr(self, 'walk_gen', 0), getattr(self, 'cwd', ''), getattr(self, 'facts_gen', 0), per)
 
     def judged(self, statuses):
-        """The whole debate judgment (debates.Judged: the debates, who works where, the seats, the diagnostics), made again only when something it reads has changed:
-        an agent's record, a status, the walk's list, or a folder or file of the debates on disk (a stat of each, instead of the globs and listings of a build). It is
-        also made again after DEBATE_TTL seconds, for a folder that appeared where nothing had looked before. A few judgments are kept (one per set of statuses)."""
+        """The whole debate judgment (debates.Judged: the debates, who works where, the cells, the diagnostics), made again only when something it reads has changed (J19): an agent's record or the
+        orchestrator's (`facts_gen`, in the key), a status, the walk's list, or the disk as the judgment looked at it (every lookup it made asked again, the lookups of what the page shows of a file or
+        a folder among them: a folder that got a file, a file written over in place, a new link, a file whose size or time moved). It is also made again after DEBATE_TTL seconds, for a folder that
+        appeared where nothing had looked before. A few judgments are kept (one per set of statuses). The facts are brought up to date once, by the key, for the request."""
         cache = self.__dict__.setdefault('_jd_cache', collections.OrderedDict())
         key, now = self._debate_key(statuses), time.monotonic()
         hit = cache.get(key)
-        if hit is not None and now - hit[0] < DEBATE_TTL and hit[1] == self._disk_signature(hit[2].debates):
+        if hit is not None and now - hit[0] < DEBATE_TTL and not U.Catalog.changed(hit[1].reads):
             cache.move_to_end(key)
-            self.debate_diag = hit[2].diag
-            return hit[2]
-        jd = judge_debates(self, statuses)
+            jd = hit[1]
+        else:
+            jd = judge_debates(self, statuses, fresh=True)
+            cache[key] = (now, jd)
+            cache.move_to_end(key)
+            while len(cache) > 4:
+                cache.popitem(last=False)
         self.debate_diag = jd.diag
-        cache[key] = (now, self._disk_signature(jd.debates), jd)
-        cache.move_to_end(key)
-        while len(cache) > 4:
-            cache.popitem(last=False)
+        self._last_judged = (tuple(sorted(statuses.items())), jd)
         return jd
+
+    def last_judged(self, statuses):
+        """The judgment `judged` gave last, when it was made for these statuses, else None: what a request that only needs to know where an agent is thought to work reads (the same input gives the
+        same judgment, J19), where `judged` would look at the whole disk again for it."""
+        got = getattr(self, '_last_judged', None)
+        return got[1] if got is not None and got[0] == tuple(sorted(statuses.items())) else None
 
     def debates(self, statuses):
         """(list of debates, {agent id: {unit}} the debates each agent holds a seat in): the debate structure from the report paths and the folders on disk (board/debates.py).
@@ -1513,6 +2033,15 @@ class Session:
         self._walk_at = time.monotonic()
         self._walk_thread = threading.Thread(target=self._walk_safely, daemon=True)
         self._walk_thread.start()
+
+    def _front_later(self):
+        """The background read of the front of every big rollout of the page (the threads and the thread of the page itself): off unless the server turned the background on (WALK_ENABLED), and it waits
+        for the first picture (LATER). Each one starts once; the read runs on a thread of its own, one at a time for the server (board/codex_scan.py)."""
+        if not WALK_ENABLED or not LATER.is_open():
+            return
+        for owner in [self] + list(self.agents.values()):
+            if getattr(owner, 'partial', 0) and getattr(owner, 'front', None) is not None:
+                owner.front_scan()
 
     def _walk_safely(self):
         if not _WALK_SLOT.acquire(False):                # one walk at a time for the whole server: a busy slot means try again in a few seconds
@@ -1588,6 +2117,9 @@ class CodexSession(Session):
         self.orch['model'] = e['model']       # so that calls before the first turn_context are priced too when reading from the end
         self.seen, self.thread_total, self.nomodel = {}, None, []
         self._alive = None
+        self._cx_execs = OpenExecs()          # the exec calls of the open turn whose output has not come (a command that runs inside one has its window start with it)
+        self.front = FrontScan()              # the read of the front of a big rollout (before `partial`), in the background: until it is done that part is `lost`
+        self._first_row = None                # the time of the first line read (a big rollout is read from its end: what is before it was not read)
 
     def _read_main(self):
         """The rollout of the thread itself. True when something was read."""
@@ -1596,6 +2128,10 @@ class CodexSession(Session):
         lines = self.tail.read()
         if self.tail.pos < before:
             self.fork.restart()
+            self.orch_log.reset_record()
+            self._cx_execs.clear()
+            self._first_row = None
+            self.front.reset()
         for r in cx_rows(lines, self.fork):
             try:
                 self._feed_cx(r)
@@ -1613,8 +2149,23 @@ class CodexSession(Session):
 
     def _feed_cx(self, r):
         ts, typ, pt, p = r['ts'], r['type'], r['pt'], r['p']
+        if typ == 'hole':                   # a write of the record that cannot be read (`cx_rows`)
+            self.orch_log.widen_lost(*r['span'])
+            return
         o = self.orch
-        if p is None or typ == 'session_meta':
+        if typ != 'session_meta' and ts and self.partial and self._first_row is None:
+            self._first_row = ts
+            if self.front.state != 'done':                              # (a scan that was done before the first line came has read the front already)
+                self.orch_log.set_front_lost(self.first_ts or ts, ts)       # the front of a big rollout was not read: from its start to the first line read
+        if p is None:
+            if pt == 'custom_tool_call_output':
+                m = CX_CALL_ID_RE.search(r['head'])
+                if m:
+                    self._cx_execs.output(m.group(1).decode())
+            elif pt == 'item_completed' and ts and (b'"CommandExecution"' in r['head'] or b'"FileChange"' in r['head']):
+                self.orch_log.widen_lost(ts, ts)                   # a write or a command that was too long to be read
+            return
+        if typ == 'session_meta':
             return
         if typ == 'turn_context':
             o['model'] = p.get('model') or o['model']
@@ -1629,10 +2180,16 @@ class CodexSession(Session):
             if pt == 'task_started':
                 o['last_ts'] = ts
                 self.cx_turn.begin()
+                self._cx_execs.clear()
             elif pt in ('task_complete', 'turn_aborted'):
                 self.cx_turn.end(ts)
+                self._cx_execs.clear()
             elif pt == 'item_completed':
                 self._orch_item(ts, p.get('item'))
+                if isinstance(p.get('item'), dict):
+                    cx_item(self.orch_log, 'orch', ts, p['item'], self.cwd, None, self._cx_execs.only())
+                    if p['item'].get('type') == 'CommandExecution' and shell_command(p['item'].get('command')) is not None:
+                        self._cx_execs.finished(shell_command(p['item']['command']))
         elif typ == 'response_item':
             if pt == 'message' and p.get('role') == 'user':
                 text = codex_user_text(p)
@@ -1653,11 +2210,22 @@ class CodexSession(Session):
                 self.cx_turn.begin()
                 name, text = codex_call(pt, p)
                 self._orch_tool(ts, name, text)
+                if pt == 'custom_tool_call' and p.get('name') == 'exec' and p.get('call_id'):
+                    self._cx_execs.add(p['call_id'], ts, p.get('input'))
                 if name == 'request_user_input_async':
                     self._codex_ask(ts, p)
             elif pt in ('custom_tool_call_output', 'function_call_output'):
                 o['last_ts'] = ts
                 self.cx_turn.begin()
+                if pt == 'custom_tool_call_output':
+                    self._cx_execs.output(p.get('call_id'), p.get('output'))
+
+    def front_scan(self, wait=False):
+        """The same for the rollout of the thread of the page itself (its events are the orchestrator's)."""
+        t = self.front.start(self.path, self.partial, self.orch_log, 'orch', self.cwd, self.fork.prefix if self.fork.sub else None) if self.partial else None
+        if wait and t is not None:
+            t.join()
+        return t
 
     def _codex_ask(self, ts, p):
         try:

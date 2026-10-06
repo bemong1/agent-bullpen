@@ -2,8 +2,8 @@
 
   - `agents.shell_mkdirs`: the folders a shell command makes
   - `units.listing_hint`: which write points at which folder
-  - `units.written_debate`: which folders the list takes (the disk decides, not the name)
-  - `units.assign(hinted=)`: the same seats, rooms and members with and without hints; only the list and the time differ
+  - `units.written_debate`: which folders the list takes (the disk decides, not the name: a guide and an exact round folder, nothing a text declares)
+  - `units.assign(hints=)`: the same cells, rooms and places with and without hints; only the list, the order and the time differ
   - the session: the successful writes of a Claude record (Write, Edit, MultiEdit, Bash) and of a Codex rollout (FileChange, CommandExecution that exited 0)
 
     python3 -m unittest tests.test_orch_listing
@@ -21,9 +21,10 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat import patched, server  # noqa: E402
+from judge_support import Fixture, agent, hint, launch, wr  # noqa: E402
 from test_codex_page import line  # noqa: E402  (a function: no TestCase is imported twice)
 
-from board import agents as AG, units as U, views  # noqa: E402
+from board import agents as AG, facts as F, units as U, views  # noqa: E402
 
 
 def write(path, text=''):
@@ -33,6 +34,7 @@ def write(path, text=''):
     return path
 
 
+# a brief that says who writes which result file: no folder is a debate for what its brief says (the flat review is gone), only for a guide and exact round folders
 FLAT_BRIEF = '# Review\n\nReviewers and their result files: `sol.md` (reviewer sol), `opus.md` (reviewer opus).\n'
 ONE_DECLARED = '# Review\n\nReviewers and their result files: `sol.md` (reviewer sol).\n'
 ROUNDS_BRIEF = '# Debate\n\n**A — flow**: reads the code. **B — gate**: reads the tests.\nReports go to r1/A.md and r1/B.md.\n'
@@ -218,12 +220,13 @@ class Gate(unittest.TestCase):
     def test_what_is_listed(self):
         self.assertTrue(self.ok(self.folder('a', 'brief.md', ROUNDS_BRIEF)))                         # a guide and an exact round folder
         self.assertTrue(self.ok(self.folder('b', 'README.md', '# Notes on the debate', ('round1',))))   # a README is a guide beside a round folder, away from the top of a repository
-        self.assertTrue(self.ok(self.folder('c', 'brief.md', FLAT_BRIEF, ())))                         # a brief that declares two result files
+        self.assertTrue(self.ok(self.folder('c', 'brief.md', FLAT_BRIEF, ('r1',))))                    # what the brief says of result files is not looked at: the round folder is
         self.assertTrue(self.ok(self.folder('d', 'index.md', 'x', ('r01', 'r2'))))
 
     def test_what_is_not(self):
         self.assertFalse(self.ok(self.folder('e', 'brief.md', ROUNDS_BRIEF, ())))                      # a brief alone, whatever it says of rounds
         self.assertFalse(self.ok(self.folder('f', 'brief.md', ONE_DECLARED, ())))                      # one declared file
+        self.assertFalse(self.ok(self.folder('f2', 'brief.md', FLAT_BRIEF, ())))                       # two declared files: a guide and no round folder is no debate (the flat branch is gone)
         self.assertFalse(self.ok(self.folder('g', 'README.md', '# a note folder', ())))                # a README with no round
         self.assertFalse(self.ok(self.folder('h', None, '', ('r1',))))                                  # `mkdir r1` and no guide
         d = self.folder('later', 'brief.md', ROUNDS_BRIEF)
@@ -260,49 +263,61 @@ class Gate(unittest.TestCase):
         self.assertEqual(top, here if os.path.exists(os.path.join(here, '.git')) else None)
 
 
-class AssignWithHints(unittest.TestCase):
-    """A hint lists a folder and does nothing else: the seats, the members, the units an agent works in and the rooms are the same with and without it."""
+class AssignWithHints(Fixture):
+    """A hint lists a folder and does nothing else: the cells, the places an agent is tied to and the rooms are the same with and without it."""
 
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.tmp.cleanup)
-        root = os.path.realpath(self.tmp.name)
-        self.sat = os.path.join(root, 'sat')
-        write(os.path.join(self.sat, 'brief.md'), ROUNDS_BRIEF)
-        os.makedirs(os.path.join(self.sat, 'r1'))
-        self.talk = os.path.join(root, 'talk')
-        write(os.path.join(self.talk, 'brief.md'), ROUNDS_BRIEF)
-        os.makedirs(os.path.join(self.talk, 'r1'))
-        self.flat = os.path.join(root, 'flat')
-        write(os.path.join(self.flat, 'brief.md'), FLAT_BRIEF)
-        self.notes = os.path.join(root, 'notes')
-        write(os.path.join(self.notes, 'brief.md'), ROUNDS_BRIEF)                                       # a brief alone
+        super().setUp()
+        self.sat = self.p('sat')
+        self.file('sat/brief.md', ROUNDS_BRIEF)
+        self.dirs('sat/r1')
+        self.talk = self.p('talk')
+        self.file('talk/brief.md', ROUNDS_BRIEF)
+        self.dirs('talk/r1')
+        self.flat = self.p('flat')
+        self.file('flat/brief.md', FLAT_BRIEF)                                                          # a brief that names result files and has no round folder
+        self.notes = self.p('notes')
+        self.file('notes/brief.md', ROUNDS_BRIEF)                                                       # a brief alone
+        self.b = agent('b', writes=[wr(self.file('sat/r1/B.md', 'x\n', 120.0), 120.0)], status='running', start=100.0, last=150.0)
 
-    def facts(self):
-        text = 'You are B. Read `%s/brief.md` and write your report to `%s/r1/B.md`.' % (self.sat, self.sat)
-        return [U.AgentFacts(id='b', key='b', cwd=self.sat, launcher_cwd='', start=100.0, last=150.0, spawn_prompt=text, texts=[text], reads=[], writes=[], planned=[])]
-
-    def run_assign(self, hinted):
-        return U.assign(self.facts(), U.Catalog(), {'b': 'running'}, hinted=hinted)
+    def run_assign(self, hints, **kw):
+        return self.assign(self.b, hints=hints, **kw)
 
     def test_only_the_list_and_the_time_differ(self):
         plain = self.run_assign(None)
-        hinted = self.run_assign({self.talk: 500.0, self.flat: 400.0, self.notes: 300.0, os.path.join(self.talk, 'nope'): 1.0, self.sat: 90.0})
-        for name in ('assignments', 'slots', 'agent_units', 'members', 'worked', 'rooms', 'room_files', 'folders', 'diag'):
+        hinted = self.run_assign({self.talk: hint(500.0), self.flat: hint(400.0), self.notes: hint(300.0), self.p('talk', 'nope'): hint(1.0), self.sat: hint(90.0)})
+        for name in ('cells', 'placed', 'rooms', 'agent_units', 'worked', 'bound', 'assignments', 'diag', 'folded'):
             self.assertEqual(getattr(plain, name), getattr(hinted, name), name)
-        self.assertEqual(sorted(plain.listed), [self.sat])
-        self.assertEqual(sorted(hinted.listed), sorted([self.sat, self.talk, self.flat]))                  # the brief that stands alone and the folder that is not one stay out
-        self.assertEqual({p: hinted.unit_ts[p] for p in (self.talk, self.flat)}, {self.talk: 500.0, self.flat: 400.0})
-        self.assertEqual(hinted.unit_ts[self.sat], plain.unit_ts[self.sat])                                 # the later of the two times: the agent started at 100, the write was at 90
-        self.assertEqual(self.run_assign({self.sat: 900.0}).unit_ts[self.sat], 900.0)
-        self.assertEqual(hinted.members, {'b': {self.sat}})
+        self.assertEqual((plain.listed, plain.hinted), ({self.sat: 'cell'}, set()))
+        self.assertEqual(hinted.listed, {self.sat: 'cell', self.talk: 'hint'})                           # the brief that stands alone, the one with no round folder and the folder that is not one stay out
+        self.assertEqual(hinted.hinted, {self.talk})                                                     # only the one that is on the list for the hint alone
+        self.assertEqual({p: hinted.unit_ts[p] for p in (self.talk,)}, {self.talk: 500.0})
+        self.assertEqual(hinted.unit_ts[self.sat], plain.unit_ts[self.sat])                               # the later of the two times: the agent started at 100, the write was at 90
+        self.assertEqual(self.run_assign({self.sat: hint(900.0)}).unit_ts[self.sat], 900.0)
+        self.assertEqual(hinted.worked, {'b': {self.sat}})
+        self.assertEqual((plain.order, plain.current), ([self.sat], self.sat))
+        self.assertEqual((hinted.order, hinted.current), ([self.sat, self.talk], self.sat))               # a folder only the orchestrator wrote in is behind the one with an agent in it
+
+    def test_the_call_of_a_hint_places_an_agent_launched_by_it_and_seats_nobody(self):
+        c = agent('c', launch=launch('m1', 't5'), status='running', start=200.0, last=250.0)           # launched by the call that wrote the brief of talk, and has written nothing
+        plain = self.assign(self.b, c, hints={self.talk: hint(150.0)})
+        called = self.assign(self.b, c, hints={self.talk: hint(150.0, calls=('t5',))})
+        self.assertEqual(plain.placed, {})
+        self.assertEqual({k: (p.unit, p.why, p.sure) for k, p in called.placed.items()}, {'c': (self.talk, 'launch_call', False)})        # a thought place, never a sure one
+        for name in ('cells', 'rooms', 'agent_units', 'assignments', 'diag'):                            # no seat, no room, no cell
+            self.assertEqual(getattr(plain, name), getattr(called, name), name)
+        self.assertNotIn('c', called.agent_units)
 
     def test_the_orchestrator_has_no_seat_and_no_room(self):
-        hinted = self.run_assign({self.talk: 500.0})
+        mark = self.file('talk/r1/A.md', 'x\n', 450.0)
+        hinted = self.assign(hints={self.talk: hint(500.0)}, orch=[wr(mark, 450.0)])
         self.assertEqual(hinted.rooms, {})
-        self.assertNotIn(self.talk, {a.unit for a in hinted.assignments})
-        self.assertNotIn(self.talk, {u for us in hinted.members.values() for u in us})
+        self.assertEqual(hinted.assignments, [])
+        self.assertNotIn(self.talk, {u for us in hinted.worked.values() for u in us})
         self.assertNotIn(self.talk, {u for us in hinted.agent_units.values() for u in us})
+        (cell,) = [c for c in hinted.cells.values() if c.unit == self.talk]
+        self.assertEqual((cell.owner, cell.agent, cell.editors), (None, None, ['orch']))                  # what it wrote is a file of the cell: it is an editor of it, never its owner
+        self.assertEqual((hinted.listed, hinted.current), ({self.talk: 'hint'}, self.talk))              # with no debate that has an agent, the one the orchestrator made is the current one
 
 
 # ---------------------------------------------------------------------------------------------------------------------
@@ -310,6 +325,19 @@ class AssignWithHints(unittest.TestCase):
 # ---------------------------------------------------------------------------------------------------------------------
 def iso(t):
     return time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(t))
+
+
+def agent_that_wrote(session, work, t0, debate, rnd='r1', name='B'):
+    """An agent of the page that wrote `<debate>/<rnd>/<name>.md` with a Write tool whose result said it worked (the collector makes the sure write event of it): a debate with an agent in it. It
+    is started well before the orchestrator's later writes, and the file is on the disk."""
+    aid = 'a%016x' % 7
+    path = write(os.path.join(debate, rnd, name + '.md'), 'x\n')
+    a = server.Agent(aid, {'description': 'T1-B review'})
+    a.feed({'type': 'user', 'timestamp': iso(t0 + 2), 'cwd': work, 'message': {'role': 'user', 'content': 'Review the code.'}})
+    a.feed({'type': 'assistant', 'timestamp': iso(t0 + 3), 'cwd': work, 'message': {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 'toolu_w1', 'name': 'Write', 'input': {'file_path': path, 'content': 'x'}}]}})
+    a.feed({'type': 'user', 'timestamp': iso(t0 + 4), 'cwd': work, 'message': {'role': 'user', 'content': [{'type': 'tool_result', 'tool_use_id': 'toolu_w1', 'content': 'x'}]}})
+    session.agents[aid] = a
+    return aid
 
 
 class ClaudeRecord(unittest.TestCase):
@@ -338,13 +366,13 @@ class ClaudeRecord(unittest.TestCase):
         with open(self.path, 'a') as f:
             f.write('\n'.join(json.dumps(r) for r in rows) + '\n')
 
-    def call(self, name, inp, error=None):
-        """One tool call and its result (error True: the result says it failed; None: no result yet)."""
+    def call(self, name, inp, error=None, mid=None):
+        """One tool call and its result (error True: the result says it failed; None: no result yet). `mid` is the id of the message that holds the call: calls of one message are one group."""
         self.n += 1
         tid = 'toolu_%d' % self.n
         ts = self.t0 + self.n * 5
         rows = [{'type': 'assistant', 'timestamp': iso(ts), 'cwd': self.work, 'sessionId': self.SID,
-                 'message': {'role': 'assistant', 'model': 'claude-sonnet-5-5', 'content': [{'type': 'tool_use', 'id': tid, 'name': name, 'input': inp}]}}]
+                 'message': dict({'role': 'assistant', 'model': 'claude-sonnet-5-5', 'content': [{'type': 'tool_use', 'id': tid, 'name': name, 'input': inp}]}, **({'id': mid} if mid else {}))}]
         if error is not None:
             rows.append({'type': 'user', 'timestamp': iso(ts + 1), 'cwd': self.work, 'sessionId': self.SID,
                          'message': {'role': 'user', 'content': [dict({'type': 'tool_result', 'tool_use_id': tid, 'content': 'x'}, **({'is_error': True} if error else {}))]}})
@@ -362,6 +390,19 @@ class ClaudeRecord(unittest.TestCase):
         for name, path in (('Edit', os.path.join(self.root, 'e', 'r1', 'A.md')), ('MultiEdit', os.path.join(self.root, 'm', 'README.md'))):
             self.call(name, {'file_path': path}, error=False)
         self.assertEqual(self.hints(), sorted([talk, os.path.join(self.root, 'e'), os.path.join(self.root, 'm')]))
+
+    def test_a_hint_says_which_call_and_which_message_wrote_there(self):
+        talk = os.path.join(self.root, 'talk')
+        ts = self.call('Write', {'file_path': os.path.join(talk, 'brief.md'), 'content': 'x'}, error=False, mid='msg_1')
+        group = ('claude', self.SID, None, 'msg_1')
+        self.assertEqual(self.session.orch_hint_facts, {talk: F.Hint(ts, frozenset({'toolu_1'}), frozenset({group}))})
+        ts2 = self.call('Write', {'file_path': os.path.join(talk, 'r1', 'A.md'), 'content': 'x'}, error=False, mid='msg_2')
+        self.assertEqual(self.session.orch_hint_facts, {talk: F.Hint(ts2, frozenset({'toolu_1', 'toolu_2'}), frozenset({group, ('claude', self.SID, None, 'msg_2')}))})      # the time is the last write
+        self.call('Write', {'file_path': os.path.join(talk, 'r2', 'A.md'), 'content': 'x'}, error=True, mid='msg_3')                                            # a failure is no call of the hint
+        self.call('Bash', {'command': 'mkdir -p other/r1'}, error=False)                                                                                       # a record with no message id has a call and no group
+        self.assertEqual(self.session.orch_hint_facts[os.path.join(self.work, 'other')].calls, frozenset({'toolu_4'}))
+        self.assertEqual(self.session.orch_hint_facts[os.path.join(self.work, 'other')].groups, frozenset())
+        self.assertEqual(self.session.orch_hint_facts[talk].calls, frozenset({'toolu_1', 'toolu_2'}))
 
     def test_a_write_that_failed_or_has_no_result_points_nowhere(self):
         self.call('Write', {'file_path': os.path.join(self.root, 'f', 'brief.md'), 'content': 'x'}, error=True)
@@ -429,12 +470,8 @@ class ClaudeRecord(unittest.TestCase):
         self.assertEqual([t['dir'] for d in views.state(self.session)['debates'] for t in d['topics']], [talk])
 
     def with_an_agent_in(self, debate):
-        """An agent of the page that is to write r1/B.md of `debate` (a debate with an agent in it), started well before the orchestrator's later writes."""
-        aid = 'a%016x' % 7
-        a = server.Agent(aid, {'description': 'T1-B review'})
-        a.feed({'type': 'user', 'timestamp': iso(self.t0 + 2), 'cwd': self.work, 'message': {'role': 'user', 'content': 'Review the code. Write your report to `%s/r1/B.md`.' % debate}})
-        self.session.agents[aid] = a
-        return aid
+        """An agent of the page that wrote r1/B.md of `debate` (a debate with an agent in it), started well before the orchestrator's later writes."""
+        return agent_that_wrote(self.session, self.work, self.t0, debate)
 
     def test_a_debate_only_the_orchestrator_wrote_never_takes_the_place_of_one_with_agents(self):
         theirs = os.path.join(self.root, 'migration')
@@ -573,6 +610,16 @@ class CodexRecord(unittest.TestCase):
         self.file_change({os.path.join(talk, 'r1', 'A.md'): {'type': 'update', 'unified_diff': '@@'}})
         self.assertEqual(self.hints(), [talk])
 
+    def test_a_hint_says_which_call_wrote_there(self):
+        talk = os.path.join(self.root, 'talk')
+        self.file_change({os.path.join(talk, 'brief.md'): {'type': 'add', 'content': 'x'}})
+        self.command('mkdir -p talk/r1')
+        got = self.session.orch_hint_facts
+        self.assertEqual(got[talk].calls, frozenset({'fc_1'}))
+        self.assertEqual(got[talk].groups, frozenset({('codex', self.R, None, 'fc_1')}))                  # a call of its own thread is its own group
+        self.assertEqual((got[os.path.join(self.work, 'talk')].calls, got[os.path.join(self.work, 'talk')].groups),
+                         (frozenset({'item_2'}), frozenset({('codex', self.R, None, 'item_2')})))
+
     def test_a_delete_a_move_and_a_change_that_did_not_complete(self):
         self.file_change({os.path.join(self.root, 'gone', 'brief.md'): {'type': 'delete'}})
         self.file_change({os.path.join(self.root, 'half', 'brief.md'): {'type': 'add', 'content': 'x'}}, status='failed')
@@ -618,10 +665,7 @@ class CodexRecord(unittest.TestCase):
         theirs = os.path.join(self.root, 'migration')
         write(os.path.join(theirs, 'brief.md'), ROUNDS_BRIEF)
         os.makedirs(os.path.join(theirs, 'r1'))
-        aid = 'a%016x' % 7
-        a = server.Agent(aid, {'description': 'T1-B review'})
-        a.feed({'type': 'user', 'timestamp': iso(self.t0 + 2), 'cwd': self.work, 'message': {'role': 'user', 'content': 'Review the code. Write your report to `%s/r1/B.md`.' % theirs}})
-        self.session.agents[aid] = a
+        agent_that_wrote(self.session, self.work, self.t0, theirs)
         old = os.path.join(self.root, 'scratch', 'old-review')
         write(os.path.join(old, 'brief.md'), ROUNDS_BRIEF)
         os.makedirs(os.path.join(old, 'r1'))
@@ -650,9 +694,17 @@ class CodexRecord(unittest.TestCase):
         self.assertEqual(sorted(fresh.orch_hints), sorted(os.path.join(self.root, 'new%d' % i) for i in range(64)))
         self.assertTrue(fresh.orch_hints_dropped)
 
-    def test_a_line_over_a_megabyte_is_not_read(self):
+    def test_a_file_change_over_a_megabyte_is_read(self):
+        """The item of a file change or of a command is read in full however long its line is (up to 64 MB): what it wrote counts."""
         talk = os.path.join(self.root, 'talk')
         self.file_change({os.path.join(talk, 'brief.md'): {'type': 'add', 'content': 'x' * (1 << 20 + 1)}})
+        self.assertEqual(self.hints(), [talk])
+
+    def test_a_line_over_the_limit_is_not_read(self):
+        from board import codex_parse
+        talk = os.path.join(self.root, 'talk')
+        with mock.patch.object(codex_parse, 'CX_ITEM_MAX', 3 << 20):                                       # (the stand-in of 64 MB)
+            self.file_change({os.path.join(talk, 'brief.md'): {'type': 'add', 'content': 'x' * (4 << 20)}})
         self.assertEqual(self.hints(), [])
 
     def test_the_folder_is_listed_when_it_is_a_debate(self):

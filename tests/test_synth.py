@@ -98,11 +98,22 @@ def reap(procs):
             p.wait()
 
 
+HOST_SESSION_PREFIXES = ('CODEX_', 'CLAUDE_', 'CLAUDECODE', 'AI_AGENT')
+
+
+def host_free_env(home, **extra):
+    """isolated_env without what a Claude Code or Codex session of the machine leaves in the environment of its shell (CODEX_THREAD_ID, CLAUDE_CODE_SESSION_ID, CLAUDE_PID ...): a test that runs inside one
+    of them must give the server the same answer as one that runs in a plain terminal."""
+    env = {k: v for k, v in isolated_env(home).items() if not k.startswith(HOST_SESSION_PREFIXES)}
+    env.update(extra)
+    return env
+
+
 class Board:
     """server.py started on a synthetic HOME. With guard=(log path, files that must not be opened) it runs under GUARD. On close it stops only this process."""
 
     def __init__(self, home, orch, guard=None, args=(), timeout=60):
-        env = isolated_env(home, AGENT_BULLPEN_LANG='ko')      # the ready line below and the start output the tests read are Korean, whatever LANG the runner has
+        env = host_free_env(home, AGENT_BULLPEN_LANG='ko')      # the ready line below and the start output the tests read are Korean, whatever LANG the runner has
         cmd = [sys.executable, SERVER] if not guard else [sys.executable, '-c', GUARD, ROOT, guard[0], os.pathsep.join(guard[1])]
         self.out = tempfile.TemporaryFile('w+')
         self.p = subprocess.Popen(cmd + ['--port', '0'] + list(args), stdout=self.out, stderr=subprocess.STDOUT, env=env, cwd=ROOT, stdin=subprocess.DEVNULL)
@@ -278,19 +289,22 @@ class SynthBoard(unittest.TestCase):
         t1, t2 = topics['t1_env'], topics['t2_retry']
         self.assertEqual((t1['title'], t1['rounds'], [r['p'] for r in t1['rows']]), ('T1 Env override naming', [1, 2], ['A', 'B', 'C']))
         self.assertEqual((t2['title'], t2['rounds'], [r['p'] for r in t2['rows']]), ('T2 Retry policy', [1, 2], ['A', 'B']))
-        self.assertEqual([r['role'] for r in t1['rows']], ['Compatibility', 'Ergonomics', 'Cross-check'])
-        # T1 ended with rulings.md: the table lists no final output, so auto_final finds it
+        self.assertEqual([r['role'] for r in t1['rows']], ['', '', ''])                                      # a row is a file: no role is read from a text
+        # T1 ended with rulings.md, written by the orchestrator after the last report: the one document that can be its end
         f1 = t1['final']
-        self.assertEqual((f1['rel'], f1['auto'], f1['exists'], f1['path']), ('rulings.md', True, True, os.path.join(self.info['units']['t1_env'], 'rulings.md')))
+        self.assertEqual((f1['rel'], f1['confirmed'], f1['exists'], f1['path'], f1['by'], f1['why']), ('rulings.md', True, True, os.path.join(self.info['units']['t1_env'], 'rulings.md'), 'orch', []))
+        self.assertTrue(t1['closable'])
         self.assertTrue(all(c['state'] == 'done' for r in t1['rows'] for c in r['cells']))
-        self.assertTrue(all(c['lines'] > 0 and c['agent'] for r in t1['rows'] for c in r['cells']))
-        # T2 is in progress: B has no round 2 yet (without --live there is no process, so it is "missing", not "writing")
-        self.assertEqual((t2['final']['rel'], t2['final']['exists']), (None, False))
+        self.assertTrue(all(c['lines'] > 0 and c['agent'] and c['owner'] == c['agent'] and c['editors'] == [] and not c['previous'] for r in t1['rows'] for c in r['cells']))
+        self.assertEqual({c['evidence'] for r in t1['rows'] for c in r['cells']}, {'tool', 'planned'})              # A and B wrote with a tool; the Codex C was asked to save with -o
+        # T2 is in progress: B has a draft of round 2 (its process is gone without --live, so it counts as handed in), and nobody has written an end for the topic
+        self.assertEqual((t2['final']['rel'], t2['final']['confirmed'], t2['final']['exists'], t2['final']['why'], t2['closable']), (None, False, False, ['none'], False))
         states = {r['p']: [c['state'] for c in r['cells']] for r in t2['rows']}
-        self.assertEqual(states, {'A': ['done', 'done'], 'B': ['done', 'missing']})
+        self.assertEqual(states, {'A': ['done', 'done'], 'B': ['done', 'done']})
         self.assertEqual([x['name'] for x in t1['docs']], ['brief.md', 'rulings.md'])
         self.assertEqual([x['name'] for x in t2['docs']], ['brief.md'])
         self.assertEqual(d['finals'], [])
+        self.assertEqual((d['sure'], d['placed'], t1['placed'], t2['placed']), (True, [], [], []))              # everybody holds a cell: nobody is thought to work somewhere
 
     def test_readers_follow_the_cross_reading(self):
         t1 = next(t for t in self.state['debates'][0]['topics'] if t['key'] == 't1_env')
@@ -465,7 +479,7 @@ class LiveFlag(unittest.TestCase):
         ag = {a['tag']: a['status'] for a in st['agents']}
         self.assertEqual(ag, {'C': 'done', 'T1-A': 'done', 'T1-B': 'done', 'T2-A': 'done', 'T2-B': 'running'})
         t2 = next(t for t in st['debates'][0]['topics'] if t['key'] == 't2_retry')
-        self.assertEqual({r['p']: [c['state'] for c in r['cells']] for r in t2['rows']}, {'A': ['done', 'done'], 'B': ['done', 'writing']})
+        self.assertEqual({r['p']: [c['state'] for c in r['cells']] for r in t2['rows']}, {'A': ['done', 'done'], 'B': ['done', 'draft']})        # B is still working on its draft of round 2
         self.assertEqual(next(a for a in st['agents'] if a['tag'] == 'T2-B')['pending']['name'], 'Read')
         solo = board.get('/api/state?session=' + synth_home.SOLO)[1]
         self.assertTrue(solo['session']['alive'])
@@ -675,25 +689,40 @@ class StoppedScene(unittest.TestCase):
         self.info = synth_home.build(os.path.join(os.path.realpath(self.tmp.name), 'home'), **kw)
         board = Board(self.info['home'], self.info['orch'])
         self.addCleanup(board.close)
-        return board, board.get('/api/state')[1]
+        end = time.time() + 30                                  # the first seconds after the start show the `claude -p` runs without the call that started them: wait for the run that is a participant
+        while True:
+            state = board.get('/api/state')[1]
+            kid = next((a for a in state['agents'] if a['id'] == synth_home.STOPPED_KIDS['exited']), None)
+            if (kid and kid['link']['rule_class'] == 'certain') or time.time() > end:
+                return board, state
+            time.sleep(0.3)
 
-    def check_scene(self, state, paused, held):
+    def check_scene(self, state, held, cut):
+        """`held` wrote its report and a 529 stopped it (a draft nobody is typing), `cut` is stopped by a 529 too (a draft on the small scene, no file on the busy one: it is only thought to work there),
+        and the `exited` run is a participant that names its seat with BULLPEN_ROOM and BULLPEN_SEAT and was cut off before it wrote: its cell is paused."""
         agents = {a['tag']: a for a in state['agents'] if a['tag']}
-        self.assertEqual((self.info['stopped']['paused'], self.info['stopped']['held']), (paused, held))
-        self.assertEqual((agents[paused]['status'], agents[paused]['reason']), ('interrupted', 'api_error'))
+        kid = next(a for a in state['agents'] if a['id'] == synth_home.STOPPED_KIDS['exited'])
+        self.assertEqual((self.info['stopped']['paused'], self.info['stopped']['held'], self.info['stopped']['cut']), ('exited', held, cut))
+        self.assertEqual((agents[cut]['status'], agents[cut]['reason']), ('interrupted', 'api_error'))
         self.assertEqual((agents[held]['status'], agents[held]['reason']), ('interrupted', 'api_error'))
+        unit, seat = self.info['stopped']['seat']
+        self.assertEqual((kid['status'], kid['reason'], kid['room_tag']['room'].rsplit('/', 1)[1], kid['room_tag']['seat']), ('interrupted', 'exited', os.path.basename(unit), seat))
         cells = {c['agent']: c for d in state['debates'] for tp in d['topics'] for r in tp['rows'] for c in r['cells'] if c['state'] in ('paused', 'draft') and c['agent']}
-        self.assertEqual(cells[agents[paused]['id']]['state'], 'paused')                  # stopped before any file: nothing to show
-        self.assertEqual(cells[agents[held]['id']]['state'], 'draft')                      # its report is on disk, and nobody is writing it
+        self.assertEqual((cells[kid['id']]['state'], cells[kid['id']]['evidence']), ('paused', 'tag'))        # cut off before any file: nothing to show
+        self.assertEqual(cells[agents[held]['id']]['state'], 'draft')                                          # its report is on disk, and nobody is writing it
         return agents
 
     def test_a_draft_nobody_is_typing_and_a_paused_cell_on_the_small_scene(self):
         _, state = self.build(stopped=True)
-        self.check_scene(state, 'T2-B', 'T2-A')
+        agents = self.check_scene(state, 'T2-A', 'T2-B')
+        t2 = next(t for t in state['debates'][0]['topics'] if t['key'] == 't2_retry')
+        self.assertEqual([r['p'] for r in t2['rows']], ['A', 'B', 'D'])
+        self.assertEqual([c['state'] for c in next(r for r in t2['rows'] if r['p'] == 'B')['cells']], ['done', 'draft'])      # the draft of the other one that a 529 stopped
 
     def test_the_busy_scene_has_both_too(self):
         _, state = self.build(busy=True, stopped=True)
-        self.check_scene(state, 'T5-B', 'T5-C')
+        agents = self.check_scene(state, 'T5-C', 'T5-B')
+        self.assertEqual((agents['T5-B']['placed']['why'], agents['T5-B']['placed']['sure']), ('launch_peer', False))          # no file, so no cell: it was launched with C, which has one
 
     def test_the_run_that_is_still_working_is_started_from_the_orchestrators_shell(self):
         """A shell of a Claude session leaves its id and its process number in the environment of what it starts (the real Bash tool does): the fake `claude -p` run of the stopped scene has both."""
@@ -785,7 +814,9 @@ class BusyBoard(unittest.TestCase):
         self.assertEqual(sum(a['status'] == 'done' for a in ag), 19)                                      # 6 finished topics x 3 + T5-C
         self.assertEqual(sum(a['status'] == 'ended' for a in ag), 14 - unknown)                            # there is no process, so the 14 unfinished agents are ended
         self.assertEqual(sum(a['status'] == 'unknown' for a in ag), unknown)
-        workers = [a for a in ag if not a['units']]
+        placed = [a for a in ag if a['placed']]
+        self.assertEqual(sorted((a['tag'], a['placed']['why'], a['placed']['sure'], a['placed']['topic']) for a in placed), [('T5-A', 'launch_peer', False, None), ('T5-B', 'launch_peer', False, None)])      # no file yet, launched with C: thought to work in the bundle
+        workers = [a for a in ag if not a['units'] and not a['placed']]
         self.assertEqual(len(workers), 9)                                                                  # 9 desks in the "Other work" room
         self.assertEqual(sorted(re.sub(r'-\d+$', '', a['tag']) for a in workers), ['opus5.5'] + ['sol6.1'] + ['sonnet5.5'] * 7)
         self.assertEqual(sum(a['model'].startswith('claude-opus') for a in workers), 1)
@@ -795,17 +826,20 @@ class BusyBoard(unittest.TestCase):
     def test_topics_and_finals(self):
         t = self.topics()
         self.assertEqual(sorted(t), ['t1_naming', 't2_errors', 't3_retry', 't4_config', 't5_logging', 't6_tests', 't7_packages', 't8_release'])
-        have = {k: (v['final']['exists'], v['final']['auto'], v['final']['rel']) for k, v in t.items()}
-        self.assertEqual({k: v for k, v in have.items() if v[0]}, {
-            't1_naming': (True, False, 'final/naming.md'), 't4_config': (True, False, 'final/config.md'), 't8_release': (True, False, 'final/release.md'),   # final output from the brief table
-            't2_errors': (True, True, 'rulings.md'), 't6_tests': (True, True, 'rulings.md'), 't7_packages': (True, True, 'rulings.md')})                 # found automatically
-        self.assertFalse(t['t3_retry']['final']['exists'] or t['t5_logging']['final']['exists'])
+        have = {k: (v['final']['confirmed'], v['final']['rel'], v['closable']) for k, v in t.items()}
+        self.assertEqual({k: v for k, v in have.items() if v[0]}, {'t2_errors': (True, 'rulings.md', True), 't6_tests': (True, 'rulings.md', True), 't7_packages': (True, 'rulings.md', True)})       # the ruling in the topic folder
+        # the brief table names a file under final/ for T1, T4 and T8: it is shown as that, but a file in another folder is not the end of a topic (the judgment looks in the topic folder), so the topic reads "closing not confirmed"
+        self.assertEqual({k: (t[k]['final']['table_path'], t[k]['final']['why']) for k in ('t1_naming', 't4_config', 't8_release')},
+                         {k: (os.path.join(self.info['review'], 'final', n + '.md'), ['none']) for k, n in (('t1_naming', 'naming'), ('t4_config', 'config'), ('t8_release', 'release'))})
+        self.assertFalse(t['t3_retry']['final']['confirmed'] or t['t5_logging']['final']['confirmed'])
+        self.assertEqual(t['t3_retry']['final']['why'], ['open_cell', 'none'])
         self.assertEqual([f['name'] for f in self.state['debates'][0]['finals']], ['config.md', 'naming.md', 'release.md'])
-        self.assertTrue(all(len(v['rows']) == 3 for v in t.values()))
+        self.assertEqual({k: len(v['rows']) for k, v in t.items() if k != 't5_logging'}, {k: 3 for k in t if k != 't5_logging'})
+        self.assertEqual([r['p'] for r in t['t5_logging']['rows']], ['C'])                                  # the other two have no file: they are not in the table
         cells = lambda k: {r['p']: [c['state'] for c in r['cells']] for r in t[k]['rows']}
         self.assertEqual(cells('t1_naming'), {'A': ['done', 'done'], 'B': ['done', 'done'], 'C': ['done', 'done']})
-        self.assertEqual(cells('t3_retry'), {'A': ['done', 'missing'], 'B': ['done', 'missing'], 'C': ['done', 'writing' if self.codex_unknown() else 'missing']})     # round 2 is not there yet (no --live, so "missing"; C is the Codex agent, whose process nobody can rule out)
-        self.assertEqual(cells('t5_logging'), {'A': ['missing'], 'B': ['missing'], 'C': ['done']})            # only round 1
+        self.assertEqual(cells('t3_retry'), {'A': ['done', 'done'], 'B': ['done', 'done'], 'C': ['done', 'writing' if self.codex_unknown() else 'missing']})     # round 2: A and B have a draft (their process is gone without --live); C is the Codex agent asked to save with -o, whose process nobody can rule out
+        self.assertEqual(cells('t5_logging'), {'C': ['done']})                                              # only round 1
 
     def test_recent_topic_keeps_its_room_and_old_ones_do_not(self):
         """The room of a finished topic disappears 20 minutes after its last activity (counted with the past agents). T6 finished 12 minutes ago."""
@@ -897,9 +931,10 @@ class BusyLive(unittest.TestCase):
         self.assertEqual(sum(a['status'] == 'done' for a in ag), 19)
         self.assertEqual(sum(a['status'] in ('stalled', 'ended', 'failed', 'killed') for a in ag), 0)
         self.assertEqual({a['status'] for a in ag if a['provider'] == 'codex'}, {'unknown' if unknown else 'running'})     # an open turn + a process that has the rollout open (/proc)
-        self.assertEqual(sum(a['status'] == 'running' for a in ag if not a['units']), 9 - unknown)         # 9 agents in the "Other work" room, one of them Codex
+        self.assertEqual(sum(a['status'] == 'running' for a in ag if not a['units'] and not a['placed']), 9 - unknown)         # 9 agents in the "Other work" room, one of them Codex
         states = [c['state'] for t in st['debates'][0]['topics'] for r in t['rows'] for c in r['cells']]
-        self.assertEqual((states.count('writing'), states.count('draft')), (5, 0))                          # T3 round 2 has 3 cells (Codex's is the cell planned with -o) + T5 round 1 has 2 cells
+        self.assertEqual((states.count('writing'), states.count('draft')), (1 - unknown, 2))                 # T3 round 2: a draft each for A and B, and the cell planned with -o for the Codex C. T5 round 1: A and B have no file, so no cell
+        self.assertEqual(sorted(a['tag'] for a in ag if a['placed'] and a['status'] == 'running'), ['T5-A', 'T5-B'])     # they are thought to work in the bundle (the debate's own line)
         self.assertEqual([a['level'] for a in st['alerts']], ['check'])
         r = self.cli('--stop')
         self.assertEqual(r.returncode, 0, r.stdout)
@@ -909,6 +944,28 @@ class BusyLive(unittest.TestCase):
         while time.time() < deadline and any((synth_home.fake_cmdline(p) or '') in ('claude %d' % synth_home.LIVE_SECONDS, 'codex %d' % synth_home.LIVE_SECONDS) for p in pids):
             time.sleep(0.1)
         self.assertEqual([p for p in pids if (synth_home.fake_cmdline(p) or '') in ('claude %d' % synth_home.LIVE_SECONDS, 'codex %d' % synth_home.LIVE_SECONDS)], [])
+
+    def test_the_fake_processes_carry_nothing_of_the_machine_that_runs_them(self):
+        """A run inside a Claude Code or Codex session has that session's ids in its environment. A fake process that inherited them would name a session of the real machine (a Codex thread the board does
+        not know, a Claude session that is not the scene's), and the board would read them: the same scene has to read the same on every machine."""
+        if not os.path.isdir('/proc'):
+            self.skipTest('the environment of a process is read from /proc here')
+        host = {'CODEX_THREAD_ID': '019a0000-aaaa-7bbb-8ccc-dddddddddddd', 'CODEX_SESSION_ID': '019a0000-aaaa-7bbb-8ccc-dddddddddddd', 'CODEX_CI': '1', 'CLAUDECODE': '1',
+                'CLAUDE_CODE_SESSION_ID': '5e55a000-0000-4000-8000-00000000f00d', 'CLAUDE_PID': '1'}
+        info = synth_home.build(self.home, busy=True, stopped=True)
+        with mock.patch.dict(os.environ, host):
+            pids, procs = start_live(info)
+        try:
+            self.assertEqual(len(pids), 2 + 1 + 2)                                               # the orchestrator and the solo session, the run still working, two Codex threads
+            for pid in pids:
+                with open('/proc/%d/environ' % pid, 'rb') as f:
+                    env = dict(x.split('=', 1) for x in f.read().decode().split('\0') if '=' in x)
+                self.assertLessEqual(set(env), {'PATH', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_PID'}, (pid, sorted(env)))
+                if 'CLAUDE_CODE_SESSION_ID' in env:
+                    self.assertEqual(env['CLAUDE_CODE_SESSION_ID'], info['orch'])                  # the id the scene gave it: its shell was the orchestrator's
+        finally:
+            synth_home.stop_live(self.home, True)
+            reap(procs)
 
     def test_stop_does_not_trust_a_live_file_it_did_not_write(self):
         synth_home.build(self.home, busy=True)
@@ -954,7 +1011,7 @@ class BusyGenerator(unittest.TestCase):
                 if len(user) > 3 and '/%s/' % user not in home:
                     self.assertNotIn(('/%s/' % user).encode(), data, name)
             for word in (b'@', b'password', b'secret', b'/Dev/', b'.claude/projects', b'netbird'):          # no address, no credential word, no folder of a real workspace or HOME
-                self.assertNotIn(word, blob, word)
+                self.assertNotIn(word, blob.replace(home.encode(), b'~'), word)                              # (where the temporary folder is on this machine is no business of the check)
             names, odd = work_names(blob, home)
             self.assertEqual(names, {b'acme-robot', b'demo-notes'}, odd)                  # a failure shows where the other name stands
 
@@ -1094,7 +1151,7 @@ class CodexOrchScene(unittest.TestCase):
             if len(user) > 3 and '/%s/' % user not in self.home:
                 self.assertNotIn(('/%s/' % user).encode(), data, name)
         for word in (b'@', b'password', b'secret', b'/Dev/', b'.claude/projects', b'netbird'):
-            self.assertNotIn(word, blob, word)
+            self.assertNotIn(word, blob.replace(self.home.encode(), b'~'), word)
         names, odd = work_names(blob, self.home)
         self.assertEqual(names, {b'acme-app', b'acme-ledger', b'demo-notes'}, odd)
         for name, data in first:

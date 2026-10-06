@@ -17,6 +17,13 @@ Bundles:
        from its shell (alone, or one level down a chain such as Claude > codex exec > claude -p), a guardian thread, a debate folder; and the lookalikes that are no team
        (a session that only relays the instruction by `tmux send-keys`, two orchestrators of one folder with the same words, a script that runs `codex exec`)
 
+  ctr  a contract scene: a debate folder, the participant under test (saves its report by a tool, an Edit, a command in a deciding or a masked place, a Python write), a peer
+       launched with it, far from it or by a call nobody can tell, a tag in its environment, what comes later (a group, one participant, editors) and the orchestrator's conclusion
+
+The axes of `deb`, `room` and `cxo`'s debate scenes that only change words (the language, a marker, a quoted or negated path, a declaration, the noun, a fence) are *noise axes*: the
+truth does not read them (tools/scenarios/plan.py says what the records hold, tools/scenarios/contract.py judges it), so every case that differs in them alone must have the same
+truth. The structure axes (`launch`, `wmethod`, `overlap`, `read`, `tag`, `later`, `final`, and the file, write and launch axes of the older bundles) change what the records hold.
+
 The tables WAY, PROMPT and the helpers at the bottom say what each value does to the *evidence* (does the environment survive, does the process lineage survive,
 can a redirect be read ...). build.py realises them as files and processes; oracle.py reads the same tables to say what a correct reader can know.
 """
@@ -82,6 +89,15 @@ AXES = OrderedDict([
     ('bundle', ('none', 'root')),                             # the room's folder alone, or one topic of a bundle: the folder above it holds the bundle's own brief (docs/records/bundle/meeting)
     ('above', ('none', 'closing', 'unnamed', 'early', 'plain', 'open')),    # a document in the bundle's folder beside the room's: none; a conclusion written after the files that names the room's folder; one that names nobody (the room is the bundle's only topic); a conclusion written before the files; a document that is no conclusion's name; a conclusion written after the files that names nobody and says some is not done
     ('copy', ('none', 'link', 'worktree')),                   # the bundle's folder reached by a link the participants write their paths with, or copied into a linked worktree of the repository where another agent works
+    ('launch', ('msg', 'call', 'far', 'none')),               # how the participants were started: all by one message of the orchestrator (parallel Agent calls; for Codex all by one exec call), each by a message of its own, or by calls whose key is not known (no message id, a link that only guesses)
+    # --- contract scene (`ctr`): a debate folder; a participant that writes its report in one way or does not, others launched with it or after it ---
+    ('wmethod', ('none', 'write', 'edit', 'redirect', 'window', 'stale', 'python')),    # how the participant under test saves its report: not at all, the Write tool, the Edit tool on a file that was there, a redirect (a command in a deciding place), a heredoc followed by another command (a masked place, saved inside its window), the same where nothing is saved (`set -C`: the old file stays), a Python write (no event, only a command window)
+    ('overlap', ('none', 'agent', 'orch')),                  # a command window of another agent, or of the orchestrator, that overlaps the moment of a write nobody was seen to make (only for `python`)
+    ('read', ('tool', 'cat', 'none')),                       # how the participant reads the guide of the debate: the Read tool, a `cat` command, not at all
+    ('tag', ('none', 'room', 'seat')),                       # the names BULLPEN_ROOM (and BULLPEN_SEAT) in the environment of a `claude -p` participant and in its launch command
+    ('later', ('none', 'group', 'alone', 'editors')),        # what comes after round 1: nothing, a group launched together that writes round 2, one participant alone that does, a group that only fixes round-1 reports
+    ('final', ('none', 'early', 'late')),                    # the orchestrator's conclusion document: none, written right after round 1 (before what comes later), or after everything
+    ('cname', ('ruling', 'verdict_ko', 'plain')),            # the name of that document: `ruling.md`, `판정문.md` (both say a conclusion: the sort puts them first), `notes.md` (no conclusion's name); it changes the order of the candidates and nothing else (3.3)
     # --- state (life is shared with deb and cpl) ---
     ('skind', ('main', 'sub', 'grandsub', 'cli', 'codex')),
     ('life', ('running', 'normal_end', 'limit_exit', 'limit_auto', 'limit_repeat', 'sub_limit_resume', 'sub_limit_dead', 'time_limit_kill',
@@ -120,17 +136,18 @@ BUNDLES = OrderedDict([
     ('deb', ('structure', 'kind', 'rpath', 'nstyle', 'rdir', 'role', 'marker', 'decl', 'homonym', 'fstate', 'life', 'os', 'lang', 'aux', 'wmode', 'edits', 'qform')),
     ('sta', ('skind', 'life', 'flaw', 'at', 'os', 'entry', 'tail', 'process')),
     ('cpl', ('spawner', 'life', 'rpath', 'os', 'fstate')),
-    ('room', ('guide', 'shape', 'talk', 'trees', 'people', 'word', 'lang', 'seatmark', 'fname', 'proof', 'phase', 'site', 'ref', 'rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy')),
+    ('room', ('guide', 'shape', 'talk', 'trees', 'people', 'word', 'lang', 'seatmark', 'fname', 'proof', 'phase', 'site', 'ref', 'rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy', 'launch')),
     ('cxo', ('top', 'chain', 'subj', 'host', 'env', 'how', 'look', 'lure', 'substate', 'guard', 'rec', 'topic', 'edge', 'os')),
     ('rer', ('parts', 'stop')),
     ('owr', ('top', 'ow', 'dshape', 'dsite', 'kid', 'copy')),
+    ('ctr', ('launch', 'wmethod', 'overlap', 'read', 'tag', 'later', 'final', 'life', 'cname')),
 ])
 
 # Axes that were added after the first case ids were fixed. A case id names them only when they differ from the baseline, so the ids of every earlier case
 # are the same as before (and the times, ids and files made from them). They stay out of the pairwise cover: each has its own product of cases (run.select).
 OPTIONAL = {'aff': ('author', 'busy', 'starter'), 'deb': ('os', 'lang', 'aux', 'wmode', 'edits', 'qform'), 'sta': ('entry', 'tail', 'process'),
-            'room': ('rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy'),
-            'cxo': ('lure', 'substate', 'guard', 'rec', 'topic', 'edge', 'os')}
+            'room': ('rtime', 'code', 'cite', 'delivery', 'wrap', 'scratch', 'bundle', 'above', 'copy', 'launch'),
+            'cxo': ('lure', 'substate', 'guard', 'rec', 'topic', 'edge', 'os'), 'ctr': ('cname',)}
 
 BASE = {
     'target': 'cli', 'spawner': 'main', 'way': 'direct', 'via': 'arg', 'src': 'call', 'form': 'new', 'cwd': 'same', 'out': 'none',
@@ -140,7 +157,8 @@ BASE = {
     'homonym': 'none', 'fstate': 'none',
     'guide': 'agenda', 'shape': 'beside', 'talk': 'none', 'trees': 'one', 'people': '3', 'word': 'meeting', 'seatmark': 'none', 'fname': 'plain', 'proof': 'both',
     'phase': 'working', 'site': 'docs', 'ref': 'abs', 'rtime': 'overlap', 'code': 'none', 'cite': 'none', 'delivery': 'ok', 'wrap': 'plain', 'scratch': 'none',
-    'bundle': 'none', 'above': 'none', 'copy': 'none',
+    'bundle': 'none', 'above': 'none', 'copy': 'none', 'launch': 'msg',
+    'wmethod': 'write', 'overlap': 'none', 'read': 'tool', 'tag': 'none', 'later': 'none', 'final': 'none', 'cname': 'ruling',
     'skind': 'cli', 'life': 'running', 'flaw': 'none', 'at': 'live', 'os': 'linux', 'entry': 'cli', 'tail': 'mid', 'process': 'there',
     'top': 'cx_tui', 'chain': 'one', 'subj': 'cl', 'host': 'main', 'env': 'codex', 'how': 'fg', 'look': 'live', 'lure': 'none', 'substate': 'running', 'guard': 'none', 'rec': 'end',
     'topic': 'none', 'edge': 'sure', 'parts': 'ab', 'stop': 'cost',
@@ -149,6 +167,7 @@ BASE = {
 # a bundle may sit on a different baseline than the global one (the debate bundle's agent is not yet running unless asked)
 BUNDLE_BASE = {
     'owr': {'top': 'claude'},
+    'ctr': {'life': 'normal_end'},
     'deb': {'life': 'running'},
     'cpl': {'life': 'running', 'rpath': 'abs', 'fstate': 'none'},
 }
@@ -186,6 +205,7 @@ FLAW_VERSION = {'old_format': '2.1.234',       # older than the first `cost-stat
 
 # the round folder of the report by `rdir` (printf pattern of the round number): the builder makes the folders from it and the oracle names the file by it; `both`
 # keeps the participant's own folder `r1` and puts somebody else's `r01` beside it
+UNIT_REL = {'single': 'docs/rev', 'topics': 'docs/rev/t1', 'deep3': 'docs/records/2026/rev', 'readme': 'docs/rev', 'dot': '.records/rev', 'flat': 'docs/rev'}      # the debate folder (a topic: below `docs/rev`) of a `structure`
 ROUND_DIR = {'r1': 'r%d', 'r01': 'r%02d', 'round1': 'round%d', 'both': 'r%d'}
 EDIT_DIR = 'edit1'                   # the editing job beside the topics (`edits=beside`): docs/rev/edit1, a guide and no round folder
 ALIAS_DIR = 'r01'                    # the other spelling of round 1 when both are on disk
@@ -230,6 +250,11 @@ CXO_TALKS = ('talk', 'talk_rel', 'talk_aux', 'talk_redir')               # the c
 CXO_OWN_LAUNCHES = ('launch_tmux', 'launch_xargs', 'launch_pyfile')      # a Claude session that starts the child itself, through a wrapper that is a launch
 CXO_PINS = ('pin_unknown', 'pin_stale_claude', 'stale_turn')            # the names in the environment of the child cannot be checked: the thread is unknown, was a Claude session that is no launcher now, or was a turn ago
 CXO_SUBSTATES_END = ('parent_gone',)
+
+
+CHILD_START = 2.4            # the child's first record, seconds after the call that starts it
+CLAUDE_RUN = 9.0             # a `claude -p` run: first record to `cost-state`
+CODEX_RUN = 7.0              # a `codex exec` run: first record to `task_complete`
 
 
 def cxo_alive(v):
@@ -351,6 +376,18 @@ def room_code(v, i):
     return 'src/task_%s/part.py' % SEAT_LETTERS[i].lower() if i in room_coders(v) else None
 
 
+def room_timing(v, k, n_page):
+    """(life, when the Agent call is made in seconds from the case's base time) of the k-th of `n_page` participants of the page. Overlapping runs are launched together (a second
+    apart); sequential ones ten minutes apart, each after the one before has finished (the last may still be running); `quiet` ones ten minutes apart too, every one still running."""
+    life = 'running' if v['phase'] == 'working' else 'normal_end'
+    if v['rtime'] == 'quiet':
+        return 'running', -300 - 600 * (n_page - 1 - k)
+    if v['rtime'] == 'sequential':
+        last = n_page - 1 - k
+        return ('running' if v['phase'] == 'working' and last == 0 else 'normal_end'), -300 - 600 * last
+    return life, -300 - k
+
+
 def room_title(v):
     """The first heading of the guide of the room's own folder."""
     return ROOM_TITLE[v['lang']][v['guide']] if v['guide'] in ROOM_GUIDES else None
@@ -402,7 +439,7 @@ def normalize(case):
     """The case with impossible combinations folded (to a fixed point: a fold may enable another). The folded case has the same id as an existing one."""
     v = dict(case.v)
     b = case.bundle
-    fold = {'aff': _aff, 'deb': _deb, 'sta': _sta, 'cpl': _cpl, 'room': _room, 'cxo': _cxo, 'rer': _rer, 'owr': _owr}[b]
+    fold = {'aff': _aff, 'deb': _deb, 'sta': _sta, 'cpl': _cpl, 'room': _room, 'cxo': _cxo, 'rer': _rer, 'owr': _owr, 'ctr': _ctr}[b]
     for _ in range(6):
         before = dict(v)
         fold(v)
@@ -729,6 +766,8 @@ def _room(v):
                 v['phase'] = 'working'           # nobody has finished
             if v['talk'] == 'peer':
                 v['talk'] = 'none'               # runs that never coexist send each other nothing (the orchestrator may still message each one)
+    if v['launch'] == 'call' or v['rtime'] != 'overlap' or n == 1:
+        v['launch'] = 'msg'                      # an exec call is Codex's (the participants here are sub-agents); runs that do not overlap are started by calls of their own anyway
     if v['talk'] != 'peer' or n == 1:
         v['delivery'] = 'ok'
     if v['bundle'] == 'root':
@@ -796,6 +835,20 @@ def _cpl(v):
 
 def _rer(v):
     pass                                         # every combination of the one axis can happen
+
+
+def _ctr(v):
+    if v['life'] not in ('running', 'normal_end'):
+        v['life'] = 'running'
+    if v['overlap'] != 'none':
+        if v['wmethod'] != 'python':
+            v['overlap'] = 'none'                # only a file nobody was seen to write has a window to be told from the others'
+        elif v['launch'] == 'far' and v['overlap'] == 'agent':
+            v['launch'] = 'msg'                  # the other agent has to be at work at that moment
+    if v['later'] == 'none' and v['final'] == 'early':
+        v['final'] = 'late'                      # nothing comes later: the conclusion comes after everything
+    if v['final'] == 'none':
+        v['cname'] = 'ruling'                    # no document, no name
 
 
 def _cxo(v):
@@ -898,8 +951,7 @@ def _cxo(v):
 # The orchestrator's own writes: which folder the page lists
 # ---------------------------------------------------------------------------------------------------------------------
 OWR_ROUNDED = ('brief_r1', 'readme_r1')                  # shapes that have a round folder (r1/) on disk
-OWR_FLAT = ('brief_only', 'declared2', 'declared1')      # shapes that are a lone brief.md
-OWR_DEBATE = ('brief_r1', 'readme_r1', 'declared2')      # shapes that are a debate folder: a guide and a round folder, or a brief.md that declares two result files
+OWR_DEBATE = ('brief_r1', 'readme_r1', 'declared2')      # the shapes whose folder the orchestrator's `mkdir` of `r1` makes a debate (a guide and a round folder; a lone guide has no round folder until then)
 OWR_GUIDE = {'brief_r1': 'brief.md', 'readme_r1': 'README.md', 'brief_only': 'brief.md', 'declared2': 'brief.md', 'declared1': 'brief.md', 'notes': 'README.md'}
 OWR_REPO_SITES = ('repo', 'top', 'docs')                 # sites inside the repository the page works in
 OWR_SITE_REL = {'repo': 'work/repo/docs/talk', 'plain': 'work/plain/talk', 'scratch': 'scratch/talk', 'state': '.claude/plans/talk', 'top': 'work/repo', 'docs': 'work/repo/docs'}   # the folder, below the case's HOME
@@ -912,8 +964,8 @@ def owr_rounds_on_disk(v):
 
 
 def owr_is_debate(v):
-    """The folder is a debate folder on disk: a guide and a round folder, or a brief.md that declares two result files."""
-    return owr_rounds_on_disk(v) or v['dshape'] == 'declared2'
+    """The folder is a debate folder on disk: a guide and a round folder (J9: a folder is a unit by its round folder; a brief.md that declares result files, or a lone one, is none)."""
+    return owr_rounds_on_disk(v)
 
 
 def owr_named_by_write(v):
@@ -924,8 +976,8 @@ def owr_named_by_write(v):
 
 
 def owr_walked(v):
-    """The folder is one a walk of the repository lists: a debate folder, or a lone brief.md (a title). A README.md alone confirms nothing."""
-    return v['dsite'] in OWR_REPO_SITES and (owr_rounds_on_disk(v) or v['dshape'] in OWR_FLAT)
+    """The folder is one a walk of the repository lists: a folder with a round folder (J9 d). A lone brief.md or a README.md alone is no unit."""
+    return v['dsite'] in OWR_REPO_SITES and owr_rounds_on_disk(v)
 
 
 def owr_listed(v):

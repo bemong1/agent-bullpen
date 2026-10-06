@@ -511,7 +511,7 @@ class DebateFixture(unittest.TestCase):
 
 
 class UnitsAndSeats(DebateFixture):
-    def test_units_is_where_it_sits_and_work_units_is_where_it_works(self):
+    def test_units_is_where_it_sits_and_a_reader_is_tied_to_nothing(self):
         a = os.path.join(self.rev, 'r1', 'A.md')
         w = self.agent(1, 'A writer', 'Write your round 1 report to `%s`.' % a, [('write', a)])
         r = self.agent(2, 'X reader', 'Read the reports in `%s` and comment.' % os.path.join(self.rev, 'r1'), [('read', a)])
@@ -520,7 +520,7 @@ class UnitsAndSeats(DebateFixture):
         by = {x['id']: x for x in st['agents']}
         unit = self.rev
         self.assertEqual((by[w]['units'], by[w]['work_units']), ([unit], [unit]))
-        self.assertEqual((by[r]['units'], by[r]['work_units']), ([], [unit]))              # a reader is on the work, not in the debate's seats
+        self.assertEqual((by[r]['units'], by[r]['work_units']), ([], []))                  # reading a report ties nobody to the debate (J9, J11: only a guide read is a reason to place it)
         self.assertEqual(by[f]['units'], [])                                              # a write that failed seats nobody
         cells = {c['agent']: c['state'] for d in st['debates'] for t in d['topics'] for row in t['rows'] for c in row['cells'] if c['agent']}
         self.assertIn(w, cells)
@@ -686,6 +686,15 @@ class DebateCache(DebateFixture):
         cells = {r['p']: r['cells'][0] for d in second.debates for t in d['topics'] for r in t['rows']}
         self.assertEqual(cells['B']['agent'], aid)
 
+    def row_of(self, jd, name):
+        return next(r for d in jd.debates for t in d['topics'] for r in t['rows'] if r['p'] == name)['cells'][0]
+
+    def late_result(self, aid, t, **kw):
+        """The result of the call `bash1` of the sub-agent `aid` comes later, in the same instant as the call."""
+        with open(os.path.join(self.sub, 'agent-%s.jsonl' % aid), 'a') as f:
+            f.write(dump({'type': 'user', 'timestamp': st2.iso(t), 'cwd': self.repo, 'message': {'role': 'user', 'content': [
+                {'type': 'tool_result', 'tool_use_id': 'bash1', 'content': 'result', **kw}]}}) + '\n')
+
     def test_a_shell_write_that_fails_after_its_file_was_there_is_judged_again(self):
         b = os.path.join(self.rev, 'r1', 'B.md')
         aid = self.agent(1, 'B writer', 'Do the review you were asked for.', [('read', os.path.join(self.home, 'notes.txt'))])
@@ -693,20 +702,40 @@ class DebateCache(DebateFixture):
             f.write('report B\n')
         s = self.session()
         last = s.agents[aid].last_ts
-        self.bash(aid, 1, "cat > %s <<'EOF'\nreport B\nEOF" % b, t=last)                    # no result yet, the file is there
+        self.bash(aid, 1, "cat > %s <<'EOF'\nreport B\nEOF" % b, t=last)                  # no result yet, the file is there
         s.poll()
+        s.walk_repos()                                                                       # no write of a sure result names the debate: the walk does
         st = {aid: 'running'}
         first = s.judged(st)
-        self.assertEqual(next(r for d in first.debates for t in d['topics'] for r in t['rows'] if r['p'] == 'B')['cells'][0]['agent'], aid)
-        with open(os.path.join(self.sub, 'agent-%s.jsonl' % aid), 'a') as f:                # the call turns out to have failed, in the same instant
-            f.write(dump({'type': 'user', 'timestamp': st2.iso(last), 'cwd': self.repo, 'message': {'role': 'user', 'content': [
-                {'type': 'tool_result', 'tool_use_id': 'bash1', 'content': 'err', 'is_error': True}]}}) + '\n')
+        cell = self.row_of(first, 'B')
+        self.assertEqual((cell['agent'], cell['owner'], cell['state']), (None, None, 'previous'))      # a write with no result is no evidence: the file there is from before
+        self.late_result(aid, last, is_error=True)                                           # the call turns out to have failed, in the same instant
         s.poll()
         self.assertEqual(s.agents[aid].last_ts, last)
         second = s.judged(st)
         self.assertIsNot(second, first)                                                      # the file and the folders on disk are the same: only the call's result moved
-        row = next(r for d in second.debates for t in d['topics'] for r in t['rows'] if r['p'] == 'B')
-        self.assertIsNone(row['cells'][0]['agent'])                                          # a write that failed seats nobody
+        cell = self.row_of(second, 'B')
+        self.assertEqual((cell['agent'], cell['owner'], cell['state']), (None, None, 'previous'))      # a write that failed seats nobody
+
+    def test_a_shell_write_whose_result_comes_later_seats_the_agent_when_it_worked(self):
+        b = os.path.join(self.rev, 'r1', 'B.md')
+        aid = self.agent(1, 'B writer', 'Do the review you were asked for.', [('read', os.path.join(self.home, 'notes.txt'))])
+        with open(b, 'w') as f:
+            f.write('report B\n')
+        s = self.session()
+        last = s.agents[aid].last_ts
+        self.bash(aid, 1, "cat > %s <<'EOF'\nreport B\nEOF" % b, t=last)
+        s.poll()
+        s.walk_repos()
+        st = {aid: 'running'}
+        first = s.judged(st)
+        self.assertEqual((self.row_of(first, 'B')['agent'], self.row_of(first, 'B')['state']), (None, 'previous'))
+        self.late_result(aid, last)                                                          # it worked
+        s.poll()
+        second = s.judged(st)
+        self.assertIsNot(second, first)
+        cell = self.row_of(second, 'B')
+        self.assertEqual((cell['owner'], cell['agent'], cell['state']), (aid, aid, 'draft'))
 
     def test_the_diagnostics_of_the_judgment_follow_a_reused_one(self):
         a = os.path.join(self.rev, 'r1', 'A.md')

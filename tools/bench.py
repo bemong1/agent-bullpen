@@ -24,6 +24,7 @@ and never touches 8790.
 
 import argparse
 import contextlib
+import gc
 import gzip
 import http.client
 import json
@@ -46,6 +47,7 @@ MARK_TEXT = 'synthetic HOME made by tools/bench.py; safe to delete\n'
 BASE_SESSIONS, BASE_BASH, BASE_CHILDREN = 100, 25000, 200       # --scale 1
 BULK_KB = 3000                                                   # filler lines per main session (about 3 MB): at --scale 1 the records are a few hundred MB, the order the byte scan feels
 BUSY_AGENTS = 120                                                # sub-agents of the busy orchestrator at --scale 1: its /api/state is the one the page polls
+BASE_TOPICS, ROUNDS, PEOPLE = 12, 3, ('A', 'B', 'C', 'D')       # the big debate tree of the busy session at --scale 1: 12 topics x 3 rounds x 4 writers, each report written by a shell command or a Write
 TOLERANCE = 0.25                                                 # --check: a gating number may be this much worse than the baseline
 FLOOR = {'s': 0.002, 'ms': 0.5, 'mb': 8.0}                                  # ... plus this much, so that a number near zero does not trip on noise
 SCHEMA = 1
@@ -85,10 +87,12 @@ def plan(scale=1.0, sessions=None, bash=None, children=None, busy_agents=None):
             busy_agents if busy_agents is not None else max(2, int(round(BUSY_AGENTS * scale))))
 
 
-def build_big_home(dest, scale=1.0, sessions=None, bash=None, children=None, busy_agents=None, codex=None, bulk_kb=BULK_KB, seed=7, now=None):
+def build_big_home(dest, scale=1.0, sessions=None, bash=None, children=None, busy_agents=None, codex=None, bulk_kb=BULK_KB, seed=7, now=None, topics=None):
     """Writes the synthetic HOME `dest`/home and returns its manifest (counts, ids, bytes). Every name, path, id and text is made up. The times are relative to `now`
-    (default: the moment of the call): the busy session was written a few seconds ago, the rest over the last ten days."""
+    (default: the moment of the call): the busy session was written a few seconds ago, the rest over the last ten days. `topics`: the topics of the debate tree the busy session's
+    writers fill (default 12 at scale 1; 0: none): the big shell inputs (heredocs, redirects, `tee`, a script by heredoc, long loops) and the many files they write."""
     B = _scenarios()
+    topics = max(2, int(round(BASE_TOPICS * scale))) if topics is None else topics
     sessions, bash, children, busy_agents = plan(scale, sessions, bash, children, busy_agents)
     codex = codex if codex is not None else max(0, int(round(40 * scale)))
     now = now or time.time()
@@ -163,7 +167,7 @@ def build_big_home(dest, scale=1.0, sessions=None, bash=None, children=None, bus
         man['children'] += 1
         man['bytes'] += os.path.getsize(tr.path)
 
-    def sub_agent(main_tr, main_sid, cwd, t_spawn, n_calls, live=False):
+    def sub_agent(main_tr, main_sid, cwd, t_spawn, n_calls, live=False, after=None):
         aid = 'a' + B.digest(cid, 'sub', man['subagents'], n=16)
         tu = tool_id('s', 500000 + man['subagents'])
         main_tr.tool(t_spawn, 'Agent', {'description': 'Analysis helper %d' % man['subagents'], 'prompt': _prose(rng, 160)}, tu)
@@ -174,12 +178,115 @@ def build_big_home(dest, scale=1.0, sessions=None, bash=None, children=None, bus
         S = B.Transcript(os.path.join(d, 'agent-%s.jsonl' % aid), main_sid, cwd, 'cli', side=True, agent=aid, cid=cid)
         S.prompt(t_spawn + 1, _prose(rng, 160), source='human')
         t = plain_work(S, t_spawn + 3, n_calls, cwd, step=25)
+        if after:
+            t = after(S, t)
         if not live:
             S.say(t, 'Report written.', 'end_turn')
         S.save()
         man['subagents'] += 1
         man['bytes'] += os.path.getsize(S.path)
         return aid, tu, S
+
+    shell = {'files': 0, 'heredocs': 0, 'redirects': 0, 'tees': 0, 'scripts': 0, 'writes': 0, 'big_inputs': 0, 'reads': 0, 'topics': topics, 'shell_chars': 0}
+
+    def debate_dir(cwd):
+        return os.path.join(cwd, 'docs', 'review')
+
+    def topic_name(k):
+        return 't%02d_%s' % (k + 1, WORDS[k % len(WORDS)])
+
+    def report_path(cwd, k, r, who):
+        return os.path.join(debate_dir(cwd), topic_name(k), 'r%d' % (r + 1), who + '.md')
+
+    def write_file(path, body, t):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, 'w') as f:
+            f.write(body + '\n')
+        os.utime(path, (t, t))                                  # saved while the command ran: the check of a shell write finds it in the command's window
+        shell['files'] += 1
+
+    def shell_report(S, t, path, body, how):
+        """One report written the way an agent does: the Write tool, `cat > f <<'EOF'`, `printf > f`, `tee f <<'EOF'`, or a python script given by heredoc."""
+        counter[0] += 1
+        tid = tool_id('d', counter[0])
+        d = os.path.dirname(path)
+        if how == 0:
+            S.tool(t, 'Write', {'file_path': path, 'content': body}, tid)
+            S.result(t + 0.4, tid, 'File created successfully at: ' + path, extra={'type': 'create', 'filePath': path})
+            write_file(path, body, t + 0.2)
+            shell['writes'] += 1
+            return
+        if how == 1:
+            cmd = "mkdir -p %s && cat > %s <<'EOF'\n%s\nEOF" % (d, path, body)
+            shell['heredocs'] += 1
+        elif how == 2:
+            cmd = 'mkdir -p %s && printf "%%s\\n" "%s" > %s && echo saved' % (d, body.replace('\n', ' '), path)
+            shell['redirects'] += 1
+        elif how == 3:
+            cmd = "tee %s <<'EOF' > /dev/null\n%s\nEOF" % (path, body)
+            shell['tees'] += 1
+        else:
+            cmd = "python3 - <<'PY'\nimport pathlib\np = pathlib.Path(%r)\np.parent.mkdir(parents=True, exist_ok=True)\np.write_text(%r + '\\n')\nPY" % (path, body)
+            shell['scripts'] += 1
+        S.bash(t, cmd, tid, end=t + 1.0, desc='write report')
+        write_file(path, body, t + 0.5)
+        man['bash_calls'] += 1
+        shell['shell_chars'] += len(cmd)
+
+    def debate_reports(S, t, who_i, cwd):
+        """The reports of writer `who_i`: every topic, every round, by every way of writing; now and then a long one (a big input)."""
+        who = PEOPLE[who_i]
+        for k in range(topics):
+            for r in range(ROUNDS):
+                big = (k * ROUNDS + r + who_i) % 7 == 0
+                body = '# %s, topic %d, round %d\n\n%s' % (who, k + 1, r + 1, _prose(rng, 14000 if big else rng.choice((500, 900, 1500))))
+                shell['big_inputs'] += 1 if big else 0
+                shell_report(S, t, report_path(cwd, k, r, who), body, (k + r + who_i) % 5)
+                t += rng.uniform(10, 40)
+        return t
+
+    def orchestrator_inputs(tr, t, cwd):
+        """What the orchestrator of a big debate types: the brief with the table of topics, a loop over the folders, a long script, reads of every report."""
+        rows = '\n'.join('| %s | %s | - | %s/final.md |' % (topic_name(k), topic_name(k), topic_name(k)) for k in range(topics))
+        brief = '# Review\n\n| 주제 | 폴더 | 선행 | 최종 산출물 |\n|---|---|---|---|\n%s\n\n%s' % (rows, _prose(rng, 12000))
+        base = debate_dir(cwd)
+        counter[0] += 1
+        tid = tool_id('d', counter[0])
+        tr.bash(t, "mkdir -p %s && cat > %s/brief.md <<'EOF'\n%s\nEOF" % (base, base, brief), tid, end=t + 1, desc='write the common brief')
+        write_file(os.path.join(base, 'brief.md'), brief, t + 0.5)
+        shell['heredocs'] += 1
+        shell['big_inputs'] += 1
+        man['bash_calls'] += 1
+        t += 30
+        loop = 'cd %s && for t in %s; do for r in r1 r2 r3; do mkdir -p "$t/$r" && ls -la "$t/$r" > /dev/null; done; done' % (base, ' '.join(topic_name(k) for k in range(topics)))
+        counter[0] += 1
+        tr.bash(t, loop, tool_id('d', counter[0]), end=t + 2, desc='make the round folders')
+        man['bash_calls'] += 1
+        t += 30
+        script = 'import os, re\nroot = %r\nout = []\nfor dirpath, dirs, files in os.walk(root):\n    for n in sorted(files):\n        out.append((os.path.join(dirpath, n), len(open(os.path.join(dirpath, n)).read())))\n%s' % (
+            base, ''.join('# %s\n' % _prose(rng, 100) for _ in range(80)))
+        counter[0] += 1
+        tr.bash(t, "python3 - <<'PY'\n%s\nPY" % script, tool_id('d', counter[0]), end=t + 3, desc='count the reports')
+        shell['scripts'] += 1
+        shell['big_inputs'] += 1
+        man['bash_calls'] += 1
+        t += 30
+        for k in range(topics):                                  # the orchestrator reads what the writers wrote, a round at a time, and writes a ruling by heredoc
+            for r in range(ROUNDS):
+                files = ' '.join(report_path(cwd, k, r, who) for who in PEOPLE)
+                counter[0] += 1
+                tr.bash(t, 'cat %s | head -c 4000' % files, tool_id('d', counter[0]), end=t + 1.5, desc='read the round')
+                shell['reads'] += 1
+                man['bash_calls'] += 1
+                t += 20
+            ruling = '# Ruling on %s\n\n%s' % (topic_name(k), _prose(rng, 3000))
+            counter[0] += 1
+            tr.bash(t, "cat > %s <<'EOF'\n%s\nEOF" % (os.path.join(debate_dir(cwd), topic_name(k), 'rulings.md'), ruling), tool_id('d', counter[0]), end=t + 1, desc='write the ruling')
+            write_file(os.path.join(debate_dir(cwd), topic_name(k), 'rulings.md'), ruling, t + 0.5)
+            shell['heredocs'] += 1
+            man['bash_calls'] += 1
+            t += 25
+        return t
 
     n_mains = sessions
     # how many calls each kind of record gets: children and sub-agents have a few, the mains the rest
@@ -255,7 +362,10 @@ def build_big_home(dest, scale=1.0, sessions=None, bash=None, children=None, bus
         # sub-agents
         subs = busy_agents if live else n_subs_main.get(i, 0)
         for j in range(subs):
-            sub_agent(tr, sid, cwd, t_start + 100 + 20 * j, sub_calls, live=live and j % 3 == 0)
+            sub_agent(tr, sid, cwd, t_start + 100 + 20 * j, sub_calls, live=live and j % 3 == 0,
+                      after=(lambda S, t_, j=j: debate_reports(S, t_, j, cwd)) if live and topics and j < len(PEOPLE) else None)
+        if live and topics:
+            orchestrator_inputs(tr, t_start + 7200, cwd)                    # two hours in: long after the writers have filled the tree, and before the end of the busy record
         tr.say(t + 5, _prose(rng, 80), 'end_turn')
         if bulk_kb:
             pad = B.dump({'type': 'attachment', 'timestamp': B.iso(t + 6), 'sessionId': sid, 'attachment': {'type': 'hook_success', 'content': 'x' * 1000}})
@@ -273,7 +383,7 @@ def build_big_home(dest, scale=1.0, sessions=None, bash=None, children=None, bus
         man['bytes'] += os.path.getsize(tr.path)
     man['sessions'] += man['children']
     man.update(busy_session=first_ids['busy'], busy_path=first_ids['busy_path'], home=home, root=dest, now=now, scale=scale, busy_agents=busy_agents,
-               children_requested=children)
+               children_requested=children, shell=shell)
     return man
 
 
@@ -417,6 +527,9 @@ def worker_scan(a):
         last = c
     out['background'] = {'cpu': max(0.0, last - c0 - 0.001 * quiet), 'wall': time.perf_counter() - w0, 'settled': quiet >= 4}
     # --- the scans after it: nothing grew, and a few records grew ---
+    # A full collection first: what the first screen built decides when the next generation-2 pass falls, and one pass (30-40 ms) inside a window of 30 scans is the p95 (two builds of
+    # the same code differed by a factor of five in `scan_idle_p95`). Cleaned up before the window, the number is the scans' own.
+    gc.collect()
     idle_w, idle_c = [], []
     for _ in range(a.iterations):
         with Timer() as tm:
@@ -436,6 +549,7 @@ def worker_scan(a):
         if a.profile:
             import cProfile
             prof = cProfile.Profile()
+        gc.collect()                                            # the same for each window below: its p95 is one pass of the collector if the pass falls inside it
         for _ in range(a.iterations):
             grow(live, rng)
             if prof:
@@ -463,6 +577,7 @@ def worker_scan(a):
         ws.append((tm.wall, tm.cpu))
     out['scan_sessions'] = {'wall': summary([w for w, c in ws]), 'cpu': summary([c for w, c in ws])}
     # --- state() in the process, nothing else running ---
+    gc.collect()
     sw, sc = [], []
     for _ in range(a.iterations):
         with Timer() as tm:
@@ -823,7 +938,7 @@ def measure(a):
     else:
         dest = a.home or tempfile.mkdtemp(prefix='bench-home-')
         if not (a.home and os.path.isdir(os.path.join(dest, 'home')) and os.path.exists(os.path.join(dest, 'manifest.json'))):
-            man = build_big_home(dest, scale=a.scale, bulk_kb=a.bulk_kb, sessions=a.sessions, bash=a.bash, children=a.children, busy_agents=a.busy_agents)
+            man = build_big_home(dest, scale=a.scale, bulk_kb=a.bulk_kb, sessions=a.sessions, bash=a.bash, children=a.children, busy_agents=a.busy_agents, topics=a.topics)
             with open(os.path.join(dest, 'manifest.json'), 'w') as f:
                 json.dump(man, f)
         else:
@@ -833,7 +948,9 @@ def measure(a):
         home = man['home']
         extra = ['--busy', man['busy_session']]
         doc['home'] = 'synthetic'
-        doc['manifest'] = {k: man[k] for k in ('sessions', 'mains', 'subagents', 'children', 'bash_calls', 'codex_threads', 'codex_exec_calls', 'bytes', 'busy_agents', 'scale')}
+        doc['manifest'] = {k: man[k] for k in ('sessions', 'mains', 'subagents', 'children', 'bash_calls', 'codex_threads', 'codex_exec_calls', 'bytes', 'busy_agents', 'scale') if k in man}
+        if man.get('shell'):
+            doc['manifest']['shell'] = man['shell']
     if a.session:
         extra = extra + ['--session', a.session]
     try:
@@ -969,6 +1086,10 @@ def print_report(doc, out=sys.stdout):
         m = doc['manifest']
         w('  built: %d session records (%d main sessions + %d claude -p children) and %d sub-agent records, %d Bash calls, %d codex threads, %.1f MB, busy session with %d sub-agents\n' % (
             m['sessions'], m['mains'], m['children'], m['subagents'], m['bash_calls'], m['codex_threads'], m['bytes'] / 1e6, m['busy_agents']))
+        sh = m.get('shell')
+        if sh:
+            w('  debate tree of the busy session: %d topics, %d files written by %d Write calls, %d heredocs, %d redirects, %d tees, %d python scripts (%d long ones, %.1f MB of shell text), %d reads\n' % (
+                sh['topics'], sh['files'], sh['writes'], sh['heredocs'], sh['redirects'], sh['tees'], sh['scripts'], sh['big_inputs'], sh['shell_chars'] / 1e6, sh['reads']))
     sc = doc.get('scan')
     if sc:
         w('scan (CPU / wall)\n')
@@ -1024,6 +1145,7 @@ def main(argv=None):
     r.add_argument('--bash', type=int)
     r.add_argument('--children', type=int)
     r.add_argument('--busy-agents', type=int)
+    r.add_argument('--topics', type=int, help='topics of the big debate tree of the busy session (default 12 x scale; 0: none)')
     r.add_argument('--json', metavar='FILE', help='write the result document here')
     r.add_argument('--profile', action='store_true', help='also profile the scans while the records grow (function names and times only)')
     r.add_argument('--save-baseline', metavar='FILE', help='keep the numbers (no per-request rows) as a baseline')
@@ -1039,6 +1161,7 @@ def main(argv=None):
     b.add_argument('dest')
     b.add_argument('--scale', type=float, default=1.0)
     b.add_argument('--bulk-kb', type=int, default=BULK_KB)
+    b.add_argument('--topics', type=int)
     for name in ('scan', 'http'):
         w = sub.add_parser('_' + name)
         w.add_argument('--repo', required=True)
@@ -1064,10 +1187,10 @@ def main(argv=None):
     if a.cmd == 'build':
         if os.path.exists(a.dest) and not is_ours(a.dest) and os.listdir(a.dest):
             ap.error('%s exists and was not made by this tool' % a.dest)
-        man = build_big_home(a.dest, scale=a.scale, bulk_kb=a.bulk_kb)
+        man = build_big_home(a.dest, scale=a.scale, bulk_kb=a.bulk_kb, topics=a.topics)
         with open(os.path.join(a.dest, 'manifest.json'), 'w') as f:
             json.dump(man, f)
-        print(json.dumps({k: man[k] for k in ('sessions', 'mains', 'subagents', 'children', 'bash_calls', 'codex_threads', 'bytes')}))
+        print(json.dumps({k: man[k] for k in ('sessions', 'mains', 'subagents', 'children', 'bash_calls', 'codex_threads', 'bytes', 'shell')}))
         return 0
     if a.cmd == 'baseline':
         docs = []

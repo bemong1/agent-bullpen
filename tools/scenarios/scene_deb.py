@@ -7,7 +7,8 @@ report path x file state x OS. Every name, path and text is synthetic.
 
 import os
 
-from .axes import ALIAS_DIR, EDIT_DIR, ROUND_DIR, aux_file_exists, wrote_itself
+from . import plan
+from .axes import ALIAS_DIR, EDIT_DIR, ROUND_DIR, aux_file_exists, digest, wrote_itself
 from .build import MODEL, proc, prose, put, session_file
 from .scene_aff import toolu
 from .scene_sta import Sta
@@ -113,7 +114,7 @@ class Deb:
         mine = self.report_path()
         if v['role'] in ('writer', 'reader', 'ref_reader', 'absent'):
             if v['fstate'] == 'written' or v['role'] in ('reader', 'ref_reader', 'absent'):
-                put(mine, '# Report\n\nFirst finding.\nSecond finding.\n')
+                put(mine, plan.REPORT_BODY)
             elif v['fstate'] == 'empty':
                 put(mine, '')
         if v['nstyle'] == 'collide':
@@ -123,12 +124,12 @@ class Deb:
             # the folder of the other spelling is there too; the launch writes the report's own name into it (a redirect creates the file empty and the output lands when the run ends)
             os.makedirs(os.path.join(self.unit, ALIAS_DIR), exist_ok=True)
             if aux_file_exists(v):
-                put(self.alias_path(), 'The last message of the run.\n' if v['life'] not in ('running', 'stalled_silent') else '')
+                put(self.alias_path(), plan.AUX_BODY if v['life'] not in ('running', 'stalled_silent') else '')
         elif v['rdir'] == 'both':
             # the folder of the other spelling is there too, and holds a file of the same name that somebody else wrote
             put(os.path.join(self.unit, 'r01', self.stem + '.md'), '# Someone else\n\nA different file in the other round folder.\n')
         if v['rpath'] == 'dash_o_aux' and (v['kind'] == 'cli' or v['life'] not in ('running', 'stalled_silent')):
-            put(self.aux_path(), 'The last message of the run.\n' if v['life'] not in ('running', 'stalled_silent') else '')       # `>` creates it empty; `-o` writes it when the run ends
+            put(self.aux_path(), plan.AUX_BODY if v['life'] not in ('running', 'stalled_silent') else '')       # `>` creates it empty; `-o` writes it when the run ends
 
     # ------------------------------------------------------------------------------------------------ the text the participant is given
     def agent_cwd(self):
@@ -307,7 +308,7 @@ class Deb:
                 if v['wmode'] != 'tool':
                     self.bash_write(tr, t, self.bash_command(v['wmode'], self.launch_ref(mine, cwd)), toolu(b, 'wr-ok'), ok=True)
                     return t + 1
-                tr.tool(t, 'Write', {'file_path': mine, 'content': '# Report\n\nFirst finding.\n'}, toolu(b, 'wr-ok'))
+                tr.tool(t, 'Write', {'file_path': mine, 'content': plan.REPORT_BODY}, toolu(b, 'wr-ok'))
                 tr.result(t + 0.5, toolu(b, 'wr-ok'), 'written')
                 return t + 1
             return t
@@ -325,20 +326,22 @@ class Deb:
                 if v['aux'] == 'alias':
                     o = ' -o %s' % self.launch_ref(self.alias_path(), cwd)
                 cmd = "%scd %s && codex exec -m gpt-6.1-sol%s '%s'" % (pre, cwd, o, text)
-                extra = [(5, {'type': 'item_completed', 'item': {'type': 'FileChange', 'changes': {mine: {}}}})] if wrote else []
+                extra = [(5, {'type': 'item_completed', 'item': {'type': 'FileChange', 'id': 'fc_' + digest(self.cid, 'fc'), 'status': 'completed',
+                                                              'changes': {mine: {'type': 'add', 'content': plan.REPORT_BODY}}}})] if wrote else []
                 if role in ('reader', 'ref_reader'):                   # Codex says what it read through the parsed command of a finished command execution
                     for i, path in enumerate((os.path.join(self.unit, self.guide), mine)):
                         extra.append((1.0 + i, {'type': 'item_completed', 'item': {
                             'type': 'CommandExecution', 'cwd': 'file://' + cwd, 'command': 'cat ' + path,
                             'parsed_cmd': [{'type': 'read', 'path': path, 'name': os.path.basename(path), 'cmd': 'cat ' + path}]}}))
-                S.codex_subject('child', text, cmd, life, 'just_ended', cwd, extra=extra or None)
+                S.codex_subject('child', text, cmd, life, 'just_ended', cwd, extra=extra or None, final=plan.deb_launch(dict(v, kind='codex'), mine, self.unit, self.rdn % 1, self.stem)[1])
             else:
                 out = {'redirect': ' > %s' % mine, 'dash_o_aux': ' > %s' % self.aux_path(), 'var': ' > "$D/%s"' % rel, 'var_ext': ' > "$REPORT_DIR/%s"' % rel}.get(rp, '')
                 if v['aux'] == 'alias':
                     out = ' > %s' % self.launch_ref(self.alias_path(), cwd)
                 cmd = "%scd %s && claude -p --model %s '%s'%s" % (pre, cwd, MODEL, text, out)
                 launcher, tree = self.launcher_for()
-                S.cli_subject('child', text, cmd, life, 'just_ended', cwd, tail=tail, launcher=launcher, tree=tree)
+                S.cli_subject('child', text, cmd, life, 'just_ended', cwd, tail=tail, launcher=launcher, tree=tree,
+                              final=plan.deb_launch(dict(v, kind='cli'), mine, self.unit, self.rdn % 1, self.stem)[1])
 
     # ------------------------------------------------------------------------------------------------ Bash commands of the participant's own record
     @staticmethod
@@ -417,11 +420,18 @@ class Deb:
         else:
             S.now = b.T(30)
         S.finish()
-        for p in (b.meta['report'],):
-            if os.path.exists(p) and 'end' in b.meta or os.path.exists(p):
-                t = b.meta.get('t_end', b.T(10))
-                os.utime(p, (t, t))
+        self.set_times()
         return S
+
+    def set_times(self):
+        """The time of every file of the scene is the plan's (the one place that says when a report was written): a file nobody's record writes is older than every run."""
+        v, b = self.v, self.b
+        status = 'done'                                                  # the times do not depend on how the participant ended
+        facts = plan.deb_scene(dict(v, kind='cli' if self.coupling else v['kind']), status).F
+        for rel, meta in facts.files.items():
+            path = os.path.join(self.W, rel)
+            if os.path.exists(path):
+                os.utime(path, (b.T(meta['mtime']), b.T(meta['mtime'])))
 
 
 def build_deb(b):

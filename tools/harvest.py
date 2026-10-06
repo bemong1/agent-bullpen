@@ -72,7 +72,11 @@ ORACLE_WORDS = ('orch', 'orch2', 'orch_new', 'mid', 'child', 'child2', 'sub', 'l
                 # the rerun bundle (rer): the first and second run of each participant, their calls, and the start and title of a run
                 'a1', 'a2', 'b1', 'b2', 'call_a1', 'call_a2', 'call_b1', 'call_b2', 'start', 'title',
                 # the orchestrator's own writes (owr): the rooms and cells the page shows (fields of `orch`), the folder of the case's work below its HOME
-                'rooms', 'cells', 'work')
+                'rooms', 'cells', 'work',
+                # the contract scene (ctr) and the 0.3.0 judgment: the estimated placement and its reasons, the folder of a room that is far off or a worktree's copy, the participants of
+                # the scene (the one under test, its peer, the later ones, the editors), the names of the files its answers cite and the conclusion that a case names in Korean
+                'placed', 'rooms_sure', 'closable', 'guide_read', 'launch_peer', 'launch_call', 'reports', 'wt', 'P', 'S', 'Q', 'Q1', 'Q2', 'E1', 'E2', 'r2', 'B_last', 'b_last', 'B_gate_last', 'opus1_last',
+                'ruling.md', '판', '정', '문', '.md')
 OTHER_WORDS = ('target', 'spawner', 'node', 'tree')
 COUNTS = ('nodes', 'main', 'sub', 'child', 'nopersist_launches', 'skipped_deb_roles', 'linked_by_time', 'linked_by_content', 'linked_by_out', 'hidden_scripts')
 DETAILS = ('no_invocation', 'variable_prompt', 'no_prompt_file', 'output', 'report_path', 'seat_name', 'decoy_switch', 'decoy_sidmention', 'link_by_time',

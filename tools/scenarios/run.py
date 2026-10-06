@@ -252,6 +252,7 @@ PAIR_AXES = {
     'cpl': list(BUNDLES['cpl']),
     'room': ['guide', 'shape', 'talk', 'trees', 'people', 'proof', 'phase', 'site', 'ref'],
     'cxo': ['top', 'chain', 'subj', 'host', 'env', 'how', 'look'],
+    'ctr': [a for a in BUNDLES['ctr'] if a not in axes.OPTIONAL['ctr']],
 }
 BAITS = ('cwd_mismatch', 'text_mismatch', 'too_old', 'echo_only', 'other_user', 'pid_reuse')
 CODEX_LOOKALIKES = ('cwd_mismatch', 'text_mismatch', 'too_old', 'echo_only')        # what replaces the launch of a Codex exec thread (the others need a Claude process)
@@ -383,6 +384,32 @@ def shapes():
         out.append(normalize(Case('sta', dict(skind='main', life='running', entry=entry, tail=tail, process=process))))
     out += room_shapes()
     out += cxo_shapes()
+    out += ctr_shapes()
+    return out
+
+
+def ctr_shapes():
+    """The contract scene: each shape is a product of a few structure values with the ones they interact with (the pairwise cover of all of them is made apart)."""
+    ctr = lambda **v: normalize(Case('ctr', v))                                    # noqa: E731
+    out = []
+    # how the participant saves its report x whether it is still at work x whether a tag says where it sits
+    for wmethod, life, tag in itertools.product(AXES['wmethod'], ('running', 'normal_end'), AXES['tag']):
+        out.append(ctr(wmethod=wmethod, life=life, tag=tag))
+    # who is placed beside the others: how it was started x what it does x how it reads the guide
+    for launch, wmethod, read in itertools.product(('msg', 'call', 'far', 'none'), ('none', 'write', 'python'), AXES['read']):
+        out.append(ctr(launch=launch, wmethod=wmethod, read=read, life='running'))
+    # what comes after round 1 and the conclusion: a group, one alone, editors x before or after it x still at work or not
+    for later, final, life, wmethod in itertools.product(AXES['later'], AXES['final'], ('running', 'normal_end'), ('write', 'edit', 'stale')):
+        out.append(ctr(later=later, final=final, life=life, wmethod=wmethod))
+    # the name of the conclusion changes the order of the candidates and nothing else: x before or after what comes later x what comes later
+    for cname, final, later in itertools.product(AXES['cname'], ('early', 'late'), ('none', 'group', 'editors')):
+        out.append(ctr(cname=cname, final=final, later=later))
+    # a file nobody was seen to write: which command windows overlap the moment it appears x how it was started x whether the participant is at work
+    for overlap, launch, life in itertools.product(AXES['overlap'], ('msg', 'none'), ('running', 'normal_end')):
+        out.append(ctr(wmethod='python', overlap=overlap, launch=launch, life=life))
+    # ... and a `claude -p` run (a tag, or one call that starts both) is given the hint when nothing else overlaps: the call that launched it is no rival of its window (O2)
+    for overlap, tag, launch in itertools.product(AXES['overlap'], ('none', 'room'), ('msg', 'call', 'none')):
+        out.append(ctr(wmethod='python', overlap=overlap, tag=tag, launch=launch, life='normal_end'))
     return out
 
 
@@ -677,6 +704,7 @@ REASONS = {
     'A-TREE-AMBIGUOUS': ('link', 'Two launches fit the same child (same folder, same moment): the earliest child is given to the earliest call instead of being held as ambiguous (link.py _link_cli).'),
     'A-TREE-CONTRADICTION': ('link', 'A launch whose literal prompt differs from the child\'s first instruction (or, with the same words, whose known folder differs) is taken for its parent: the time rule never compares the text. Also a stranger child that shares only the folder and the moment.'),
     'A-TREE-RESUME': ('link/lineage', 'A resumed child is given the parent of the run that resumed it: the process and environment of run 2 are used for the tree instead of only for `by`; the tree is the one of the first run (link.py _link_cli, lineage.py).'),
+    'J1-LAUNCH-REDIRECT': ('agents/units', 'A `claude -p` run (or a sub-agent) that starts another with `> <the cell file>` (a path written out, or by a variable) and whose call succeeds is taken for the writer of that file: the redirect of its Bash call is a confirmed shell write (evidence `shell`, the earliest authoring event, J1, J3), so the launcher owns the cell and the run that the command asked for it (the planned output, J7, W4) is only an editor and sits in no cell. The same redirect in the orchestrator\'s call is no write that owns (J3), and the contract does not say that a launch command\'s redirect is the launcher\'s own write.'),
     'C-GRAND-SCREEN': ('views/debates', 'The grand-child of a `claude -p` child is not on the top orchestrator\'s page: its status, cell and seat are read from that page (under its launcher) and the board does not put it there yet. Decide the screen shape first.'),
     'A-TREE-AUTHOR': ('link', 'The instruction was written by another session (or the other node of the tree) that was only running a script or an unrelated launch: the text found in its records is taken for the proof of who launched the child, and the real launcher is left with a childless launch (the content rule counts any running call as the launch).'),
     'A-TREE-NO-LAUNCH': ('link', 'A person started the child in a terminal and a session only wrote the instruction: that session (or the page\'s main session) is taken for the parent although no call of it started anything, or a script it was running whose body cannot be read gives a certain link.'),
@@ -686,9 +714,8 @@ REASONS = {
     'A-TREE-UNKNOWN-DIR': ('link', 'A launch whose folder nothing tells (`cd "$VAR"`) fits every child\'s folder in the time rule, so a stranger started in another project is linked to it.'),
     'A-TREE-SWITCH': ('link/lineage', 'The parent process switched sessions (/resume): the lineage follows the process\'s new session while the output file proves the old one; the higher-ranked proof is ignored (lineage.py parent_session).'),
     'A-UNLINKED': ('link', 'The unlinked list does not say `ambiguous` for a child two launches claim (link.py _unlinked).'),
-    'D-AFFIL': ('link', 'The affiliation diagnostic differs from the one the records support: one the board shows that the records do not call for (`orphan_launch`), or one it does not show (link.py LINKS.diags).'),
+    'D-AFFIL': ('link/affil', 'The affiliation diagnostic differs from the one the records support: one the board shows that the records do not call for (`orphan_launch`), or one it does not show; and `path_unresolved` (affil.py, the output path of a launch that a `$VAR` names), which J18 lists among the debate diagnostics it removes, is still given for the page (the judgment keeps it as an affiliation code).'),
     'D-STATE': ('runstate', 'The state diagnostic differs from the one the records support (runstate.py judge).'),
-    'D-DEBATE': ('debates', 'The debate diagnostic differs from the one the records support (debates.py).'),
     'D-PROC': ('runstate', '`ps` unusable and the page says nothing: `proc_unknown` is given per agent (runstate.py judge), so a page with no agent to carry it (a bait, a launch with no record, an unlinked child, a bare orchestrator) is silent. The expected answer is "always when `ps` cannot be read"; whether the page says it once on its own is a design choice.'),
     # state
     'S-INTERRUPTED': ('runstate', 'A run that ended on a limit, an overload or the Bash time limit is shown as `ended` ("session ended"): the error line and `cost-state` are not read (sessions.py agent_status cli branch, agents.py).'),
@@ -707,33 +734,13 @@ REASONS = {
     'S-ORCH-COMMANDS': ('views/sessions', 'Local slash commands (`/usage` and the like) typed after a turn count as a new turn: every user line moves the time of the last record past the end of the turn, so a session that is waiting shows `working` until its next turn ends.'),
     'S-ORCH-SDK-END': ('views/sessions', 'The page of a `claude -p` session shows `working` for ever: the end of a turn is known only from a turn-duration line, which the record of a `claude -p` run does not have, and an assistant line that ends the turn is not read as one.'),
     'S-STRAY': ('sessions/agents', 'A child\'s own background-task notification becomes a fake "work finished" card: `_child_note` does not filter on an agent id (agents.py, sessions.py _route_child_notes).'),
-    # debate
-    'B-EDIT-CELLS': ('units/debates', 'A folder with a guide that only lists findings by bold numbers (`**C-12**`) and has no round folder is given rows and a round: the numbers are read as participants (units.py ROLE_RE) and round 1 is made up (debates.py _debate).'),
-    'B-LISTING-PARENT': ('debates', 'The debate list has a folder that is no debate: the folder that holds the common brief of several topics is listed as one of its own (a card with no rows).'),
-    'B-FLAT': ('units/debates', 'A flat review (no r<N> folders, nothing declared) is given an invented round-1 seat from the description tag (debates.py _seat_by_folder).'),
-    'B-READER': ('units/debates', 'An agent that only reads (and carries a seat letter in its tag) gets the seat: a reader is not a participant (debates.py _seat_by_folder).'),
-    'B-QUOTE': ('units/debates', 'A path that is only quoted, negated or whose write failed seats the agent: write intent is read from the words next to the path, a failed write counts as a write (debates.py write_intent, agents.py writes).'),
-    'B-CITE': ('units/debates', 'A report path inside a code fence, a Markdown block quote or a read-only review of an earlier instruction seats the agent: only a short one-line quote is recognised as words that are not the agent\'s own.'),
-    'B-ALIAS-FILE': ('units/debates', 'A file the launch writes under the other spelling of the round folder (`-o r01/B.md` while the instruction says `r1/B.md`) takes the place of the seat\'s own file: the folder and the cell follow it, so a report that was never written shows as submitted.'),
-    'B-BASH-WRITE': ('units/debates', 'A write made by a Bash command (redirect, `tee`, heredoc) is not read as a write of the report, or a command that only names the report and writes elsewhere (or one that failed) is.'),
-    'B-GHOST': ('units/debates', 'An absolute path outside any debate folder on disk makes a debate (debates.py debates() takes absolute report paths without checking the folder).'),
-    'B-PATH': ('units/debates', 'The report path is written as a variable / `-o`/redirect target the path reader does not resolve, or by a spelling it does not know (r01, round1, a name with a prefix): no seat.'),
-    'B-HOLD': ('units/debates', 'The path resolves by the agent cwd alone (two debates fit, or a tie): the seat is given instead of held (debates.py).'),
-    'B-LISTING': ('units/debates', 'The debate list comes from agent records only: a debate that is on disk but named by no session is not listed (debates.py).'),
-    'B-CELL': ('debates/runstate', 'No `paused` cell and no use of the interrupted state: an interrupted agent is read as over (file = done, none = missing) (debates.py _debate).'),
-    'B-SEAT': ('units/debates', 'The seat differs from the one the evidence ranks first (spelling kept, path intent first).'),
-    'B-UNIT': ('units/debates', 'The debate folder is not found from the path as the agent wrote it.'),
-    'B-DEBATE': ('units/debates', 'The debate fact differs from the one the evidence supports.'),
-    # room
-    'R-ROOM-LISTING': ('units/debates', 'A folder with a shared guide and a file for each participant is not listed when the guide is not a `brief.md`: only `brief.md` (and a README.md or index.md next to a round folder) makes a debate folder (units.read_unit, GUIDE_NAMES), so `agenda.md`, `plan.md` or any other name finds no room, and the title is read from those names only (debates._debate).'),
-    'R-ROOM-SEAT': ('units/debates', 'Participants that point at the same guide and each hold a file of their own in its folder (or one below), with no round folder, are given no seat and no cell: seats come from `r<N>/` report paths and the roles a guide declares (units.assign, debates._debate). The seat letter of an English marker (`You are participant B`, `Work as B (...)`, `You hold seat B`) is not read either: MARKER_RE knows `[TAG-B]`, `B 담당` and `B(...) 담당` only.'),
-    'R-ROOM-MEMBERS': ('units/debates', 'Agents that share a guide and only message each other (no file of their own) are tied to no folder: the folder is not listed and the agents work in no debate (units.assign ties an agent to a folder through report paths, round folders and `brief.md` only; agents.py keeps the `SendMessage` calls an agent sent but nothing reads them for a room).'),
-    'R-ROOM-FALSE': ('units/debates', 'A room, a seat or a participant is shown where the evidence is not a room: a common document, a guide of one\'s own, one shared file, files outside the guide\'s folder, another orchestrator\'s agents or only words.'),
-    'R-ROOM-DEBATE': ('units/debates', 'A folder with a round folder (already a debate) changed: its seats, cells or listing are not what the rules of the debate give.'),
-    'R-ROOM-TIMING': ('units/debates', 'Participants that were started one after the other, each only after the one before had finished, are made one room: the runs are never compared in time, so a plan every implementer reads and a report each writes beside it is a room however far apart they ran.'),
-    'R-ROOM-CODE': ('units/debates', 'Participants that mostly change code outside the guide\'s folder and only report beside a plan are made one room: where the rest of their work goes is not counted, so a parallel implementation with a report each is taken for a meeting.'),
-    'R-ROOM-CITE': ('units/debates', 'A guide and a notes path that an instruction only quotes (one line, a code fence, a Markdown block quote) or tells as a read-only review are read as the participant\'s own: a room, a seat and a cell appear for words nobody was asked to act on. The check for a quote covers a short one-line quote only.'),
-    'R-ROOM-MSG-FAIL': ('units/debates', 'A message that was answered with an error is kept as a message sent (the call is noted when it is made and its result is not read), so participants whose messages never arrived are made a meeting by message.'),
+    # debate and room (by the line of the contract that the board does not follow yet)
+    'J9-LISTING': ('units/debates', 'The list shows or leaves out a folder against J9: a debate is a folder with a round folder, listed by a confirmed write or a request for a cell in it, a tag, an orchestrator\'s write plus its guide, the repository walk or a room; a lone guide, a guide that declares result files, or the folder above a bundle\'s topics is none.'),
+    'J7-LIVE-OUT': ('lineage', 'A `codex exec -o <relative path>` that is still running has no launch output: the path is taken from the command line of its process, and only an absolute one counts (lineage.py exec_out: a relative path would need the folder of the process), so the run has no planned cell, seat or placement until it ends (J7, J2 c).'),
+    'J7-LIVE-REDIRECT': ('sessions/codex_facts', 'A `claude -p ... > <file>` that a Codex thread\'s shell command runs in the foreground has no planned output while the command is still running (the board learns the command from its record, which is complete when it ends; the process of the run says nothing of a redirect), so the run has no planned cell, seat or placement until it ends (J7, W4).'),
+    'J11-PLACED': ('views/debates', 'An agent that sits in no cell is in no debate of the page: views.py builds `work_units` from `jd.agent_units` (the cells an agent owns) and not from `Judged.members` (the contract\'s `worked`: owner, editor, asked, tagged, placed), and gives no `agents[].placed` (J11, 2.7), so a reader of the guide or a tagged participant has no place and no reason.'),
+    'J13-TAG-LINK': ('link', 'A run started as `BULLPEN_ROOM=<folder> claude -p ...` (the tag is a prefix of the command) beside another launch of the same call is read as no launch: link.py CLAUDE_LAUNCH_RE lets `env VAR=x claude` through but not a bare `VAR=x claude -p`, so a run that has ended (the process is gone, only the command is left) is linked to nobody and is not an agent of the page: no cell, no placement, no hint (J13, 2.3 `command` tags).'),
+    'J13-TAG-SEAT': ('lineage/sessions', 'The `BULLPEN_SEAT` of one run is read for both runs that one Bash call starts: both ask for the file, it is held (`seat_tie_held`, J7 contention) and the run that was told the seat has no cell, the other has an empty one that keeps the final from being confirmed (J13, J7, J15 `open_cell`; a tag is the tag of one run, 2.4).'),
     # Codex orchestrator
     'X-LAUNCHER': ('link/lineage', 'A shell call of a Codex thread starts nothing the board can see: a `claude -p` or `codex exec` run below a Codex thread has no owner. Its command is in a `CommandExecution` record, its environment names `CODEX_THREAD_ID`, its process is below the Codex process; link.py reads the Bash calls of Claude sessions only and lineage.py the names of Claude.'),
     'X-GRAPH': ('link', 'No ownership graph: the board has no `owner_of`, `page_of` or `descendants`, so no run or thread has a page above it.'),
@@ -747,17 +754,13 @@ REASONS = {
     'X-BOTH-ENV': ('lineage/link', 'The names of both providers in one environment: the grandchild of Claude > codex exec > claude -p is given to the top Claude session (CLAUDE_CODE_SESSION_ID); the Codex run between is never the parent.'),
     'X-EDGE': ('lineage/link', 'The names of both providers where the codex exec run is linked to the Claude session by a guess only: the grandchild is linked to the top Claude session as if the environment proved it (no hold, no `evidence_conflict`).'),
     'X-ORPHAN': ('link', 'A `&` launch from a Codex shell that left no run behind is not counted: `orphan_launch` is made from Bash calls of Claude sessions only.'),
-    'X-DEBATE': ('units/debates', 'A running participant of a debate has no seat where its report is known from nothing the board reads: a macOS `codex exec` (no `/proc`, so no arguments), a `claude -p` run whose output a shell `>` redirect writes to the report (no path in the instruction or the arguments), a relative `-o` (the run\'s folder is not trusted); the seat comes once the run is over and its record says where the report went.'),
-    # the orchestrator's own writes
-    'O-HINT': ('units/debates', 'A folder the orchestrator made is not listed: its own successful write (a Write, a patch, a command that succeeded, the `mkdir` of the round folder) says where to look and is not read as that; only the repository walk and the participants\' own paths put a folder on the list.'),
+    # a run that is live on macOS
     'X-MAC-LIVE': ('lineage/link', 'On macOS a running `codex exec` run is not tied to its rollout (`ps` does not say which file it holds open): it is not linked to the thread that started it and is not a page of its own team, so nothing of it is known until the run is over.'),
     'X-WRAP-LAUNCH': ('link', 'A wrapper that is a launch (`tmux new-session -d \'claude -p "..."\'`, `xargs -I{} claude -p "{}"`) is no longer read as one, or the Claude session that used it is not linked to its child.'),
     'X-STALE-ENV': ('lineage/link', 'The names (`CODEX_THREAD_ID`, `CODEX_SESSION_ID`) a tmux server passes on from a Codex thread that has been over for hours, or from an earlier turn of a thread that is working again, are read as the launcher\'s: the child of another session is given to that thread.'),
     'X-PIN-UNKNOWN': ('lineage/link', 'The names of a Codex thread the index does not have are dropped as if there were none: the child is given to the Claude call with the same words as a certain content link, although it may be the unknown thread\'s.'),
     'X-PIN-CLAUDE': ('lineage/link', 'The names of a Claude session that a tmux server kept (its process is alive, it had no call running) are read as the launcher\'s: the child that a Codex thread started (its command record shows it) is given to that session.'),
     'X-MAC-BOTH': ('lineage/link', 'On macOS `ps` does not say which file a process holds open, so a Codex process is not known to be an agent: the grandchild of Claude > codex exec > claude -p is given to the top Claude session by the names of both providers.'),
-    # rerun
-    'R-RERUN-SEAT': ('units/debates', 'A first run that was closed with `cost-state` and no end of turn (interrupted) keeps its seat when the same script is run again with the same instruction: both runs claim the seat, it is held (`seat_tie_held`) and the new run, which wrote its report, has no seat. A first run whose record was cut off gives its seat up.'),
     # coupling
     'C-UNLINKED': ('link', 'The participant was launched by a sub-agent or a child and is not linked, so it shows no status and no cell.'),
 }
@@ -804,7 +807,7 @@ def cxo_reason(c):
         return 'X-STALE-ENV'
     if a['os'] != 'linux' and a['chain'] == 'cl>cx>cl' and c.role == 'child':
         return 'X-MAC-BOTH'
-    if a['os'] != 'linux' and a['subj'] == 'cx' and a['chain'] == 'one' and c.role == 'child' and head not in ('unit', 'round', 'seat', 'cell', 'role', 'placements', 'units'):
+    if a['os'] != 'linux' and a['subj'] == 'cx' and a['chain'] == 'one' and c.role == 'child':
         return 'X-MAC-LIVE'
     if a['lure'] in axes.CXO_RELAYS:
         return 'X-RELAY'
@@ -812,8 +815,8 @@ def cxo_reason(c):
         return {'orphan_launch': 'X-ORPHAN', 'evidence_conflict': 'X-EDGE'}.get(f[5:].split('.')[0])
     if head == 'page':
         return 'X-GRAPH'
-    if head in ('unit', 'round', 'seat', 'cell', 'role', 'placements', 'units'):
-        return 'X-DEBATE'
+    if head in ('unit', 'round', 'seat', 'cell', 'role', 'placements', 'units', 'placed'):
+        return debate_reason(c)
     if a['chain'] == 'cl>cx>cl' and a['edge'] == 'guess' and c.role == 'child' and c.result == 'wrong':
         return 'X-EDGE'
     if a['chain'] == 'cl>cx>cl' and c.role == 'child' and (c.result == 'wrong' or head == 'forbid'):
@@ -827,6 +830,35 @@ def cxo_reason(c):
     return 'X-LAUNCHER'
 
 
+def debate_reason(c):
+    """The reason id of a red cell about where a participant sits (a cell, a place, a role, its estimated placement), by the line of the contract (CONTRACT.md J-lines) the page does
+    not show yet. None for a kind of red nobody has explained: the xfail writer refuses it."""
+    head, a, b = c.field.split(':')[0].split('=')[0], c.axes, c.bundle
+    if head in ('edit_rows', 'edit_rounds', 'units'):
+        return 'J9-LISTING'
+    if b == 'cxo' and a['look'] == 'live':
+        return {'talk_rel': 'J7-LIVE-OUT', 'talk_redir': 'J7-LIVE-REDIRECT'}.get(a['topic'])
+    if head in ('placed', 'unit') and c.result == 'miss':
+        return 'J11-PLACED'
+    return None
+
+
+def ctr_reason(c):
+    """The reason id of a red cell of the contract scene: the seat of a run that is started by a call that starts the other run as well is read for both (J13), and the tag of a run
+    that has ended is a prefix of its command (the run is not linked, J13); a participant that sits in no cell and is not placed is J11."""
+    a = c.axes
+    if a['launch'] == 'call' and a['tag'] == 'seat':
+        return 'J13-TAG-SEAT'
+    if a['launch'] == 'call' and a['tag'] == 'room' and a['life'] != 'running':
+        return 'J13-TAG-LINK'
+    return debate_reason(c)
+
+
+def room_reason(c):
+    """The reason id of a red cell of a room case (J14): none of its own; the estimated placement of a participant is J11."""
+    return debate_reason(c)
+
+
 def reason_of(c):
     """The reason id of a red cell, by what the cell is about and which axis values make the scene. None when no rule explains it (the xfail writer refuses)."""
     from board import facts            # noqa: PLC0415  (the diagnostic code lists; the oracle itself never imports board)
@@ -836,40 +868,29 @@ def reason_of(c):
         return 'D-PROC'
     if b == 'cxo':
         return cxo_reason(c)
-    if b == 'rer':
-        return 'R-RERUN-SEAT'
-    if b == 'owr':
-        return 'O-HINT'
     if b == 'room':
-        kind, _, _, why = oracle.room_trace(a)
-        if why:
-            return {'cite': 'R-ROOM-CITE', 'timing': 'R-ROOM-TIMING', 'code': 'R-ROOM-CODE', 'delivery': 'R-ROOM-MSG-FAIL'}[why]
-        if kind == 'members':
-            return 'R-ROOM-MEMBERS'
-        if kind == 'debate':
-            return 'R-ROOM-DEBATE'
-        if kind is None:
-            return 'R-ROOM-FALSE'
-        return 'R-ROOM-LISTING' if head in ('units', 'titles', 'guide_opens') else 'R-ROOM-SEAT'
+        return room_reason(c)
+    if b == 'ctr':
+        return ctr_reason(c)
     if b == 'aff':
         why = aff_shape_reason(a)
         if why:
             return why                                    # a cell of a case that is built around one new shape is about that shape, whichever field shows it
-    if head in ('edit_rows', 'edit_rounds'):
-        return 'B-EDIT-CELLS'
-    if head == 'units':
-        return 'B-LISTING-PARENT'
+    if head in ('edit_rows', 'edit_rounds', 'units'):
+        return 'J9-LISTING'
     if f.startswith('diag:'):
         code = f[5:].split('.')[0]
-        return 'D-STATE' if code in facts.DIAG_STATE else ('D-AFFIL' if code in facts.DIAG_AFFIL else 'D-DEBATE')
+        return 'D-STATE' if code in facts.DIAG_STATE else ('D-AFFIL' if code in facts.DIAG_AFFIL else None)
     if head == 'node':
         return 'A-NODE'
     if head == 'by':
         return 'A-BY'
     if head == 'unlinked':
         return 'A-UNLINKED'
+    if b == 'cpl' and head in ('unit', 'round', 'seat', 'role', 'cell', 'placements') and a['spawner'] != 'main' and a['rpath'] in ('redirect', 'var') and a['life'] == 'normal_end':
+        return 'J1-LAUNCH-REDIRECT'                       # the launcher's own redirect is the earliest write of the file it asked the run for
     if b == 'cpl' and head in ('status', 'reason', 'resets_at', 'unit', 'round', 'seat', 'role', 'cell', 'placements') and a['spawner'] != 'main' \
-            and (c.gs in ('MISSING', None, 'none')):
+            and (not c.gs or c.gs in ('MISSING', 'none')):
         return 'C-GRAND-SCREEN' if a['spawner'] == 'grand' else 'C-UNLINKED'
     if b == 'cpl' and head == 'rule_class' and a['spawner'] != 'main' and (c.gs in ('MISSING', None, 'none')):
         return 'C-UNLINKED'
@@ -924,31 +945,8 @@ def reason_of(c):
             return 'S-ORCH-SAY'
         if f.startswith('forbid:event=notify_stray'):
             return 'S-STRAY'
-    if head in ('unit', 'round', 'seat', 'cell', 'role', 'placements'):
-        if a.get('aux') == 'alias':
-            return 'B-ALIAS-FILE'
-        if a.get('wmode', 'tool') != 'tool':
-            return 'B-BASH-WRITE'
-        role = a.get('role')
-        if role == 'quoter' and a.get('qform', 'inline') != 'inline':
-            return 'B-CITE'
-        if role in ('quoter', 'negator', 'tag_only', 'failed_write'):
-            return 'B-QUOTE'
-        if role == 'reader':
-            return 'B-READER'
-        if role == 'ghost':
-            return 'B-GHOST'
-        if role == 'absent':
-            return 'B-LISTING'
-        if role == 'rival' or a.get('homonym') == 'two':
-            return 'B-HOLD'
-        if a.get('structure') == 'flat':
-            return 'B-FLAT'
-        if head == 'cell' and (c.ws == 'paused' or a.get('life') in ('limit_exit', 'time_limit_kill', 'api_529')):
-            return 'B-CELL'
-        if a.get('rpath') in ('var', 'var_ext', 'dash_o', 'redirect', 'dash_o_last') or a.get('rdir') != 'r1' or a.get('nstyle') in ('numbered', 'lower', 'collide'):
-            return 'B-PATH'
-        return {'seat': 'B-SEAT', 'unit': 'B-UNIT'}.get(head, 'B-DEBATE')
+    if head in ('unit', 'round', 'seat', 'cell', 'role', 'placements', 'placed'):
+        return debate_reason(c)
     return None
 
 
@@ -1072,7 +1070,8 @@ def xfail_doc(cells):
     used = sorted({reason_of(c) for c in red})
     doc = {'version': 1,
            'about': 'Red cells of tools/scenarios today: every one is expected to stay red until the board is fixed, and fails the test if it turns green or changes. '
-                    'cells[case]["subject.field"] = [result, what the truth wants, what the board shows, reason id]. Regenerate with python3 -m tools.scenarios.run --write-xfail.',
+                    'cells[case]["subject.field"] = [result, what the truth wants, what the board shows, reason id]. The truth is the 0.3.0 contract\'s (tools/scenarios/contract.py) and the reason ids '
+                    'name its lines. Regenerate with python3 -m tools.scenarios.run --write-xfail.',
            'reasons': {r: {'module': REASONS[r][0], 'text': REASONS[r][1]} for r in used},
            'cells': {}}
     for c in red:

@@ -45,6 +45,7 @@ function world(lang) {
 }
 const bubbles = W => W.g._g.bubbles.map(b => b.el.textContent);
 const lastText = W => W.texts[W.texts.length - 1];
+const unfinal = tp => { tp.final = { confirmed: false, exists: false, why: ['none'], candidates: [] }; tp.closable = false; return tp; };     // a topic whose end is not confirmed: no final, not closable
 
 for (const lang of ['ko', 'en']) {
   const W = world(lang), T = (k, p) => W.I18N.t(k, p), ko = lang === 'ko';
@@ -93,6 +94,7 @@ for (const lang of ['ko', 'en']) {
 
   // ---- the signs and the whiteboard: states the saved state does not show (a Codex orchestrator, a waiting topic, people outside any debate, a crowded lounge)
   const draw = st => { const w = world(lang); w.g.update(st, null); w.frame(50); return w; };
+  const zones = st => draw(st).g._g.blocks.filter(b => b.type === 'zone' && b.topic).length;
   const has = (w, text, cls) => w.texts.some(x => x === text || (cls && x.includes(text)));
   const stages = w => w.texts.map(x => (x.match(/<span class="st">([^<]*)<\/span>/) || [])[1]).filter(Boolean);     // the stage lines of the whiteboards
   let w = draw(Object.assign(W.state(), { orch: Object.assign({}, W.state().orch, { provider: 'codex', model: 'gpt-6-sol' }) }));
@@ -100,14 +102,14 @@ for (const lang of ['ko', 'en']) {
   w = draw(W.state());
   check(`${lang}: Claude orchestrator: the plain control-room sign, the tags of the two offices`, has(w, T('office.sign.orch')) && has(w, T('office.sign.user')) && has(w, T('office.tag.orch'), 1) && has(w, T('office.tag.user'), 1), '');
   const waiting = W.state(), tp = waiting.debates[0].topics[0];
-  tp.final = { exists: false }; tp.deps = 'T7'; tp.rows.forEach(r => r.cells.forEach(c => { c.state = 'waiting'; c.agent = null; }));
+  unfinal(tp); tp.deps = 'T7'; tp.rows.forEach(r => r.cells.forEach(c => { c.state = 'waiting'; c.agent = null; }));
   w = draw(waiting);
   check(`${lang}: waiting topic with a dependency`, has(w, T('office.board.after', { deps: 'T7' }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 3));
   tp.deps = '';
   w = draw(waiting);
   check(`${lang}: waiting topic without one`, w.texts.some(x => x.includes('<span class="st">' + T('office.board.pending') + '</span>')), '');
   const rnd = W.state(), tr = rnd.debates[0].topics[1];
-  tr.final = { exists: false }; tr.rows.forEach((r, i) => r.cells.forEach(c => { if (c.round === 2) { c.state = i ? 'draft' : 'done'; c.agent = c.agent || 'x'; } }));
+  unfinal(tr); tr.rows.forEach((r, i) => r.cells.forEach(c => { if (c.round === 2) { c.state = i ? 'draft' : 'done'; c.agent = c.agent || 'x'; } }));
   w = draw(rnd);
   check(`${lang}: round under way: R/total from the cells`, has(w, T('office.board.round', { round: 2, done: 1, total: tr.rows.length }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
   const crowd = W.state(); crowd.debates = []; crowd.agents.forEach(a => { a.status = 'running'; });
@@ -134,6 +136,24 @@ for (const lang of ['ko', 'en']) {
   check(`${lang}: other-work room, somebody leaves: the rest close up in the same order`, JSON.stringify(otherSeats(wk)) === JSON.stringify(after2.filter(id => id !== seatsBefore[1])), [after2, otherSeats(wk)]);
   check(`${lang}: other-work room, a first drawing still seats a launched run beside its launcher`, (() => { const k = JSON.parse(JSON.stringify(room0)); const [pa, ch] = [k.agents[0], k.agents[1]]; ch.parent = pa.id; k.agents.splice(1, 1); k.agents.push(ch);
     const ww = world(lang); ww.g.update(k, null); ww.frame(50); const o = otherSeats(ww); return o.indexOf(ch.id) === o.indexOf(pa.id) + 1; })(), '');
+  check(`${lang}: other-work room, a first drawing seats the agents launched together side by side (the same \`launch\`), the rest in their order`, (() => { const k = JSON.parse(JSON.stringify(room0)); const ag = k.agents.map(a => { a.parent = null; a.launch = null; return a; });
+    ag[0].launch = ag[3].launch = 'claude:aaaa:-:grp1'; const ww = world(lang); ww.g.update(k, null); ww.frame(50); const o = otherSeats(ww); return o.indexOf(ag[3].id) === o.indexOf(ag[0].id) + 1 && o.length === ag.length; })(), '');
+  // the agents thought to work in a topic (no cell there) sit in its room; the bundle's own line seats in the first room; "N est." when nobody holds a cell
+  { const st = W.state(), tp = st.debates[0].topics[0]; const extra = Object.assign({}, st.agents[0], { id: 'placed1' + 'x'.repeat(12), tag: 'PL1', title: 'Placed one', status: 'running', parent: null, launch: null, spawn_ts: st.now });
+    st.agents.push(extra); unfinal(tp); tp.placed = [{ agent: extra.id, why: 'guide_read', whys: ['guide_read'], sure: false, live: true }];
+    tp.rows.forEach(r => { r.agents = []; r.cells.forEach(c => { c.state = 'waiting'; c.agent = null; c.owner = null; }); });
+    w = draw(st);
+    const seat = w.g._g.seats.find(sq => sq.agentId === extra.id);
+    check(`${lang}: an agent thought to work in a topic sits in that topic's room, not in the other-work room`, !!seat && !seat.block.other && seat.block.topic.key === tp.key, seat ? seat.block.topic && seat.block.topic.key : 'no seat');
+    check(`${lang}: a topic nobody holds a cell in but somebody is thought to work in says "${T('office.board.estimated', { count: 1 })}", not "pending"`, has(w, T('office.board.estimated', { count: 1 }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 3));
+    tp.rows = [];                                             // no row at all: a topic with no participants has no room, unless somebody is thought to work in it
+    w = draw(st);
+    const seat2 = w.g._g.seats.find(sq => sq.agentId === extra.id);
+    check(`${lang}: a topic with no rows keeps its room while somebody is thought to work in it, and loses it when nobody is`, !!seat2 && !seat2.block.other && seat2.block.topic.key === tp.key && (tp.placed[0].live = false, !draw(st).g._g.blocks.some(b => b.type === 'zone' && b.topic && b.topic.key === tp.key)), seat2 ? seat2.block.topic && seat2.block.topic.key : 'no seat'); }
+  { const st = W.state(), tp = st.debates[0].topics[1]; tp.final = { confirmed: false, exists: false, why: ['none'], candidates: [] }; tp.closable = true;      // closable with no final of its own: the bundle's final closes it
+    st.agents.forEach(a => { a.last_ts = st.now - 5; }); tp.rows.forEach(r => r.cells.forEach(c => { c.mtime = st.now - 5; }));                                     // (a room stays for twenty minutes after its last activity)
+    w = draw(st);
+    check(`${lang}: a topic closed by the final of its bundle says "${T('office.board.bundleFinal')}" on its whiteboard`, has(w, T('office.board.bundleFinal'), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 3)); }
   const empty = W.state(); empty.debates[0].topics[1].rows[0].agents = [];
   w = draw(empty);
   check(`${lang}: a seat nobody holds: the empty-seat tag`, w.texts.some(x => x.includes('<span class="nm">' + T('office.tag.empty') + '</span>')), '');
@@ -167,56 +187,46 @@ for (const lang of ['ko', 'en']) {
     check(`${lang}: an agent at a desk works; once interrupted it rests in the lounge`, draw(stop).g._g.ents.get(run0.id).where === 'sit' && (run0.status = 'interrupted', run0.reason = 'api_error', draw(stop).g._g.ents.get(run0.id).where === 'lounge'), '');
   }
   const pz = W.state(), pt = pz.debates[0].topics[1];
-  pt.final = { exists: false }; pt.rows.forEach((r, i) => r.cells.forEach(c => { if (c.round === 2) { c.state = i ? 'paused' : 'done'; c.agent = c.agent || 'x'; } }));
+  unfinal(pt); pt.rows.forEach((r, i) => r.cells.forEach(c => { if (c.round === 2) { c.state = i ? 'paused' : 'done'; c.agent = c.agent || 'x'; } }));
   w = draw(pz);
   check(`${lang}: a paused cell keeps its round open on the whiteboard`, has(w, T('office.board.round', { round: 2, done: 1, total: pt.rows.length }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
   const uz = W.state(), ut = uz.debates[0].topics[1];
-  ut.final = { exists: false }; ut.rows.forEach((r, i) => r.cells.forEach(c => { if (c.round === 2) { c.state = i ? 'unknown' : 'done'; c.agent = c.agent || 'x'; } }));
+  unfinal(ut); ut.rows.forEach((r, i) => r.cells.forEach(c => { if (c.round === 2) { c.state = i ? 'unknown' : 'done'; c.agent = c.agent || 'x'; } }));
   w = draw(uz);
   check(`${lang}: a cell in a state this page does not know keeps its round open on the whiteboard`, has(w, T('office.board.round', { round: 2, done: 1, total: ut.rows.length }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
-  // rooms: people who work together in a folder. One round and no round folder; or no cell at all (participants only). No final to wait for: a room closes 20 minutes after its last participant stops
-  const roomState = (kind, cellState, status, quiet) => {
+  // rooms: people who work together in a folder. One round and no round folder; or no cell at all (participants only). A room closes only when the judgment says it can be closed (`closable`: a confirmed
+  // end, nobody tied to it working, not an estimate), and then 20 minutes after its last participant stops; a room that is all in but whose end is not confirmed stays
+  const roomState = (kind, cellState, status, quiet, closable, sure) => {
     const st = W.state(), ag = st.agents.slice(0, 3);
     ag.forEach(a => { a.status = status; a.last_ts = st.now - (quiet || 5); });
-    st.debates = [{ root: '/r/m', short: 'm', name: 'm', title: 'Sync', finals: [], last_ts: st.now, current: true, topics: [{ dir: '/r/m', key: 'm', title: 'Sync', name: '', deps: '', kind: 'rounds', room: kind, final: { exists: false },
-      rounds: kind === 'cells' ? [1] : [], rows: ag.map((a, i) => ({ p: 'ABC'[i], role: '', agents: [a.id], cells: kind === 'cells' ? [{ round: 1, state: cellState(i), path: '/r/m/' + i, agent: a.id, readers: [], lines: 1, mtime: st.now - (quiet || 5) }] : [] })) }] }];
+    st.debates = [{ root: '/r/m', short: 'm', name: 'm', title: 'Sync', finals: [], last_ts: st.now, current: true, sure: sure !== false, final: null, placed: [], topics: [{ dir: '/r/m', key: 'm', title: 'Sync', name: '', deps: '', kind: 'rounds', room: kind,
+      room_sure: sure !== false, room_why: sure === false ? 'launch' : 'tag', final: { confirmed: false, exists: false, why: closable ? [] : ['none'], candidates: [] }, closable: !!closable, placed: [],
+      rounds: kind === 'cells' ? [1] : [], rows: ag.map((a, i) => ({ p: 'ABC'[i], role: '', agents: [a.id], cells: kind === 'cells' ? [{ round: 1, state: cellState(i), path: '/r/m/' + i, agent: a.id, owner: a.id, editors: [], evidence: 'tool', hint: null, previous: false, readers: [], lines: 1, mtime: st.now - (quiet || 5) }] : [] })) }] }];
     return st;
   };
   w = draw(roomState('cells', i => (i ? 'draft' : 'done'), 'running'));
   check(`${lang}: a room of cells: its own stage line (no round number), in/total from the cells`, has(w, T('office.board.room', { done: 1, total: 3 }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
   w = draw(roomState('cells', () => 'done', 'running'));
   check(`${lang}: a room whose every file is in but whose people still work: all in`, has(w, T('office.board.roomDone', { total: 3 }), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
+  w = draw(roomState('cells', () => 'done', 'done', 5, true));
+  check(`${lang}: a room whose every file is in, nobody works and the judgment can close it: complete (no round to wait for)`, stages(w).join('|') === T('office.board.complete'), stages(w));
   w = draw(roomState('cells', () => 'done', 'done'));
-  check(`${lang}: a room whose every file is in and nobody works: complete (no round to wait for)`, stages(w).join('|') === T('office.board.complete'), stages(w));
+  check(`${lang}: the same room whose end is not confirmed is not "complete": all in`, stages(w).join('|') === T('office.board.roomDone', { total: 3 }), stages(w));
   w = draw(roomState('cells', i => (i ? 'missing' : 'done'), 'done'));
   check(`${lang}: a room with a seat that never handed in is stopped, in/total, not complete`, stages(w).join('|') === T('office.board.room', { done: 1, total: 3 }), stages(w));
-  const flatState = (cellState, status, quiet) => {                       // a flat review: result files declared, no round folder, the cells carry no round
-    const st = W.state(), ag = st.agents.slice(0, 3);
-    ag.forEach(a => { a.status = status; a.last_ts = st.now - (quiet || 5); });
-    st.debates = [{ root: '/r/f', short: 'f', name: 'f', title: 'Review', finals: [], last_ts: st.now, current: true, topics: [{ dir: '/r/f', key: 'f', title: 'Review', name: '', deps: '', kind: 'flat', final: { exists: false },
-      rounds: [], rows: ag.map((a, i) => ({ p: ['sol', 'opus', 'mini'][i], role: '', agents: [a.id], cells: [{ round: null, state: cellState(i), path: '/r/f/' + i, agent: a.id, readers: [], lines: 1, mtime: st.now - (quiet || 5) }] })) }] }];
-    return st;
-  };
-  w = draw(flatState(() => 'done', 'done'));
-  check(`${lang}: a flat review whose every result is in and nobody works: complete, not waiting for a round`, stages(w).join('|') === T('office.board.complete'), stages(w));
-  w = draw(flatState(i => (i ? 'draft' : 'done'), 'running'));
-  check(`${lang}: a flat review with results still coming: in/total`, stages(w).join('|') === T('office.board.room', { done: 1, total: 3 }), stages(w));
-  w = draw(flatState(() => 'done', 'done', 3600));
-  check(`${lang}: and an hour later a finished flat review is closed too`, !stages(w).length && !w.texts.some(x => x.includes('Review')), stages(w));
-  const zones = st => draw(st).g._g.blocks.filter(b => b.type === 'zone' && b.topic).length;
-  const unstarted = quiet => { const st = flatState(() => 'waiting', 'done', quiet); st.debates[0].topics[0].rows.forEach(r => { r.agents = []; r.cells.forEach(c => { c.agent = null; c.mtime = null; }); }); return st; };
-  check(`${lang}: a flat review that has not started (every cell waiting, nobody on it) keeps its room, however long it has been`, zones(unstarted()) === 1 && zones(unstarted(3600)) === 1, [zones(unstarted()), zones(unstarted(3600))]);
-  check(`${lang}: a flat review whose people are all unknown but whose results are not in keeps its room after an hour`, zones(flatState(i => (i ? 'writing' : 'done'), 'unknown', 3600)) === 1, zones(flatState(i => (i ? 'writing' : 'done'), 'unknown', 3600)));
-  check(`${lang}: nor does one that was cut off with a paused cell`, zones(flatState(i => (i ? 'paused' : 'done'), 'interrupted', 3600)) === 1, zones(flatState(i => (i ? 'paused' : 'done'), 'interrupted', 3600)));
-  check(`${lang}: a flat review whose every result is in and nobody works is closed after an hour; with a final already out it is closed whatever its cells say`,
-    zones(flatState(() => 'done', 'done', 3600)) === 0 && zones(flatState(i => (i ? 'missing' : 'done'), 'done', 3600)) === 1 &&
-    zones((st => { st.debates[0].topics[0].final = { exists: true, path: '/r/f/final.md', rel: 'final.md', auto: true }; return st; })(flatState(i => (i ? 'missing' : 'done'), 'done', 3600))) === 0, '');
+  const unstarted = quiet => { const st = roomState('cells', () => 'waiting', 'done', quiet); st.debates[0].topics[0].rows.forEach(r => { r.agents = []; r.cells.forEach(c => { c.agent = null; c.owner = null; c.mtime = null; }); }); return st; };
+  check(`${lang}: a room that has not started (every cell waiting, nobody on it) keeps its room, however long it has been`, zones(unstarted()) === 1 && zones(unstarted(3600)) === 1, [zones(unstarted()), zones(unstarted(3600))]);
+  check(`${lang}: a room whose people are all unknown but whose results are not in keeps its room after an hour`, zones(roomState('cells', i => (i ? 'writing' : 'done'), 'unknown', 3600)) === 1, zones(roomState('cells', i => (i ? 'writing' : 'done'), 'unknown', 3600)));
+  check(`${lang}: nor does one that was cut off with a paused cell`, zones(roomState('cells', i => (i ? 'paused' : 'done'), 'interrupted', 3600)) === 1, zones(roomState('cells', i => (i ? 'paused' : 'done'), 'interrupted', 3600)));
+  check(`${lang}: a room that is all in and nobody works but whose end is not confirmed stays after an hour; one the judgment can close is closed; an estimated room never is`,
+    zones(roomState('cells', () => 'done', 'done', 3600)) === 1 && zones(roomState('cells', () => 'done', 'done', 3600, true)) === 0 && zones(roomState('cells', () => 'done', 'done', 3600, false, false)) === 1, '');
+  check(`${lang}: a room with a confirmed end is closed whatever its cells say (the judgment is the one that says it can be closed)`, zones(roomState('cells', i => (i ? 'missing' : 'done'), 'done', 3600, true)) === 0, '');
   w = draw(roomState('members', () => 'done', 'running'));
   check(`${lang}: a room of participants only: how many talk, and they sit in the room (no other-work board)`, has(w, T('office.board.members', { count: 3 }), 1) && !has(w, T('office.board.other'), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
   w = draw(roomState('members', () => 'done', 'done', 60));
   check(`${lang}: the same room once they have all stopped says it ended`, has(w, T('office.board.membersEnded'), 1), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
-  w = draw(roomState('members', () => 'done', 'done', 3600));
-  check(`${lang}: and an hour later the room is closed (nobody working, nothing to wait for)`, !has(w, T('office.board.membersEnded'), 1) && !w.texts.some(x => x.includes('Sync')), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
+  w = draw(roomState('members', () => 'done', 'done', 3600, true));
+  check(`${lang}: and an hour later the room is closed (nobody working, the judgment can close it)`, !has(w, T('office.board.membersEnded'), 1) && !w.texts.some(x => x.includes('Sync')), w.texts.filter(x => x.includes('class="st"')).slice(0, 4));
   const limEv = { kind: 'sys', from: 'sys', to: 'user', title: 'old Korean title', title_i18n: { key: 'event.sys.limit.auto', params: { at: atTs } }, text: '', sys: { code: 'limit', status: 429, resets_at: atTs, auto: true } };
   feed([limEv]);
   check(`${lang}: a usage-limit line makes the orchestrator say it from its desk, with the time of this page`, nthBubble() === T('event.sys.limit.auto', { at: clockOf(atTs) }), nthBubble());

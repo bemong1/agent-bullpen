@@ -7,7 +7,8 @@
 
 What the board shows on it (acme-robot, seven topics; every name is made up, nothing real is read):
   orchestrator     working (the usage-limit tail of `synth_home.add_stopped_scene` is cut off again)
-  debate rooms     working: T3 Retry policy (round 2, one of the three is Codex), T6 Test layout (round 1, three) and T7 Package boundaries (round 1, two reviewers): eight people
+  debate rooms     working: T3 Retry policy (round 2, one of the three is Codex), T6 Test layout (round 1, three) and T7 Package boundaries (round 1, two reviewers): eight people;
+                   in T6 and T7 one reviewer has a draft of round 1 on disk and the others have no file yet, so the page lists them under the table as "working · estimated" (launched together)
                    closed: T4 Config schema settled 12 minutes ago, so its room is still there and its three reviewers rest
                    stalled: T5 Logging format, round 2 stopped on API errors: one reviewer has submitted, two rest with a draft nobody is typing
                    T1 and T2 settled long ago (no room)
@@ -46,6 +47,8 @@ T5_REST = {     # synth_home has only the round-1 texts of T5 (a running topic o
 
 class DocsSynth(BusySynth):
     """acme-robot with seven topics: three running, one settled a few minutes ago, three settled long ago; no package workers (the other-work room comes from the stopped scene)."""
+    READ_COMMON = False                                         # the reviewers read the brief of their topic: the board places the ones that have no file yet in that topic, not in the whole bundle
+    DRAFT_R1 = {('t6_tests', 'A'): 3.0, ('t7_packages', 'A'): 5.0}   # A of T6 and T7 has a first draft of round 1 on disk and goes on writing
 
     def __init__(self, home, now):
         BusySynth.__init__(self, home, now)
@@ -71,8 +74,11 @@ class DocsSynth(BusySynth):
             synth_home.BUSY_TEXT = texts
 
     # ---------- documents ----------
+    def final_path(self, key):
+        return os.path.join(self.unit[key], 'rulings.md')       # a ruling stands in the folder of its topic: that is where the board can tell it is the end of the topic
+
     def brief_text(self):
-        rows = '\n'.join('| T%s %s | `%s/` | %s | %s |' % (k[1], self.topics[k][1], k, DEPENDS[k], '`final/%s.md`' % self.topics[k][5] if self.topics[k][5] else '') for k in self.topics)
+        rows = '\n'.join('| T%s %s | `%s/` | %s | |' % (k[1], self.topics[k][1], k, DEPENDS[k]) for k in self.topics)
         return ('# acme-robot v2 interface migration\n\nCommon brief for every participant. Seven independent topics; each has its own folder, topic brief and reports.\n\n'
                 '| Topic | Folder | Depends on | Final |\n|---|---|---|---|\n' + rows + '\n\n## Rules\n- Round 1: write your report alone. Do not read other participants\' reports.\n'
                 '- Round 2: read the others\' round-1 reports, then write `r2/<you>.md`: what you now accept, what you still contest.\n'
@@ -84,7 +90,7 @@ class DocsSynth(BusySynth):
         if key == 't3_retry':
             return {'A': (s, 71.0, 22.0, None), 'B': (s, 70.0, 22.0, None), 'C': (s, 67.5, 21.5, None)}[who]                         # round 2 is being written by all three
         if key in ('t6_tests', 't7_packages'):
-            return (s, None, None, None)                                                                                             # round 1 is being written by all three
+            return (s, None, None, None)                                                                                             # round 1 is being written by all: A has a draft (DRAFT_R1), the others no file yet
         return {'A': (s, s - 19.0, s - 24.0, s - 40.0), 'B': (s, s - 20.0, s - 24.0, s - 42.0), 'C': (s, s - 22.0, s - 24.0, s - 44.0)}[who]
 
     # ---------- the orchestrator's conversation and the topics ----------
@@ -109,20 +115,15 @@ class DocsSynth(BusySynth):
         main.human(m(13), 'Where do we stand?')
         main.say(m(12.5), 'T4 is about to close. T3 round 2 is being written, T7 and T6 are in round 1. T5 is still waiting for its two reviewers.')
         main.tool(m(1.6), 'Read', {'file_path': self.final_path('t4_config')}, self.rulings_text('t4_config'))
-        main.say(m(1.1), 'Status: T3 is in round 2, T6 and T7 in round 1; T4 is closed (final/config.md). A release-notes run is drafting from the settled rulings.')
+        main.say(m(1.1), 'Status: T3 is in round 2, T6 and T7 in round 1; T4 is closed (t4_config/rulings.md). A release-notes run is drafting from the settled rulings.')
 
     def topic(self, main, key):
         m = self.m
         _k, title, _q, roles, start, fin = self.topics[key]
-        for who in 'ABC'[:len(roles)]:
-            if key == 't3_retry' and who == 'C':
-                continue                                       # a Codex thread, not an Agent-tool sub-agent
-            tag, role, model = self.tag(key, who), roles['ABC'.index(who)][0], synth_home.BUSY_ROLES[who]
-            main.tool(m(start - 0.1 * 'ABC'.index(who)), 'Agent', {'description': '%s %s' % (tag, role), 'subagent_type': 'general-purpose', 'model': model,
-                                                                    'run_in_background': True, 'prompt': self.spawn_prompt(tag, role, key, who)},
-                      'Async agent launched successfully.\nagentId: %s' % self.agents[tag], tid=self.spawn_use[tag],
-                      toolUseResult={'isAsync': True, 'status': 'async_launched', 'agentId': self.agents[tag]})
-            self.debate_agent(main, key, who, tag, role, model, key in RUNNING)
+        whos = [w for w in 'ABC'[:len(roles)] if not (key == 't3_retry' and w == 'C')]       # (the C of T3 is a Codex thread, not an Agent-tool sub-agent)
+        self.launch_participants(main, key, whos)                # one message: the reviewers of a topic are launched together
+        for who in whos:
+            self.debate_agent(main, key, who, self.tag(key, who), roles['ABC'.index(who)][0], synth_home.BUSY_ROLES[who], key in RUNNING)
         if key == 't3_retry':
             self.codex_debate_launch(main, 1, m(start - 0.4))
             main.say(m(start - 0.3), 'T3 reviewers are launched; C is a Codex cross-check.')
@@ -196,7 +197,7 @@ def build(home, now=None):
     syn.build()
     info = {'home': home, 'claude': syn.claude, 'codex': syn.codex, 'orch': syn.sid, 'solo': synth_home.SOLO, 'codex_thread': synth_home.BUSY_CX_DEBATE,
             'agents': dict(syn.agents), 'review': syn.review, 'units': dict(syn.unit), 'work': syn.work, 'now': now,
-            'solo_cwd': os.path.join(home, 'work', 'demo-notes'), 'busy': True, 'codex_files': list(syn.codex_files)}
+            'solo_cwd': os.path.join(home, 'work', 'demo-notes'), 'busy': True, 'docs': True, 'codex_files': list(syn.codex_files)}
     info['stopped'] = synth_home.add_stopped_scene(info)
     cut_limit_tail(info)
     return info

@@ -24,7 +24,7 @@ for _p in (REPO, os.path.join(REPO, 'tests')):
 from compat import patched, server  # noqa: E402  (tests/compat.py: patches a global in every board module that holds it)
 from test_proclink import FakeProc  # noqa: E402  (the fake /proc of the lineage tests)
 
-from board import link, procs, views  # noqa: E402
+from board import link, procs, views  # noqa: E402  (this adapter is the one place of tools/scenarios that loads the board: it reads what the board shows)
 
 
 
@@ -141,6 +141,9 @@ def observe(b):
                 stack = contextlib.ExitStack()
                 where = dict(HOME=b.home, CLAUDE_HOME=b.claude, PROJECTS=b.projects, CODEX_HOME=b.codex,
                              CODEX_SESSIONS=os.path.join(b.codex, 'sessions'), CODEX_NAMES=os.path.join(b.codex, 'session_index.jsonl'), CODEX=index, LINKS=links)
+                # the folders where scratch files go are the case's own: the machine's temp folder holds every case, and it is no scratch folder of a case's repository (the board fixes
+                # them from the real temp folder when it is imported, so a command's log in the repository would not be a write of the work)
+                where['SCRATCH_DIRS'] = tuple(d + os.sep for d in (b.scratch, os.path.join(b.work, 'scratch')))
                 if case.bundle == 'owr':                      # the agent's own state folders are the case's (the board fixes them from the real HOME when it is imported)
                     where['STATE_DIRS'] = tuple(os.path.join(b.home, d) + os.sep for d in ('.claude', '.codex'))
                 stack.enter_context(patched(**where))
@@ -181,6 +184,8 @@ def read_final(b, obs, objs):
         read_deb(b, obs, objs)
     if bundle == 'room':
         read_room(b, obs, objs)
+    if bundle == 'ctr':
+        read_ctr(b, obs, objs)
     if bundle in ('sta', 'cpl'):
         read_sta(b, obs, objs)
     if bundle == 'cxo':
@@ -201,12 +206,17 @@ def read_diag(b, obs, objs):
     s, st = open_state(b, objs)
     G = b.ids.get('child')
     rer_roles = {b.ids[r]: r for r in ('a1', 'a2', 'b1', 'b2') if r in b.ids} if getattr(b.case, 'bundle', None) == 'rer' else {}
+    ctr_roles = {b.ids[r]: r for r in b.meta.get('roles', ()) if r in b.ids} if getattr(b.case, 'bundle', None) == 'ctr' else {}
     for e in s._diag or ():
         who = None
         if e['scope'] == 'agent' and e['agent'] == G:
             who = 'child'
         elif e['scope'] == 'agent' and e['agent'] in rer_roles:
             who = rer_roles[e['agent']]                      # a rerun: the diagnostics of the runs of each participant
+        elif e['scope'] == 'agent' and e['agent'] in ctr_roles:
+            who = ctr_roles[e['agent']]
+        elif e['scope'] == 'unit' and ctr_roles:
+            who = 'listing'
         elif e['scope'] == 'agent' and e['code'] == 'proc_unknown':
             who = 'orch'                                    # every agent says it (the process table is one for the page): beside the participant, it is the page that says it
         elif e['scope'] == 'unit':
@@ -319,6 +329,11 @@ def _one(values):
     return seen[0] if len(seen) == 1 else (None if not seen else tuple(seen))
 
 
+def rel_in(top):
+    """A function from a path the board shows to the place below `top` (a path that is not absolute is already one)."""
+    return lambda p: (os.path.relpath(p, top) if os.path.isabs(p) else p) if p else None
+
+
 def file_below(path, unit_dir):
     """The file a cell stands for, as the path below its debate folder without the extension (`r01/B`): the spelling of the round folder is part of it."""
     if not path:
@@ -359,6 +374,9 @@ def set_places(obs, role, a, placed, readers, rel):
     obs.set(role, 'cell', _one(p[3] for p in placed))
     obs.set(role, 'role', 'writer' if placed else ('reader' if readers else 'none'))
     obs.set(role, 'placements', frozenset('%s|%s|%s|%s' % (p[0], p[1], p[2], p[4]) for p in placed))
+    if a is not None and 'placed' in a:                            # the estimated placement of a participant that sits in no cell (0.3.0): the debate, the topic and the strongest reason
+        p = a['placed']
+        obs.set(role, 'placed', None if not p else '%s|%s|%s' % (rel(p['unit']), rel(p.get('topic')) or '-', p['why']))
 
 
 def read_deb(b, obs, objs):
@@ -366,7 +384,7 @@ def read_deb(b, obs, objs):
         return
     s, st = open_state(b, objs)
     repo = b.meta['repo']
-    rel = lambda p: os.path.relpath(p, repo) if p else None
+    rel = rel_in(repo)
     G = b.ids.get('child')
     a, placed, readers, listed = deb_view(st, rel, G)
     if G:
@@ -379,20 +397,64 @@ def read_deb(b, obs, objs):
         obs.set('listing', 'edit_rounds', frozenset(r for t in edit for r in t['rounds']))
 
 
+def final_confirmed(final):
+    """Whether the board says a topic has a final document (0.3.0: `confirmed`; 0.2.1: `exists`, found by a name)."""
+    return bool(final.get('confirmed', final.get('exists')))
+
+
+def read_ctr(b, obs, objs):
+    """The contract scene: every participant where it sits (and what it only fixed), the cell of the participant under test with the hint it is given, the folders the board
+    lists, the rooms, the conclusions it confirms and the debates it says can be closed."""
+    if not b.main_path:
+        return
+    s, st = open_state(b, objs)
+    repo = b.meta['repo']
+    rel = rel_in(repo)
+    who = {b.ids[r]: r for r in b.meta['roles'] if r in b.ids}
+    for role in b.meta['roles']:
+        if role not in b.ids:
+            continue
+        a, placed, readers, _ = deb_view(st, rel, b.ids[role])
+        set_places(obs, role, a, placed, readers, rel)
+        edits = set()
+        for d in st['debates']:
+            for t in d['topics']:
+                for row in t['rows']:
+                    for cell in row['cells']:
+                        if 'editors' in cell and b.ids[role] in cell['editors']:
+                            edits.add('%s|%s|%s|%s' % (rel(t['dir']), cell['round'] if len(t['rounds']) else None, row['p'], file_below(cell.get('path'), t['dir'])))
+        if any('editors' in cell for d in st['debates'] for t in d['topics'] for row in t['rows'] for cell in row['cells']):
+            obs.set(role, 'edits', frozenset(edits))
+    topics = [t for d in st['debates'] for t in d['topics']]
+    obs.set('listing', 'units', frozenset(rel(t['dir']) for t in topics))
+    obs.set('listing', 'rooms', frozenset('%s|%s' % (rel(t['dir']), t['room']) for t in topics if t.get('room')))
+    obs.set('listing', 'finals', frozenset('%s|%s' % (rel(t['dir']), t['final']['rel']) for t in topics if final_confirmed(t['final']) and t['final'].get('rel')))
+    if all('closable' in t for t in topics):
+        obs.set('listing', 'closable', frozenset(rel(t['dir']) for t in topics if t['closable']))
+    for t in topics:                                                               # the hint a cell is given: the agent whose command window may have written the file nobody was seen to write
+        for row in t['rows']:
+            for cell in row['cells']:
+                if row['p'] == 'S' and 'hint' in cell:
+                    obs.set('S', 'hint', who.get((cell['hint'] or {}).get('agent')) if cell['hint'] else None)
+
+
 def read_room(b, obs, objs):
     """The room scene: every participant of the page where it sits, the folders the board lists and the title each is given."""
     if not b.main_path:
         return
     s, st = open_state(b, objs)
     repo = b.meta['repo']
-    rel = lambda p: os.path.relpath(p, repo) if p else None
+    rel = rel_in(repo)
     for role in b.meta['page']:
         a, placed, readers, _ = deb_view(st, rel, b.ids.get(role))
         set_places(obs, role, a, placed, readers, rel)
     obs.set('listing', 'units', frozenset(rel(t['dir']) for d in st['debates'] for t in d['topics']))
     obs.set('listing', 'titles', frozenset('%s|%s' % (rel(t['dir']), t['title']) for d in st['debates'] for t in d['topics']))
-    obs.set('listing', 'finals', frozenset('%s|%s' % (rel(t['dir']), t['final']['rel']) for d in st['debates'] for t in d['topics']
-                                           if t['final']['exists'] and t['final']['auto'] and (t['final']['rel'] or '').startswith('../')))      # a topic closed by the conclusion of its bundle
+    topics = [t for d in st['debates'] for t in d['topics']]
+    obs.set('listing', 'rooms', frozenset('%s|%s' % (rel(t['dir']), t['room']) for t in topics if t.get('room')))
+    if all('room_sure' in t for t in topics if t.get('room')):                          # the API of 0.3.0 says whether a room is a sure one (tags) or an estimated one (launched together)
+        obs.set('listing', 'rooms_sure', frozenset('%s|%s|%s' % (rel(t['dir']), t['room_sure'], t.get('room_why')) for t in topics if t.get('room')))
+    obs.set('listing', 'finals', frozenset('%s|%s' % (rel(t['dir']), t['final']['rel']) for t in topics if final_confirmed(t['final']) and t['final'].get('rel')))      # a topic closed by a document
     guide = b.meta.get('guide')
     obs.set('listing', 'guide_opens', frozenset([rel(guide)]) if guide and s.allowed_file(guide) else frozenset())      # the document view opens the guide of a room the page shows
 
@@ -455,7 +517,7 @@ def read_cxo(b, obs, objs):
     s, st = open_state(b, objs)
     links, index = objs.links, objs.index
     repo = b.meta['repo']
-    rel = lambda p: os.path.relpath(p, repo) if p else None
+    rel = rel_in(repo)
     page_of = getattr(links, 'page_of', None)
     for role in ('child', 'mid', 'host', 'guardian'):
         G = b.ids.get(role)
@@ -499,7 +561,7 @@ def read_rer(b, obs, objs):
     s, st = open_state(b, objs)
     links = objs.links
     repo = b.meta['repo']
-    rel = lambda p: os.path.relpath(p, repo) if p else None
+    rel = rel_in(repo)
     for role in ('a1', 'a2', 'b1', 'b2'):
         G = b.ids.get(role)
         if G is None:
@@ -521,7 +583,7 @@ def read_owr(b, obs, objs):
     """The debate folders the page lists (below the case's HOME), who sits in any of them (the participant under test, or somebody else: the orchestrator would be somebody else),
     the rooms the page shows, and the participant's own places."""
     s, st = open_state(b, objs)
-    rel = lambda p: os.path.relpath(p, b.home) if p else None
+    rel = rel_in(b.home)
     G = b.ids.get('kid')
     a, placed, readers, listed = deb_view(st, rel, G)
     if G:

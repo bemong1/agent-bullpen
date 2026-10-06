@@ -121,10 +121,14 @@ class Transcript:
                           'msg_id': sid_of(self.cid, 'msg-%d' % self.n), 'name': name, 'fromMode': 'bypass', 'body': body}}
         return self.add(t, 'attachment', attachment=att)
 
-    def tool(self, t, name, inp, tid, text=None):
+    def tool(self, t, name, inp, tid, text=None, msg=None):
+        """A tool call. `msg`: the id of the assistant message it is in (calls made in parallel are lines of one message and share it); None: a message of its own; False: a line with
+        no message id (the call that started something cannot then be told from another by it)."""
         content = ([{'type': 'text', 'text': text}] if text else []) + [{'type': 'tool_use', 'id': tid, 'name': name, 'input': inp}]
-        return self.add(t, 'assistant', message={'id': 'msg_' + tid[-8:], 'role': 'assistant', 'model': MODEL, 'stop_reason': 'tool_use', 'content': content,
-                                                 'usage': {'input_tokens': 10, 'output_tokens': 5}})
+        message = {'id': 'msg_' + tid[-8:] if msg is None else msg, 'role': 'assistant', 'model': MODEL, 'stop_reason': 'tool_use', 'content': content, 'usage': {'input_tokens': 10, 'output_tokens': 5}}
+        if msg is False:
+            del message['id']
+        return self.add(t, 'assistant', message=message)
 
     def say(self, t, text, stop='end_turn'):
         return self.add(t, 'assistant', message={'id': 'msg_%d' % self.n, 'role': 'assistant', 'model': MODEL, 'stop_reason': stop,
@@ -308,6 +312,9 @@ def build_case(case, root):
     elif bundle == 'owr':
         from .scene_owr import Owr
         Owr(b).build()
+    elif bundle == 'ctr':
+        from .scene_ctr import build_ctr
+        build_ctr(b)
     else:
         from .scene_deb import build_cpl
         build_cpl(b)

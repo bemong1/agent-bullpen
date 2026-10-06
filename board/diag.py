@@ -16,7 +16,7 @@ from .util import SID_RE, short_path
 
 MAX_PER_SESSION = 200
 LEVEL = {                                       # codes that are only news; every other code is a warning
-    'content_only': 'info', 'limit_group': 'info', 'format_drift': 'info', 'declaration_missing': 'info', 'debate_in_misc': 'info',
+    'content_only': 'info', 'limit_group': 'info', 'format_drift': 'info',
     'proc_unknown': 'info', 'torn_lines': 'info', 'stray_notice': 'info',
 }
 AGENT_CODES = ('evidence_conflict', 'content_author_differs', 'content_only', 'ambiguous_content', 'node_unresolved', 'fingerprint_incomplete', 'path_unresolved')
@@ -81,11 +81,10 @@ PARAMS = {
     'orphan_launch': {'n': _count, 'ambiguous': _flag},
     'fingerprint_incomplete': {},
     'path_unresolved': {'n': _count},
-    'path_ambiguous': {},
     'alias_collision': {'detail': _shaped(_TEXT + '{1,%d}' % VALUE_MAX)},
     'seat_tie_held': {'detail': _shaped(r'(?:-|[0-9]{1,4})/' + _STEM + '{1,60}')},
-    'debate_in_misc': {},
-    'declaration_missing': {},
+    'launch_split': {'detail': _shaped(_TEXT + '{1,%d}' % VALUE_MAX)},
+    'history_lost': {'detail': _shaped(r'(?:-|[0-9]{1,4})/' + _STEM + '{1,60}')},
 }
 
 
@@ -217,7 +216,7 @@ def collect(s, now, verdicts, groups):
         out.append(_entry('cache_error', 'session', None, what='write', error=str(ln.write_error)[:40]))
     elif ln.cache and not lineage._cache_trusted(ln.cache):             # the folder is another user's or others can write to it: the cache is neither read nor written
         out.append(_entry('cache_error', 'session', None, what='untrusted'))
-    # the debate judgment: seats held, paths that fit two folders, names that collide, reviews that declare no reviewer
+    # the debate judgment: cells held, records that were not read, names that collide, agents that cannot be placed in one place
     for d in getattr(s, 'debate_diag', None) or ():
         code, agent, unit, detail = d.get('code'), d.get('agent'), d.get('unit'), d.get('detail')
         scope = 'agent' if agent else ('session' if code == 'listing_capped' else 'unit')

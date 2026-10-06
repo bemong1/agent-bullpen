@@ -12,6 +12,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat import patched, server  # noqa: E402
+from board import facts as F  # noqa: E402
 
 TS = '2026-09-30T00:00:00Z'
 T = 1790726400.0
@@ -226,7 +227,7 @@ class Sessions(unittest.TestCase):
 
 
 class DebateTables(unittest.TestCase):
-    """2-3: writer and reader tables, the round being written now, head cache."""
+    """2-3: who holds a cell and who read it (the owner of a cell is the first sure write, a reader is not it), the round being written now, head cache."""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -243,30 +244,32 @@ class DebateTables(unittest.TestCase):
                 f.write('x\n')
         self.s = server.Session(os.path.join(self.root, 'aaaaaaaa-0000-4000-8000-000000000000.jsonl'))
 
-    def agent(self, n, tag, spawn, prompt, writes=(), reads=()):
+    def agent(self, n, tag, spawn, writes=(), reads=()):
+        """An agent of the session that made the files in `writes` with a Write tool that worked (the events the collector keeps), and read those in `reads`."""
         a = server.Agent('a%016x' % n, {'description': '%s 역할' % tag})
-        a.spawn_prompt, a.spawn_ts = prompt, spawn
-        a.writes = [{'ts': spawn + i, 'path': p} for i, p in enumerate(writes)]
+        a.spawn_ts = spawn
+        for i, p in enumerate(writes):
+            a.ev.add_write(F.WriteEvent(a.id, p, spawn + i, 'create', 'tool', True, call='tu%d' % i, run=1, proof='tool'))
         a.reads = {p: spawn + 5 for p in reads}
         self.s.agents[a.id] = a
         return a
 
     def test_cells(self):
         t1 = os.path.join(self.root, 't1')
-        a = self.agent(1, 'A', T, '%s/r1/A.md 를 쓴다' % t1, writes=[t1 + '/r1/A.md'], reads=[t1 + '/r1/B.md'])
-        b = self.agent(2, 'B', T + 1, '%s/r1/B.md 를 쓴다' % t1, writes=[t1 + '/r1/B.md'], reads=[t1 + '/r1/A.md', t1 + '/r1/B.md'])
+        a = self.agent(1, 'A', T, writes=[t1 + '/r1/A.md'], reads=[t1 + '/r1/B.md'])
+        b = self.agent(2, 'B', T + 1, writes=[t1 + '/r1/B.md'], reads=[t1 + '/r1/A.md', t1 + '/r1/B.md'])
         a.last_ts = b.last_ts = T + 10
         out, units = self.s.debates({a.id: 'running', b.id: 'done'})
         topic = out[0]['topics'][0]
         cells = {(r['p'], c['round']): c for r in topic['rows'] for c in r['cells']}
         ca, cb = cells[('A', 1)], cells[('B', 1)]
-        self.assertEqual((ca['state'], ca['writer'], ca['agent'], ca['readers']), ('draft', a.id, a.id, ['B']))
-        self.assertEqual((cb['state'], cb['writer'], cb['agent'], cb['readers']), ('done', b.id, b.id, ['A']))   # the writer is not a reader
+        self.assertEqual((ca['state'], ca['owner'], ca['agent'], ca['readers']), ('draft', a.id, a.id, ['B']))
+        self.assertEqual((cb['state'], cb['owner'], cb['agent'], cb['readers']), ('done', b.id, b.id, ['A']))   # the owner is not a reader
         self.assertEqual(sorted(units[a.id]), [t1])
 
     def test_repeated_calls_same_result_and_head_follows_file(self):
         t1 = os.path.join(self.root, 't1')
-        self.agent(1, 'A', T, '%s/r1/A.md 를 쓴다' % t1, writes=[t1 + '/r1/A.md'])
+        self.agent(1, 'A', T, writes=[t1 + '/r1/A.md'])
         first = self.s.debates({})
         self.assertEqual(first[0][0]['title'], '제목 A')
         self.assertEqual(self.s.debates({}), first)
@@ -281,7 +284,7 @@ class DebateTables(unittest.TestCase):
 
     def test_allowed_file_does_not_leak_round_state(self):
         t1 = os.path.join(self.root, 't1')
-        a = self.agent(1, 'A', T, '%s/r1/A.md 를 쓴다' % t1, writes=[t1 + '/r1/A.md'])
+        a = self.agent(1, 'A', T, writes=[t1 + '/r1/A.md'])
         a.last_ts = T + 10
         running = self.s.debates({a.id: 'running'})[0][0]['topics'][0]['rows'][0]['cells'][0]['state']
         self.s.allowed_file(os.path.join(t1, 'r1', 'A.md'))                              # judges with the statuses of the last page, none here

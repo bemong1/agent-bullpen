@@ -60,8 +60,10 @@ class DocsScene(unittest.TestCase):
         self.assertEqual((st['session']['alive'], st['orch']['state']), (True, 'working'))
         running = [a for a in st['agents'] if a['status'] == 'running']
         self.assertEqual(len(running), 10 - self.unknown)
-        self.assertEqual(sum(1 for a in running if a['units']), 8 - self.unknown)             # eight in debate rooms: T3 (three, one is Codex), T6 (three), T7 (two)
-        self.assertEqual(sum(1 for a in running if not a['units']), 2)                       # the release-notes run and the `claude -p` run it started
+        self.assertEqual(sum(1 for a in running if a['units']), 5 - self.unknown)             # five hold a cell: T3 (three, one is Codex), A of T6 and A of T7 (a draft each)
+        self.assertEqual(sorted((a['tag'], a['placed']['why'], a['placed']['sure']) for a in running if a['placed']),
+                         [('T6-B', 'launch_peer', False), ('T6-C', 'launch_peer', False), ('T7-B', 'launch_peer', False)])      # three have no file yet and are thought to work in their topic: they were launched together with the one that has
+        self.assertEqual(sum(1 for a in running if not a['units'] and not a['placed']), 2)    # the release-notes run and the `claude -p` run it started
         self.assertEqual([a['level'] for a in st['alerts']], ['check'])                     # the limit one sub-agent hit; the orchestrator itself is not waiting on it
 
     def test_four_to_six_rest_and_the_rest_of_the_rooms_are_as_planned(self):
@@ -71,12 +73,14 @@ class DocsScene(unittest.TestCase):
         self.assertTrue(4 <= len(resting) <= 6, resting)
         self.assertEqual(sorted(by_id[i]['status'] for i in resting), ['done'] * 4 + ['interrupted'] * 2)
         cells = {k: [c['state'] for r in t[k]['rows'] for c in r['cells']] for k in t}
-        self.assertEqual(cells['T3'].count('writing'), 3)
-        self.assertEqual(cells['T6'], ['writing'] * 3)
-        self.assertEqual(cells['T7'], ['writing'] * 2)
+        self.assertEqual((cells['T3'].count('draft'), cells['T3'].count('writing')), (2, 1 if not self.unknown else 0))      # round 2: A and B have a draft on disk, the Codex seat is asked to save with -o
+        self.assertEqual(cells['T6'], ['draft'])
+        self.assertEqual(cells['T7'], ['draft'])
         self.assertEqual(cells['T5'].count('draft'), 2)
-        self.assertTrue(t['T4']['final']['exists'] and not t['T5']['final']['exists'])
-        self.assertEqual([len(t[k]['rows']) for k in ('T3', 'T6', 'T7')], [3, 3, 2])
+        self.assertTrue(t['T4']['final']['confirmed'] and t['T4']['closable'] and not t['T5']['final']['confirmed'])
+        self.assertEqual([len(t[k]['rows']) for k in ('T3', 'T6', 'T7')], [3, 1, 1])
+        self.assertEqual([(p['why'], p['live']) for p in t['T6']['placed']], [('launch_peer', True)] * 2)               # the two that have no file yet: "working · estimated (launched together)"
+        self.assertEqual([(p['why'], p['live']) for p in t['T7']['placed']], [('launch_peer', True)])
 
     def test_the_stopped_states_and_the_launched_tree_are_there(self):
         ag = self.state['agents']

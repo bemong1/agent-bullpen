@@ -1,4 +1,4 @@
-"""Tests that pin down the basic behaviour of transcript parsing (write intent, how a codex exec launch is read, link rules, tokens, etc.).
+"""Tests that pin down the basic behaviour of transcript parsing (how a codex exec launch is read, link rules, tokens, etc.).
 
     python3 -m unittest discover -s tests
     AB_SRC=<other copy folder> python3 -m unittest discover -s tests     # the same tests on another copy (code from before a fix, etc.)
@@ -13,20 +13,6 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat import server  # noqa: E402
 from board import runstate, util  # noqa: E402
-
-
-class WriteIntent(unittest.TestCase):
-    def test_write_after(self):
-        t = '이 디렉터리의 r1/B.md에 쓴다'
-        self.assertTrue(server.write_intent(t, server.REL_REPORT_RE.search(t)))
-
-    def test_read_only(self):
-        t = 'r1/A.md를 읽는다'
-        self.assertFalse(server.write_intent(t, server.REL_REPORT_RE.search(t)))
-
-    def test_write_before(self):
-        t = 'Please write the report to r2/C.md now'
-        self.assertTrue(server.write_intent(t, server.REL_REPORT_RE.search(t)))
 
 
 class Launch(unittest.TestCase):
@@ -377,12 +363,14 @@ class AgentFeed(unittest.TestCase):
         self.bash(a, 'cat > /x/r1/C.md <<EOF\nx\nEOF', call='t3', error=True)
         self.assertEqual([(w['paths'], w.get('ok')) for w in a.shell_writes], [(['/x/r1/A.md'], None), (['/x/r1/B.md'], True), (['/x/r1/C.md'], False)])
 
-    def test_a_call_with_no_markdown_redirect_is_not_read(self):
+    def test_a_call_with_no_markdown_redirect_is_not_a_shell_write(self):
         a = self._agent()
-        with mock.patch('board.link.shell_code', side_effect=AssertionError('read')):
-            for cmd in ('ls -la', 'echo hi > /tmp/x.log', 'cat /x/r1/B.md', 'tee /tmp/x.log'):
-                self.bash(a, cmd, error=False)
-        self.assertEqual(a.shell_writes, [])
+        for cmd in ('ls -la', 'echo hi > /tmp/x.log', 'cat /x/r1/B.md', 'tee /tmp/x.log'):
+            self.bash(a, cmd, error=False)
+        self.assertEqual(a.shell_writes, [])                       # the page's list of shell writes is markdown alone, as it was
+        self.assertEqual(a.write_events, [])                       # a file in a scratch folder is no work, and a read is no write
+        self.assertEqual([(r.path, r.via) for r in a.read_events], [('/x/r1/B.md', 'shell')])      # (what `cat` reads is a read, and the command window says so)
+        self.assertEqual([w.reads for w in a.windows], [(), (), ('/x/r1/B.md',), ()])
 
     def test_pending_text_len(self):
         a = self._agent()

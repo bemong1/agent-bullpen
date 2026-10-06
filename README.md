@@ -18,14 +18,14 @@ When one Claude Code session starts sub-agents, `claude -p` runs and Codex runs,
 ## What it shows
 
 - **Orchestrator and agents**: status (working, done, stalled, ended), the tool each one is using right now, context fill, model and effort. Work that stopped is told apart: **interrupted** by a usage limit (with the reset time), an API error, a time limit or an early exit, or **unknown** when there is no process to check. A `claude -p` run started by an agent or by another run stands under the one that started it.
-- **Debates**: a topic × round × participant table that follows `<topic>/r<N>/<who>.md` report files on disk, with the reports readable in the page.
+- **Debates**: a topic × round × participant table built from the `<topic>/r<N>/<who>.md` files the agents really wrote (and who wrote them), with the reports readable in the page and an honest "closing not confirmed" when no document can be told to be the end.
 - **A pixel-art office** (`/game` for full screen): agents sit at desks while they work, walk to the lounge when done, and carry messages to each other.
 - **Conversations**: you ↔ orchestrator, and agent ↔ agent.
 - **Alerts** for things that need you: a pending question, a stalled or failed agent, a usage limit (one alert for everything that waits on the same reset).
 - **Tokens and cost** per agent (API-price equivalent, not your bill), an activity timeline, and a plan / usage bar.
 - **Codex** next to Claude Code: `codex exec` runs that Claude launches join the team, and a Codex session can be the orchestrator too: its native sub-agents and the `claude -p` and `codex exec` runs its shell starts are gathered under it; Codex-only conversations are listed as well.
 - Plain Claude sessions with no agents are listed as well.
-- **Diagnostics**: what the dashboard noticed but could not settle (a tie between two possible launchers, a path it could not work out, an unknown transcript format), in a list that never contains transcript text.
+- **Diagnostics**: what the dashboard noticed but could not settle (a tie between two possible launchers, two agents that created one file at once, an unknown transcript format), in a list that never contains transcript text.
 
 Every panel is explained in the [screen guide](docs/guide.md).
 
@@ -166,22 +166,22 @@ Details, options (`--chain`, `--chain-timeout`, `--show`) and the exact rules: [
 
 ## Debate folders
 
-A debate is recognized from report paths. Lay it out like this and tell your agents to write to these paths:
+Debates are read from the folders and from what the agents really wrote, not from the instructions. Have each agent write its own file in a round folder; start them together:
 
 ```
 <topic>/
-  brief.md          # topic brief: "# Title", and "**A — role**" lines per participant
-  r1/A.md           # round 1, one report per participant
+  brief.md          # optional: its first heading is the title
+  r1/A.md           # round 1: one file each (its name is the row)
   r1/B.md
   r2/A.md           # round 2 …
-  rulings.md        # the final result (see below)
+  rulings.md        # the end: written after the last report
 ```
 
-- The folder must exist on disk. A report path is `<topic>/r<N>/<who>.md` (`r01` and `round1` work too), given as an absolute path (or `~/…`) in the agent's instructions, written by the agent, or named as the target of a command it ran. `<who>` is matched to the agent's tag (`A`, `T1-A`, `opus-1`) or to the file it wrote. An agent that only reads a report, a path that fits two debate folders, and one the instructions say not to write give no seat.
-- With `brief.md` in the topic folder you also get the title and roles. A common `brief.md` in the parent folder groups several topics into one debate. A review with no round folders gets cells only when its `brief.md` names the reviewers and their result files.
-- **Final result**, either way:
-  - in the parent `brief.md` table, a row such as ``| Naming | `t1_naming/` | — | `final/t1_naming.md` |`` (columns: topic, folder, depends on, final deliverable; the folder must be a backticked `name/` and the deliverable a backticked `final/<file>`, and the first row is the header); or
-  - automatic: with no such row, the newest `.md` directly in the topic folder that is at least as new as the last submitted report (`brief.md` and `round<N>.md` are skipped, names like `final`, `ruling`, `summary` win). It is ignored while any participant is still writing.
+- A debate is a folder with a round folder. A cell is a file an agent wrote there (`Write`/`Edit`, a Codex file change, a shell `>`/`tee` that worked, or the file a `codex exec -o` / `claude -p … >` was asked to save); its creator owns it. A file nobody owns, or one an agent was asked to save again and has not, is a grey "previous file".
+- Agents with no file yet that were launched with a participant, whose launch made the folder, or that read its `brief.md`, show as **"Working · estimated"**; a guess changes nothing.
+- With no round folder, two or more agents with `BULLPEN_ROOM=<folder>` make a **room**; agents launched together that each wrote a `.md` there make an estimated one (never current, never closed). A review needs `r1/` or the tag.
+- **Tags (optional)** go on the launch command itself: `BULLPEN_ROOM=<folder> BULLPEN_SEAT=<name>` (`<rN/name>` in a debate); the Agent tool and Codex native sub-agents cannot carry them.
+- **The end of a topic** is a confirmed final: the one `.md` in the topic folder that a tool or shell command wrote after the last report, with every cell in and nobody tied to it working. Otherwise **"Closing not confirmed"**, with reasons and candidates. The brief table's `final/…` is only shown.
 
 The full rules are in [`docs/guide.md`](docs/guide.md#how-debates-are-recognized).
 

@@ -4,6 +4,7 @@
 # Not accepted, on purpose, and so a DIFF for a session that has them: a new VALUE of an old field (agents[].status `interrupted`/`unknown`, orch.state `limit_wait`), a state that no longer reads as before
 # (an agent that is now judged by its own error line), and the system lines (kind `sys`) that the feed and /api/talk now carry for the API-error lines of the record: they make the list longer and move every
 # later event number (`idx`). Compare against a session whose record has none of these, or read the DIFF as the intended change.
+# Also not accepted, on purpose: what 0.3.0 took away or now says from the files and not from words - `cells[].writer`, `topics[].final.auto`, the text of `rows[].role`, and the seats, rooms and finals themselves (a DIFF there is the intended change: read it, do not accept it).
 # Also not accepted: the fields that went away with the account usage query (/api/plans claude: `usage_api`, `error`, `error_info`), so an older server shows a DIFF there.
 import json, sys, time, urllib.request, urllib.parse, urllib.error
 from collections import Counter
@@ -31,6 +32,19 @@ API_SNAP_ALLOW = [
     ('room topic room / guide', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'topics[]' and all(k in x for k in ('dir', 'key', 'rows', 'kind')), ('room', 'guide')),
     # a debate that stands for copies of its folder (a link into it, the same place in the repository's linked worktrees): how many were folded into it
     ('debate copies', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'debates[]' and all(k in x for k in ('root', 'topics', 'finals')), ('copies',)),
+    # 0.3.0 (the debate judged from structure, CONTRACT 2.7): where an agent that sits in no cell is thought to work, the call that launched it, the room tag it carries ...
+    ('agent placed / launch / room_tag', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'agents[]' and 'tokens' in x and 'status' in x, ('placed', 'launch', 'room_tag')),
+    ('/api/agent write_events / run / placed / launch / room_tag', lambda x, endpoint, path: path == '' and all(k in x for k in ('spawn_prompt', 'tool_counts', 'ticks')),
+     ('write_events', 'run', 'placed', 'launch', 'room_tag')),
+    # ... a debate whose root is an estimated room, its conclusion and the agents placed at its root; a topic that can be closed, its placed agents, how sure its room is
+    ('debate sure / final / placed', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'debates[]' and all(k in x for k in ('root', 'topics', 'finals')), ('sure', 'final', 'placed')),
+    ('topic closable / placed / room_sure / room_why', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'topics[]' and all(k in x for k in ('dir', 'key', 'rows', 'kind')),
+     ('closable', 'placed', 'room_sure', 'room_why')),
+    # ... what a topic's final says (confirmed or why not, the candidates, what it closes) and what a cell says (who owns it, who only fixed it, how the owner is known, the guess of a window, a file that is a previous one)
+    ('final confirmed / why / candidates / scope / table_path', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'final' and all(k in x for k in ('exists', 'rel', 'path', 'mtime', 'lines')),
+     ('confirmed', 'why', 'candidates', 'scope', 'table_path')),
+    ('cell owner / editors / evidence / hint / previous / rdir', lambda x, endpoint, path: path.rsplit('/', 1)[-1] == 'cells[]' and all(k in x for k in ('round', 'state', 'path', 'agent')),
+     ('owner', 'editors', 'evidence', 'hint', 'previous', 'rdir')),
     # a tool entry (activity, last_tool, current, pending) whose summary is the board's own wording says which dictionary key words it
     ('tool text_i18n (activity, last_tool, current, pending)', lambda x, endpoint, path: all(k in x for k in ('ts', 'name', 'text')), ('text_i18n',)),
 ]

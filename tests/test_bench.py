@@ -106,6 +106,42 @@ class Build(unittest.TestCase):
         findable = sum(1 for t in child_texts if t in every.replace('\\"', '"'))
         self.assertGreaterEqual(findable, len(child_texts) - 1)
 
+    def test_the_busy_session_has_a_big_debate_tree_written_by_shell_commands(self):
+        """The shell inputs of the scene (Opus 1st review P2-1): the reports of every topic and round written by the Write tool, `cat > f <<EOF`, `printf > f`, `tee` and a python script by
+        heredoc, a long brief and ruling, a loop over the folders, reads of every round. The files are on the disk, and each one is named by a command of the record that wrote it."""
+        man = bench.build_big_home(self.root, scale=0.1, bulk_kb=0, topics=3)
+        sh = man['shell']
+        self.assertEqual(sh['topics'], 3)
+        review = os.path.join(man['home'], 'work', 'proj00', 'docs', 'review')
+        reports = [os.path.join(dp, f) for dp, _, fs in os.walk(review) for f in fs if f.endswith('.md')]
+        self.assertEqual(sh['files'], len(reports))
+        self.assertEqual(len(reports), 3 * bench.ROUNDS * len(bench.PEOPLE) + 1 + 3)                     # topics x rounds x writers, the brief, a ruling a topic
+        for how in ('writes', 'heredocs', 'redirects', 'tees', 'scripts'):
+            self.assertGreater(sh[how], 0, how)                                                         # every way of writing is in the scene
+        self.assertGreater(sh['big_inputs'], 0)
+        self.assertEqual(sh['reads'], 3 * bench.ROUNDS)
+        record_text = ''
+        for dp, _, fs in os.walk(os.path.join(man['home'], '.claude', 'projects')):
+            for f in fs:
+                if f.endswith('.jsonl'):
+                    with open(os.path.join(dp, f)) as fh:
+                        record_text += fh.read()
+        for path in reports:
+            self.assertIn(path, record_text, path)                                                     # the path is in a command or a Write of a record (a plain path: nothing in it is escaped)
+        some = next(p for p in reports if p.endswith('A.md'))
+        self.assertGreater(os.path.getmtime(some), 0)
+        self.assertLess(os.path.getmtime(some), man['now'])                                              # saved while its command ran, not after the scene was built
+
+    def test_no_topics_is_the_scene_without_the_tree(self):
+        man = bench.build_big_home(self.root, scale=0.1, bulk_kb=0, topics=0)
+        self.assertEqual(man['shell']['files'], 0)
+        self.assertFalse(os.path.exists(os.path.join(man['home'], 'work', 'proj00', 'docs')))
+
+    def test_the_scale_sets_the_topics(self):
+        self.assertEqual(max(2, int(round(bench.BASE_TOPICS * 1.0))), 12)
+        man = bench.build_big_home(self.root, scale=0.05, bulk_kb=0)
+        self.assertEqual(man['shell']['topics'], 2)                                                     # never fewer than two
+
     def test_it_is_deterministic(self):
         a = bench.build_big_home(os.path.join(self.root, 'a'), scale=0.05, bulk_kb=0, now=1790000000)
         b = bench.build_big_home(os.path.join(self.root, 'b'), scale=0.05, bulk_kb=0, now=1790000000)
@@ -122,6 +158,17 @@ class Build(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(stranger, 'notes.txt')))
         self.assertFalse(os.path.exists(os.path.join(stranger, 'home')))
         self.assertTrue(bench.is_ours(self.root) is False)
+
+
+class Windows(unittest.TestCase):
+    def test_every_window_of_scans_starts_after_a_full_collection(self):
+        """One pass of the collector (30-40 ms) inside a window of 30 scans is that window's p95: two builds of the same code once differed by a factor of five in `scan_idle_p95`.
+        The windows of the idle scans, of the scans while records grow and of state() each follow a gc.collect()."""
+        import inspect
+        src = inspect.getsource(bench.worker_scan)
+        for window in ("idle_w, idle_c = [], []", "grow(live, rng)", "sw, sc = [], []"):
+            at = src.index(window)
+            self.assertIn('gc.collect()', src[max(0, at - 700):at], window)
 
 
 class Help(unittest.TestCase):

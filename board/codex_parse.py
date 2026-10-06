@@ -11,7 +11,10 @@ CX_BIG = 64 << 20          # a rollout bigger than this is not read from its beg
 CX_HEADS = 2000
 
 CX_MAX_READ = 32 << 20     # amount the Codex tail reads at a time
-CX_LINE_MAX = 1 << 20      # a line longer than this (a base64 image, etc.) is not decoded as JSON
+CX_LINE_MAX = 1 << 20      # a line longer than this (a base64 image, etc.) is not decoded as JSON ...
+CX_ITEM_MAX = 64 << 20     # ... unless it is the item of a command or of a file change (what a write event is made of), which is read in full up to this size: a command's output can be megabytes long
+CX_ITEM_HEAD = 1024        # how far into a line the kind of its item is looked for
+CX_WRITE_ITEM_RE = re.compile(rb'"item":\{"type":"(?:CommandExecution|FileChange)"')
 CX_WINDOW = 30             # allowed span (seconds) from a Bash call to the rollout start. Measured 0.3–5 s
 CX_PROMPT_MIN = 40         # number of characters outside variables that the prompt rule needs
 
@@ -63,6 +66,23 @@ def codex_tool(js):
     return name, trunc(text.strip().splitlines()[0] if text.strip() else '', 240)
 
 
+EXEC_CMD_MAX = 64 << 10      # a command longer than this is not read out of an exec call that has not ended
+
+
+def codex_exec_command(js):
+    """(cmd, workdir) of the one shell command an exec call makes (`tools.exec_command({cmd: "…", workdir: "…"})`), written out in full, or None when the call makes none, several (parallel
+    commands: nothing says which one a process belongs to), or one whose text is not a literal."""
+    js = js if isinstance(js, str) else ''
+    if 'exec_command' not in js:
+        return None
+    lit = r'("(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\'|`[^`$]*`)'
+    found = re.findall(r'\bcmd\s*:\s*' + lit, js)
+    if len(found) != 1 or len(found[0]) > EXEC_CMD_MAX:
+        return None
+    where = re.findall(r'\bworkdir\s*:\s*' + lit, js)
+    return _js_str(found[0]), (_js_str(where[0]) if len(where) == 1 else None)
+
+
 def codex_call(pt, p):
     """(tool name, short description) of one custom_tool_call or function_call line."""
     if pt == 'custom_tool_call':
@@ -79,8 +99,70 @@ def codex_say_text(p):
     return as_text(p.get('content')).strip()
 
 
+def cx_write_item(raw):
+    """Whether a rollout line (bytes) is the `item_completed` of a command or of a file change, judged from its first bytes: the lines that write events are made of."""
+    m = CX_HEAD_RE.match(raw)
+    return bool(m) and m.group(3) == b'item_completed' and CX_WRITE_ITEM_RE.search(raw, 0, CX_ITEM_HEAD) is not None
+
+
+def cx_head(raw):
+    """{'ts', 'ord', 'type'} of a rollout line (bytes) from its first bytes: the time (None when it cannot be read), the ordinal (None when the line has none) and the kind of the line; None when the
+    bytes are no line head."""
+    raw = raw.lstrip()
+    m = CX_HEAD_RE.match(raw)
+    if not m:
+        return None
+    om = CX_ORD_RE.match(raw)
+    return {'ts': parse_ts(m.group(1).decode('utf-8', 'replace')), 'ord': int(om.group(1)) if om else None, 'type': m.group(2).decode()}
+
+
+CX_ITEM_TYPE_RE = re.compile(rb'"item":\{"type":"[A-Za-z]+"')
+
+
+def cx_write_item_of(row):
+    """Whether a decoded row (`cx_decode`) is the `item_completed` of a command or of a file change."""
+    p = row.get('p')
+    item = p.get('item') if isinstance(p, dict) else None
+    return row.get('pt') == 'item_completed' and isinstance(item, dict) and item.get('type') in ('CommandExecution', 'FileChange')
+
+
+def cx_cut_head(head):
+    """Whether the first bytes of a rollout line (bytes) are a line that was cut before the kind of what it holds could be read: an `item_completed` with no readable kind of item, or an `event_msg` with no
+    readable kind of payload. Such a line may be a write."""
+    m = CX_HEAD_RE.match(head)
+    if m is None:
+        return False
+    if m.group(3) is None:
+        return m.group(2) == b'event_msg'
+    return m.group(3) == b'item_completed' and CX_WRITE_ITEM_RE.search(head) is None and CX_ITEM_TYPE_RE.search(head) is None
+
+
+def cx_broken(raw):
+    """`cx_head` of a line that is no JSON and that is, by its head, the item of a command or of a file change (a write that cannot be read) or a line that was cut before that could be read
+    (`cx_cut_head`: it may be a write); None for any other line."""
+    raw = raw.strip()
+    if not raw:
+        return None
+    head = raw[:CX_ITEM_HEAD]
+    return cx_head(raw) if (cx_write_item(raw) or cx_cut_head(head)) else None
+
+
+def cx_hole(bad, prev_ts, nxt):
+    """The hole a write line that cannot be read leaves in the record, (t0, t1), or None when it leaves none (CONTRACT O17). It leaves none when it is the last line of a process that died
+    writing it: nothing follows it (`nxt` None), or what follows it is a process that begins (a `session_meta`, or a line whose ordinal does not go on from the broken one: it is at most it, as a process
+    that took up the file again counts from the lines it could read). Else it is the time between the line before it (`prev_ts`) and the line after it (`nxt`), with its own, when they are known.
+    `bad` and `nxt` are `cx_head`s ({} for a line whose head could not be read)."""
+    if nxt is None or nxt.get('type') == 'session_meta':
+        return None
+    if bad.get('ord') is not None and nxt.get('ord') is not None and nxt['ord'] <= bad['ord']:
+        return None
+    times = [t for t in (prev_ts, bad.get('ts'), nxt.get('ts')) if t is not None]
+    return (min(times), max(times)) if times else None
+
+
 def cx_decode(raw):
-    """A rollout line. A line over 1 MB is not decoded; only the line head (time, kind) and the first 600 bytes are returned. `ord` is the line's ordinal (None when it has none)."""
+    """A rollout line. A line over 1 MB is not decoded; only the line head (time, kind) and the first 600 bytes are returned, unless it is the item of a command or of a file change (a write is made
+    of it), which is decoded in full up to CX_ITEM_MAX. `ord` is the line's ordinal (None when it has none)."""
     raw = raw.strip()
     if not raw:
         return None
@@ -89,12 +171,20 @@ def cx_decode(raw):
         if not m:
             return None
         om = CX_ORD_RE.match(raw)
+        if len(raw) <= CX_ITEM_MAX and cx_write_item(raw):
+            try:
+                d = json.loads(raw)
+            except (ValueError, RecursionError):
+                return None                                  # cut short (a writer that died in the middle of it): the reader of the rows judges it (`cx_rows`, `cx_hole`)
+            if isinstance(d, dict):
+                p = d.get('payload') if isinstance(d.get('payload'), dict) else {}
+                return {'ts': parse_ts(d.get('timestamp')), 'type': d.get('type'), 'ord': int(om.group(1)) if om else None, 'pt': p.get('type'), 'p': p}
         return {'ts': parse_ts(m.group(1).decode()), 'type': m.group(2).decode(), 'ord': int(om.group(1)) if om else None,
                 'pt': (m.group(3) or b'').decode(), 'p': None, 'head': raw[:600]}
     try:
         d = json.loads(raw)
-    except ValueError:
-        return None
+    except (ValueError, RecursionError):
+        return None                                          # a line that is no JSON (a writer that died in the middle of it) is skipped, as the Claude reader skips one: `lost` is for what the limits of the reader left unread
     p = d.get('payload') if isinstance(d.get('payload'), dict) else {}
     o = d.get('ordinal')
     return {'ts': parse_ts(d.get('timestamp')), 'type': d.get('type'), 'ord': o if isinstance(o, int) and not isinstance(o, bool) else None, 'pt': p.get('type'), 'p': p}

@@ -194,10 +194,20 @@
   }
   // The desks of the "other work" room keep their people while they work. Somebody new takes the empty end desk, wherever the server lists them (so one more person never moves
   // everybody a desk over), and when somebody leaves the rest close up in the same order. Only the first drawing, with nobody remembered, seats a launched run beside its launcher.
+  // The ones launched together (the same `launch`) sit side by side, at the place of the first of them; the rest keep their order
+  function together(list) {
+    const at = new Map(), groups = [];
+    list.forEach(a => {
+      if (a.launch && at.has(a.launch)) { at.get(a.launch).push(a); return; }
+      const g = [a]; groups.push(g);
+      if (a.launch) at.set(a.launch, g);
+    });
+    return [].concat(...groups);
+  }
   function deskOrder(G, list) {
     const ids = new Set(list.map(a => a.id)), kept = (G.otherOrder || []).filter(id => ids.has(id)), have = new Set(kept);
     const byId = new Map(list.map(a => [a.id, a]));
-    const out = kept.map(id => byId.get(id)).concat(beside(list.filter(a => !have.has(a.id))));
+    const out = kept.map(id => byId.get(id)).concat(beside(together(list.filter(a => !have.has(a.id)))));
     G.otherOrder = out.map(a => a.id);
     return out;
   }
@@ -207,21 +217,27 @@
     const byId = new Map(S.agents.map(a => [a.id, a]));
     const inDebate = new Set();
     let idle = 0;
-    // A finished topic loses its room, and its people are not put in the lounge either (they count as earlier agents): a topic with nobody working
-    // and a final already out, or a room or flat review (no next round to wait for) whose every cell is in (20 minutes of slack after the last activity), or a topic with no participants at all.
-    // A topic that finished a round and waits for the next stage (before the final) is kept as it is, and so is a review that has not started or has a cell still open or not handed in
+    // A finished topic loses its room, and its people are not put in the lounge either (they count as earlier agents): a topic with nobody working that the judgment can close (`closable`: a confirmed
+    // final, nobody tied to it working, not an estimated room) and 20 minutes of slack after the last activity, or a topic with no participants at all. A topic that finished a round and waits for
+    // the next stage (before the final) is kept as it is, and so is a room whose people are all in but whose end is not confirmed
     const nowS = S.now || Date.now() / 1000;
     const topicDone = t => {
       const ids = t.rows.map(r => r.agents[r.agents.length - 1]).filter(Boolean);
       if (ids.some(id => { const a = byId.get(id); return a && RUN(a.status); })) return false;
-      if (!t.rows.length) return true;
-      if (!(t.final && t.final.exists) && !(noRounds(t) && t.rows.every(r => r.cells.every(c => c.state === 'done')))) return false;
+      if (!t.rows.length) return !(t.placed || []).some(p => p.live) && !(first && rootPlaced.some(p => p.live));      // no participants: no room, unless somebody is thought to work in it
+      if (!isClosable(t)) return false;
       const lastAct = Math.max(0, ...ids.map(id => (byId.get(id) || {}).last_ts || 0), ...t.rows.flatMap(r => r.cells.map(c => c.mtime || 0)));
       return nowS - lastAct >= 1200;
     };
+    const rootPlaced = d ? (d.placed || []) : [];               // the agents thought to work in the bundle as a whole sit in its first room
+    let first = true;
     (d ? d.topics : []).forEach((t, i) => {
       if (!String(t.dir || '').startsWith('demo/') && topicDone(t)) return;   // demo rooms stay as they are
       const seats = t.rows.map(r => ({ p: r.p, role: r.role, agentId: r.agents[r.agents.length - 1] || null, cells: r.cells }));
+      const sat = new Set(seats.map(s => s.agentId));
+      // the agents thought to work here hold no cell but sit at a desk of the room too (the same people the page lists under the table as "working · estimated"); the ones that are over rest like the rest
+      (t.placed || []).concat(first ? rootPlaced : []).forEach(p => { const a = byId.get(p.agent); if (a && !sat.has(p.agent)) { sat.add(p.agent); seats.push({ p: a.tag || '·', role: '', agentId: p.agent, cells: [] }); } });
+      first = false;
       seats.forEach(s => { if (s.agentId) { inDebate.add(s.agentId); const a = byId.get(s.agentId); if (a && !RUN(a.status)) idle++; } });
       blocks.push({ type: 'zone', topic: t, seats, shirt: SHIRTS[i % SHIRTS.length], w: 12 + Math.max(3, seats.length) * SEAT });
     });
@@ -758,20 +774,24 @@
       if (Math.abs(l - t.l) > 0.01 || Math.abs(tp - t.t) > 0.01) { t.el.style.left = l + 'px'; t.el.style.top = tp + 'px'; t.l = l; t.t = tp; }
     }
   }
-  // A topic with no round folders (a room, a flat review whose cells carry no round) has one result per seat and no next round to wait for; board.js keeps its own copy of these two.
-  const noRounds = tp => !!tp.room || tp.kind === 'flat';
-  const roundKeys = tp => tp.room === 'members' ? [] : tp.kind === 'flat' ? [null] : tp.room ? [1] : Array.from({ length: Math.max(2, ...tp.rounds) }, (_, i) => i + 1);
+  // A topic with no round folders (a room) has one result per seat and no next round to wait for; board.js keeps its own copy of these helpers.
+  const noRounds = tp => !!tp.room;
+  const roundKeys = tp => tp.room === 'members' ? [] : tp.room ? [1] : Array.from({ length: Math.max(2, ...tp.rounds) }, (_, i) => i + 1);
+  const finalOk = f => !!f && (f.confirmed !== undefined ? f.confirmed : f.exists);
+  const isClosable = tp => tp.closable !== undefined ? !!tp.closable : finalOk(tp.final);
   function stageText(tp, S) {   // (tp, not t: t is the translation function)
     const cells = tp.rows.flatMap(r => r.cells);
     const working = tp.rows.some(r => r.agents.some(id => { const a = S.agents.find(x => x.id === id); return a && RUN(a.status); }));
-    if (tp.final && tp.final.exists) return t('office.board.final');
+    const est = (tp.placed || []).filter(p => p.live).length;      // thought to work here, holding no cell
+    if (finalOk(tp.final)) return t('office.board.final');
+    if (!tp.room && tp.closable === true) return t('office.board.bundleFinal');          // closable with no final of its own: the bundle's final closes it
     if (tp.room === 'members') return working ? t('office.board.members', { count: tp.rows.length }) : t('office.board.membersEnded');
-    if (!cells.some(c => c.agent) && !cells.some(c => c.state === 'done')) return tp.deps ? t('office.board.after', { deps: tp.deps }) : t('office.board.pending');
-    if (noRounds(tp)) {                                 // submitted, still being written, or stopped; complete once every seat is in and nobody works
+    if (!cells.some(c => c.agent) && !cells.some(c => c.state === 'done')) return est ? t('office.board.estimated', { count: est }) : tp.deps ? t('office.board.after', { deps: tp.deps }) : t('office.board.pending');
+    if (noRounds(tp)) {                                 // submitted, still being written, or stopped; "Done" only when the judgment closes it
       const rc = tp.rows.map(row => row.cells[0]).filter(Boolean);
       const done = rc.filter(c => c.state === 'done').length;
       if (rc.some(c => ['writing', 'draft', 'paused', 'unknown'].includes(c.state)) || (done && done < rc.length)) return t('office.board.room', { done, total: rc.length });
-      return !done ? t('office.board.pending') : working ? t('office.board.roomDone', { total: rc.length }) : t('office.board.complete');
+      return !done ? t('office.board.pending') : isClosable(tp) ? t('office.board.complete') : t('office.board.roomDone', { total: rc.length });
     }
     for (const r of tp.rounds) {
       const rc = tp.rows.map(row => row.cells.find(c => c.round === r)).filter(Boolean);

@@ -33,6 +33,7 @@ SESSION_FILE_MAX = 64 << 10                 # read cap for one session file
 SESSION_FILE_RE = re.compile(r'(\d+)\.json')
 ROLLOUT_ID_RE = re.compile(r'(%s)\.jsonl' % SID_RE.pattern)       # rollout-<time>-<thread id>.jsonl
 ENV_NAMES = (b'CLAUDE_CODE_SESSION_ID', b'CLAUDE_PID', b'CODEX_THREAD_ID', b'CODEX_SESSION_ID')           # only these four are read from environ
+TAG_NAMES = (b'BULLPEN_ROOM', b'BULLPEN_SEAT')       # the two a user may set to say where an agent works: read apart from ENV_NAMES (the links of who started whom never read them)
 
 # record of the links found by firm rules (so they are not forgotten across a restart). It holds only session ids, rule and time (no path, instruction, fingerprint or environment
 # variable value). Version 2 adds the links that rest on an output file (`out`) or a long instruction (`content`), with the sub-agent id when the node is one; version 1 files are still read.
@@ -244,19 +245,22 @@ EXEC_VALUE_OPTS = frozenset(('-C', '--cd', '--add-dir', '-s', '--sandbox', '-m',
 EXEC_OUT_MAX = 4096                # a path longer than this is no path of ours
 
 
-def exec_out(argv):
+def exec_out(argv, cwd=None):
     """The path a live `codex exec` process was told to write its last message to, from its own command line (`-o FILE`, `--output-last-message FILE`, `--output-last-message=FILE`;
-    argv is what the shell made of the command, so a variable in the launching text is already its value), or None. Only an absolute path counts (a relative one would need the
-    folder of the process, which is not read), only before `--`, only when the command is `codex exec` (also `node …/codex.js exec`), and only when there is exactly one."""
+    argv is what the shell made of the command, so a variable in the launching text is already its value), or None. An absolute path counts as it is; a relative one counts from `cwd`, the
+    folder the thread of the process was started in (its rollout says it), when that is an absolute path and the command does not move the folder (`-C`, `--cd`: then the word is not
+    known to be read from `cwd`). Only before `--`, only when the command is `codex exec` (also `node …/codex.js exec`), and only when there is exactly one."""
     words = [os.fsdecode(a) for a in argv]
     start = next((i for i, a in enumerate(words[:2]) if os.path.basename(a) in ('codex', 'codex.js')), None)
     if start is None or words[start + 1:start + 2] != ['exec']:
         return None
-    found, i = [], start + 2
+    found, i, moves = [], start + 2, False
     while i < len(words):
         w = words[i]
         if w == '--':
             break
+        if w in ('-C', '--cd') or w.startswith('--cd='):
+            moves = True
         if w in ('-o', '--output-last-message'):
             if i + 1 >= len(words):
                 return None
@@ -270,6 +274,8 @@ def exec_out(argv):
     if len(found) != 1:
         return None
     path = found[0]
+    if path and not os.path.isabs(path) and not moves and isinstance(cwd, str) and os.path.isabs(cwd) and '\0' not in cwd:
+        path = os.path.join(cwd, path)
     if not path or len(path) > EXEC_OUT_MAX or '\0' in path or not os.path.isabs(path):
         return None
     try:
@@ -649,7 +655,7 @@ class Lineage:
                 e = codex_get(tid) if tid else None
                 # only exec threads started by an agent (the same targets as cx_link): not a TUI or desktop the user opened, nor a sub-agent or review thread
                 if e and e['origin'] == 'exec' and not e['guardian'] and os.path.normpath(e['path']) == os.path.normpath(path):
-                    outs.setdefault(tid, {})[it['pid']] = exec_out(it['argv'])
+                    outs.setdefault(tid, {})[it['pid']] = exec_out(it['argv'], e.get('cwd'))
                     if not tried:
                         env = procs.env_values(it['pid'], ENV_NAMES)
                         tried, got = True, parent_claim(it['pid'], None, sess, sids, cxp, codex_get, codex_root, env)

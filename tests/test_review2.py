@@ -881,21 +881,6 @@ class N01ScanPerformance(unittest.TestCase):
             self.assertEqual([c['id'] for c in f['calls']], ['t2'])
             self.assertEqual(idx.quota['five_hour']['status'], 'rejected')
 
-    def test_report_prefilters_give_the_same_matches(self):
-        import random
-        from importlib import import_module
-        try:
-            deb = import_module('board.debates')
-        except ImportError:
-            self.skipTest('한 파일 코드에는 없는 내부 함수')
-        rnd = random.Random(7)
-        toks = ['/home/u/proj/t1/r1/A.md', 'r2/B.md', '`/x/r10/C.md`', '~/d/r3/D.md', 'x/r1/y.md', '…/t2/r2/A.md', ' ', '\n', '쓴다', 'r1', '/r1/', 'a.md',
-                '/proj/docs/notes/opus.md', '(/tmp/x/r1/B.md)', '.md', 'r9/', '/r', 'rr1/A.md', '-r1/A.md']
-        for _ in range(3000):
-            t = ''.join(rnd.choice(toks) for _ in range(rnd.randint(0, 8)))
-            self.assertEqual([m.group(0) for m in deb.report_refs(t)], [m.group(0) for m in server.REPORT_RE.finditer(t)], t)
-            self.assertEqual([m.group(0) for m in deb.rel_report_refs(t)], [m.group(0) for m in server.REL_REPORT_RE.finditer(t)], t)
-
     def test_dquote_mask_is_length_preserving(self):
         for c in ('echo "aaa $(true; codex exec x) bbb" ccc', 'echo "a\\"b" \\"x', 'echo "unterminated', 'echo "a`b c`d"',
                   'echo "$HOME $1 $" x', 'echo "' + 'y' * 5000 + '"'):

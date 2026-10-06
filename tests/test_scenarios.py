@@ -1,13 +1,14 @@
 """The scenario generator (tools/scenarios): axes -> synthetic HOME -> truth (oracle) -> what the board shows (observe) -> pass / miss / wrong.
 
-The strict xfail list (tests/scenarios_xfail.json) is exactly the set of red cells of the board as it is today: a red cell that is not listed, a listed cell that
-now passes, a listed cell whose value changed, a stale entry: each fails here. Fixing the board turns cells green; the fixer then regenerates the list with
-`python3 -m tools.scenarios.run --write-xfail` and the diff shows which cells moved. The table of red cells comes from
-`python3 -m tools.scenarios.run --md`, never from a test.
+The strict xfail list (tests/scenarios_xfail.json) is exactly the set of red cells of the board as it is today against the truth of the 0.3.0 contract (tools/scenarios/contract.py,
+whose own check is the table tests/data/contract_cases.json): a red cell that is not listed, a listed cell that now passes, a listed cell whose value changed, a stale entry: each
+fails here. Each red cell carries the line of the contract it is about (J1, J5, J11 ...), so fixing the board turns cells green line by line; the fixer then regenerates the list with
+`python3 -m tools.scenarios.run --write-xfail` and the diff shows which cells moved. The table of red cells comes from `python3 -m tools.scenarios.run --md`, never from a test.
 
     python3 -m unittest discover -s tests
 """
 import contextlib
+import copy
 import io
 import itertools
 import json
@@ -26,7 +27,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import compat  # noqa: E402,F401  (puts the repo root first on sys.path)
 
-from tools.scenarios import axes, build, cx_record, observe, oracle, run, scene_cxo  # noqa: E402
+from tools.scenarios import axes, build, contract, cx_record, observe, oracle, plan, run, scene_cxo  # noqa: E402
 from tools.scenarios.axes import AXES, BUNDLES, Case, WAY  # noqa: E402
 from tools.scenarios.observe import MISSING  # noqa: E402
 
@@ -162,7 +163,9 @@ class CodexRecordShapes(unittest.TestCase):
 
 class OracleIsIndependent(unittest.TestCase):
     def test_oracle_and_axes_never_import_board(self):
-        code = ('import sys; import tools.scenarios.oracle, tools.scenarios.axes; '
+        """The independence of the oracle: contract.py, oracle.py, plan.py and axes.py (what the truth is made of) load without the board. observe.py, the adapter that reads what the board
+        shows, is the one file of tools/scenarios that does import it (CONTRACT O3)."""
+        code = ('import sys; import tools.scenarios.oracle, tools.scenarios.axes, tools.scenarios.contract, tools.scenarios.plan; '
                 'bad = [m for m in sys.modules if m == "board" or m.startswith("board.")]; '
                 'sys.exit("board imported: %s" % bad if bad else 0)')
         r = subprocess.run([sys.executable, '-c', code], cwd=REPO, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'))
@@ -172,11 +175,163 @@ class OracleIsIndependent(unittest.TestCase):
         import ast
         with open(os.path.join(REPO, 'board', 'facts.py')) as f:
             tree = ast.parse(f.read())
-        funcs = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
-        self.assertEqual(funcs, [], 'board/facts.py defines shapes and enumerations only')
+        allowed = {id(f) for c in ast.walk(tree) if isinstance(c, ast.ClassDef) and c.name == 'LaunchKey' for f in c.body if isinstance(f, ast.FunctionDef) and f.name == 'gkey'}
+        funcs = [n.name for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and id(n) not in allowed]
+        self.assertEqual(funcs, [], 'board/facts.py defines shapes and enumerations only (and the one method LaunchKey.gkey, CONTRACT 2.1)')
         imported = {a.name.split('.')[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
         imported |= {n.module.split('.')[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
         self.assertLessEqual(imported, {'re', 'dataclasses', 'typing'})
+
+
+class ContractCases(unittest.TestCase):
+    """`contract.truth` is the oracle of the 0.3.0 contract (CONTRACT.md J1-J20): the table of cases (tests/data/contract_cases.json, 3.1) is its own check, and the same function gives
+    the truth of the structure axes of the scenario generator. The unit tests of the judgment read the same table, so the two readings of the contract cannot drift apart unseen."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(REPO, 'tests', 'data', 'contract_cases.json'), encoding='utf-8') as f:
+            cls.table = json.load(f)
+
+    def test_the_constants_are_the_tables(self):
+        self.assertEqual(contract.CONSTS, self.table['consts'])
+
+    def test_every_case_and_every_step_is_reproduced(self):
+        bad, compared = [], 0
+        for c in self.table['cases']:
+            for k, inp, want in contract.steps(c):
+                compared += len(want)
+                bad += ['%s step %d: %s' % (c['id'], k, key) for key, _g, _w in contract.compare(contract.truth(inp), want)]
+        self.assertEqual(bad, [], 'the oracle and the table differ: a difference is a question for the contract, the table is not edited here')
+        self.assertGreater(compared, 200)
+
+    def differences(self, judge):
+        """The ids of the cases (and steps) a judge that is not the contract's reproduces wrongly."""
+        bad = set()
+        for c in self.table['cases']:
+            for k, inp, want in contract.steps(c):
+                try:
+                    got = judge(copy.deepcopy(inp)).truth()                             # (a judge may take things out of its input)
+                except Exception:                                               # noqa: BLE001  (a rule taken out may break another: that is a difference as well)
+                    bad.add('%s/%d' % (c['id'], k))
+                    continue
+                if contract.compare(got, want):
+                    bad.add('%s/%d' % (c['id'], k))
+        return bad
+
+    def test_the_table_catches_a_change_of_rule(self):
+        """The table is only a check if it notices a rule that is not the contract's. Each mutation stands for a row of the table at the end of CONTRACT 4.5 (the rule put back to an
+        earlier or a looser shape) and the cases that row names must be among the ones that differ."""
+        class NoStartBoundary(contract.Judge):
+            def fresh(self, w):                                                   # a save just before the start of the run counts (the 2nd revision's slack)
+                meta = self.files.get(w['path'])
+                return bool(meta and w.get('span') and w['span'][0] - self.EPS <= meta['mtime'] <= w['span'][1] + self.GRACE and (w['out'] is None or meta.get('body') == w['out']))
+
+        class NoSaveCheck(contract.Judge):
+            def confirmed(self, w):                                               # a checked event is confirmed without looking at the disk
+                return w['ok'] is True
+
+        class FailureHoldsNothing(contract.Judge):
+            def unsure_attempt(self, w):                                          # a failed attempt is "did not write"
+                return w['kind'] in contract.AUTHORING and not w['confirmed'] and w['ok'] is not False
+
+        class NoUnsureHold(contract.Judge):
+            def unsure_attempt(self, w):                                          # an earlier attempt that is not confirmed holds nothing
+                return False
+
+        class LastAttemptIsLastConfirmed(contract.Judge):
+            def last_attempt(self, paths):                                        # La = Lc: only a confirmed write takes a conclusion back
+                return self.last_confirmed(paths)
+
+        class DiskRemovesRivals(contract.Judge):
+            def rivals(self, kind, scope, paths, lc):                             # a rival that is gone from the disk is no rival (rivals within C)
+                return [p for p in super().rivals(kind, scope, paths, lc) if p in self.files and self.files[p]['size'] > 0]
+
+        class LaunchWindowIsRival(contract.Judge):
+            def window_hint(self, p):                                             # O2 not applied: the window of the call that launched the agent is a rival of its own
+                meta = self.files.get(p)
+                if not meta:
+                    return None
+                m = meta['mtime']
+                hi = m + 1 if meta.get('coarse') else m
+                cands = []
+                for a in self.agents + [dict(id='orch', windows=self.orch['windows'], windows_capped=None)]:
+                    for w in a['windows']:
+                        t1 = w['t1'] if w['t1'] is not None else float('inf')
+                        if w['t0'] <= hi + self.EPS and t1 >= m - self.EPS and p not in [self.real(r) for r in w['reads']]:
+                            cands.append((a['id'], w))
+                return {'kind': 'window', 'agent': cands[0][0]} if len(cands) == 1 and cands[0][0] != 'orch' and cands[0][1]['ok'] is True else None
+
+        class RoomInTheFirstFolderByPath(contract.Judge):
+            def _rooms(self):                                                     # O1 not applied: "F or one below", the first F by path
+                rooms, taken = {}, set()
+                groups = {}
+                for a in self.agents:
+                    if a['launch']:
+                        groups.setdefault(contract.gkey(a['launch']), []).append(a)
+                for g, ms in sorted(groups.items(), key=lambda kv: str(kv[0])):
+                    own = {a['id']: self.own_files(a) for a in ms}
+                    cand = sorted({x for ps in own.values() for p in ps for x in (contract.parent(p), contract.parent(contract.parent(p)))})
+                    for f in cand:
+                        mine = [a for a in ms if a['id'] not in taken and any(contract.in_reach(p, f) for p in own[a['id']])]
+                        if len(mine) >= 2 and not (self.is_common(f) or self.round_dirs_of.get(f) or self.unit_below(f) or f in rooms):
+                            files = {a['id']: next(p for p in own[a['id']] if contract.in_reach(p, f)) for a in mine}
+                            rooms[f] = dict(kind='cells', sure=False, why='launch', members=sorted(files), files=sorted(files.values()))
+                            taken |= set(files)
+                return rooms, {f: r['files'] for f, r in rooms.items()}
+
+        rows = (('O1 방의 폴더 = 구성원 자기 .md가 직접 든 폴더(옛: 경로순 첫 F)', RoomInTheFirstFolderByPath, {'C85', 'C86'}),
+                ('O2 힌트: 띄운 호출의 창은 경쟁이 아님', LaunchWindowIsRival, {'C84'}),
+                ('3차 J1 F 시작 쪽 −WIN_EPS', NoStartBoundary, {'C73'}),
+                ('J1 F 없이 CHECKED 사건 확정', NoSaveCheck, {'C15', 'C61', 'C62', 'C63', 'C64/2', 'C73', 'C74', 'C75', 'C76', 'C80'}),
+                ('4차 J3 ② 실패는 보류 안 함', FailureHoldsNothing, {'C83'}),
+                ('J3 ② 앞선 미확인 시도 보류 없음', NoUnsureHold, {'C62', 'C83'}),
+                ('3차 J15 L = 확정 사건만(La = Lc)', LastAttemptIsLastConfirmed, {'C74', 'C76', 'C81'}),
+                ('4차 J15 디스크가 경쟁 후보를 뺌', DiskRemovesRivals, {'C79'}))
+        for row, judge, must in rows:
+            got = {x for x in self.differences(judge)}
+            got |= {x.split('/')[0] for x in got}                                  # a case named without a step is any of its steps
+            self.assertTrue(must <= got, '%s: the table should catch it in %s, it caught %s' % (row, sorted(must), sorted(got)))
+        self.assertEqual(self.differences(contract.Judge), set())
+
+    def test_the_table_has_unique_ids_and_only_the_keys_of_the_format(self):
+        ids = [c['id'] for c in self.table['cases']]
+        self.assertEqual(len(ids), len(set(ids)))
+        known = {'listed', 'hinted', 'current', 'cells', 'placed', 'rooms', 'finals', 'closable', 'diag'}
+        for c in self.table['cases']:
+            self.assertLessEqual(set(c['expect']), known, c['id'])
+            for t in c['then']:
+                self.assertLessEqual(set(t['expect']), known, c['id'])
+
+    def test_the_table_holds_nothing_personal(self):
+        text = json.dumps(self.table, ensure_ascii=False)
+        self.assertNotRegex(text, r'/home/|/Users/|@[A-Za-z0-9-]+\.[a-z]|\b\d{1,3}(?:\.\d{1,3}){3}\b|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-')
+
+    def test_the_truth_is_pure(self):
+        c = next(x for x in self.table['cases'] if x['id'] == 'C71')
+        before = json.dumps(c, sort_keys=True)
+        one = contract.truth(c)
+        self.assertEqual(json.dumps(c, sort_keys=True), before)
+        self.assertEqual(json.dumps(contract.truth(c), sort_keys=True), json.dumps(one, sort_keys=True))
+        for _k, inp, _w in contract.steps(c):
+            contract.truth(inp)
+        self.assertEqual(json.dumps(c, sort_keys=True), before)
+
+    def test_the_truth_follows_the_structure_and_nothing_else(self):
+        """A conclusion needs a write of the orchestrator's or an agent's that proves it; take it away and the final is unconfirmed, give it back as a copy (no event) and it still is."""
+        c = copy.deepcopy(next(x for x in self.table['cases'] if x['id'] == 'C48'))
+        self.assertTrue(contract.truth(c)['finals']['talk']['confirmed'])
+        c['agents'] = [dict(a, writes=[w for w in a['writes'] if not w['path'].endswith('ruling.md')]) for a in c['agents']]
+        t = contract.truth(c)['finals']['talk']
+        self.assertFalse(t['confirmed'])
+        self.assertEqual(t['why'], ['none'])
+        self.assertEqual(t['candidates'], ['talk/ruling.md'])             # the file is still a candidate: the disk shows it, no event proves it
+
+    def test_a_failed_write_makes_no_cell_and_an_unknown_one_makes_no_owner(self):
+        t = contract.truth(next(x for x in self.table['cases'] if x['id'] == 'C02'))
+        self.assertEqual((t['listed'], t['cells']), ([], {}))
+        t = contract.truth(next(x for x in self.table['cases'] if x['id'] == 'C03'))
+        cell, = t['cells'].values()
+        self.assertEqual((cell['owner'], cell['state'], cell['previous']), (None, 'previous', True))
 
 
 class Grading(unittest.TestCase):
@@ -261,10 +416,10 @@ class HonestGrading(unittest.TestCase):
 
     def test_the_file_of_a_seat_is_graded_with_the_spelling_of_its_round_folder(self):
         """`r1/B.md` and `r01/B.md` are two files: a board that names the one in the other folder is wrong, whichever seat, round and state it shows."""
-        case = dict(rdir='both', fstate='none', kind='cli', life='running')
-        got = self.graded([('B', 'writing')], **case)
+        case = dict(rdir='both', fstate='written', kind='sub', life='running')
+        got = self.graded([('B', 'draft')], **case)
         self.assertEqual({k: v for k, v in got.items() if v != 'pass' and not k.startswith('diag:')}, {})      # the right file, the right state
-        got = self.graded([('B', 'writing')], folder='r01', **case)
+        got = self.graded([('B', 'draft')], folder='r01', **case)
         self.assertEqual(got['placements'], 'wrong')                                              # the same seat, round and state in the other folder
         self.assertEqual((got['unit'], got['round'], got['seat'], got['cell']), ('pass', 'pass', 'pass', 'pass'))     # the fields that never saw the folder
         got = self.graded([('B', 'draft'), ('B', 'draft')], **case)
@@ -502,6 +657,236 @@ class BuilderMatchesOracle(unittest.TestCase):
         self.assertGreater(checked, 200)
 
 
+class NoiseAxes(unittest.TestCase):
+    """The axes that only change words (CONTRACT 3.3, layer L3) are noise: a case that differs from another in them alone holds the same facts and has the same truth. The oracle
+    never reads them (it reads plan.py's facts, which have no word in them), and BuilderMatchesPlan shows that the records hold exactly those facts."""
+
+    DEB = {'lang': ('en', 'ko'), 'marker': ('none', 'own', 'cross', 'quoted'), 'decl': ('yes', 'no'), 'qform': AXES['qform'], 'rpath': ('abs', 'tilde', 'short', 'folder', 'dotdot', 'instr_only')}
+    ROOM = {'word': AXES['word'], 'lang': AXES['lang'], 'seatmark': AXES['seatmark'], 'ref': AXES['ref'], 'wrap': AXES['wrap']}
+
+    @staticmethod
+    def variants(c, noise):
+        for axis, values in noise.items():
+            if c.v[axis] not in values:
+                continue                                                     # (a path form that is a launch command's output, say, is structure for this case)
+            for value in values:
+                n = axes.normalize(Case(c.bundle, dict(c.v, **{axis: value})))
+                if n.key() != c.key() and all(n.v[a] == c.v[a] for a in c.axes if a not in noise):
+                    yield n
+
+    def facts(self, c):
+        if c.bundle == 'room':
+            return plan.room_scene(c.v).F.case()
+        v = dict(c.v)
+        return plan.deb_scene(v, oracle.life_state(v['kind'], v['life'], 'just_ended', v['os'] == 'mac_nops')[0]).F.case()
+
+    def test_the_words_change_neither_the_facts_nor_the_truth(self):
+        compared = 0
+        for c in run.select():
+            if c.bundle not in ('deb', 'room') or c.twin_of or int(axes.digest(c.id, n=4), 16) % 3:
+                continue
+            base = (self.facts(c), oracle.truth(c))
+            for n in self.variants(c, self.DEB if c.bundle == 'deb' else self.ROOM):
+                self.assertEqual(self.facts(n), base[0], (c.id, n.id))
+                t = oracle.truth(n)
+                shown = lambda truth: ({r: {k: v for k, v in f.items() if k != 'titles'} for r, f in truth.subjects.items()}, truth.diag)      # noqa: E731  (a title is displayed text: the language shows)
+                self.assertEqual(shown(t), shown(base[1]), (c.id, n.id))
+                compared += 1
+        self.assertGreater(compared, 400)
+
+    def test_the_words_change_nothing_the_board_shows_either(self):
+        """The same, read from the board (review P2-6): two cases that differ in words alone leave the board with the same answer in every cell it is asked about (the titles it
+        prints are text and are not compared)."""
+        root = tempfile.mkdtemp(prefix='scen-noise-')
+
+        def reading(c):
+            return {(x.role, x.field): x.gs for x in run.run_case(c, root) if x.field != 'titles'}
+        try:
+            compared, bad = 0, []
+            for c in run.select():
+                if c.bundle not in ('deb', 'room') or c.twin_of or int(axes.digest(c.id, n=4), 16) % 12:
+                    continue
+                base = reading(c)
+                for n in self.variants(c, self.DEB if c.bundle == 'deb' else self.ROOM):
+                    got = reading(n)
+                    compared += 1
+                    if got != base:
+                        bad.append((c.id, n.id, sorted(k for k in set(base) | set(got) if base.get(k) != got.get(k))))
+            self.assertGreater(compared, 500)
+            self.assertEqual(bad[:3], [], '%d of %d pairs differ on the board' % (len(bad), compared))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_a_structure_axis_does_change_them(self):
+        """The control: the axes that are not words change the facts (so the test above is not vacuous)."""
+        base = axes.normalize(Case('deb', dict(role='writer', kind='sub', fstate='written', life='normal_end')))
+        changed = 0
+        for axis, value in (('wmode', 'redirect'), ('role', 'failed_write'), ('fstate', 'none'), ('life', 'running'), ('kind', 'cli'), ('rdir', 'both')):
+            n = axes.normalize(Case('deb', dict(base.v, **{axis: value})))
+            changed += self.facts(n) != self.facts(base)
+        self.assertEqual(changed, 6)
+        room = axes.normalize(Case('room', {}))
+        for axis, value in (('launch', 'far'), ('proof', 'told'), ('shape', 'same'), ('rtime', 'sequential'), ('delivery', 'failed'), ('scratch', 'log')):
+            n = axes.normalize(Case('room', dict(room.v, **{axis: value})))
+            self.assertNotEqual(oracle.truth(n).subjects, oracle.truth(room).subjects, axis) if axis != 'delivery' else None
+
+
+class BuilderMatchesPlan(unittest.TestCase):
+    """The plan (tools/scenarios/plan.py) says, from the axis values, what the records of a debate, room or Codex-orchestrator scene hold: who wrote which file by which tool, who read
+    which, which launch command names which output, who was launched together, which files are on disk. The builder writes the records; they must hold exactly that, since the
+    truth is the contract's judgment of the plan. Built only, the board is not run."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix='scen-plan-')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    @staticmethod
+    def claude_calls(path):
+        """[(tool name, input, is_error or None)] of a Claude record, in order."""
+        rows = _read_lines(path)
+        errors = {blk['tool_use_id']: blk.get('is_error') for d in rows if d.get('type') == 'user' and isinstance(d['message'].get('content'), list)
+                  for blk in d['message']['content'] if blk.get('type') == 'tool_result'}
+        return [(blk['name'], blk['input'], errors.get(blk['id'])) for d in rows if d.get('type') == 'assistant' for blk in d['message']['content'] if blk.get('type') == 'tool_use']
+
+    @staticmethod
+    def codex_items(path):
+        return [d['payload']['item'] for d in _read_lines(path) if d.get('type') == 'event_msg' and d['payload'].get('type') == 'item_completed']
+
+    def check(self, c, b, scene, top, scratch):
+        """The records of the case `c` (built as `b`) against the facts of `scene`; `top` is what the facts' paths hang from, `scratch` the folder `tmp/scratch` of the facts stands for."""
+        facts = scene.F
+        where = lambda rel: os.path.join(scratch, rel[len('tmp/scratch/'):]) if rel.startswith('tmp/scratch/') else os.path.join(top, rel)      # noqa: E731
+        for aid, a in facts.agents.items():
+            if aid not in b.paths:
+                continue
+            rec = b.paths[aid]
+            tool_writes = sorted(where(w['path']) for w in a['writes'] if w['evidence'] == 'tool')
+            shell_writes = [w for w in a['writes'] if w['evidence'] == 'shell']
+            if a['provider'] == 'codex':
+                items = self.codex_items(rec)
+                got = sorted(p for it in items if it['type'] == 'FileChange' and it.get('status') == 'completed' for p in it['changes'])
+                self.assertEqual(got, tool_writes, (c.id, aid, 'a patch'))
+                reads = sorted(where(r['path']) for r in a['reads'])
+                seen = sorted(p['path'] for it in items if it['type'] == 'CommandExecution' for p in it.get('parsed_cmd', []) if p.get('type') == 'read')
+                self.assertEqual(seen, reads, (c.id, aid, 'reads'))
+                continue
+            calls = self.claude_calls(rec)
+            self.assertEqual(sorted(i['file_path'] for n, i, _ in calls if n in ('Write', 'Edit', 'MultiEdit')), tool_writes, (c.id, aid, 'Write'))
+            self.assertEqual(sorted(i['file_path'] for n, i, _ in calls if n == 'Read' and not i['file_path'].endswith('notes.md')),
+                             sorted(where(r['path']) for r in a['reads'] if r['via'] == 'tool'), (c.id, aid, 'Read'))
+            for w in shell_writes:
+                name = os.path.basename(w['path'])
+                hit = [e for n, i, e in calls if n == 'Bash' and name in i['command']]
+                self.assertTrue(hit, (c.id, aid, 'a command that writes', w['path']))
+                self.assertEqual(bool(hit[0]), w['ok'] is False, (c.id, aid, w['path']))                       # the command failed exactly when the facts say it did
+            fails = [w for w in a['writes'] if w['ok'] is False and w['evidence'] in ('tool', 'shell')]
+            if c.bundle == 'ctr':                                                                # every command is a window
+                self.assertEqual(sum(1 for n, i, _ in calls if n == 'Bash'), len(a['windows']), (c.id, aid, 'command windows'))
+            self.assertEqual(sum(1 for n, i, e in calls if e and n in ('Write', 'Bash')), len(fails), (c.id, aid, 'failed writes'))
+        # the launch commands name the outputs the facts say they do (the commands of the orchestrator's own record)
+        if c.bundle in ('deb', 'cpl') and b.main_path.endswith('.jsonl'):
+            launch = [i['command'] for rec in b.paths.values() if rec.endswith('.jsonl') and 'rollout' not in rec for n, i, _ in self.claude_calls(rec)
+                      if n == 'Bash' and ('claude -p' in i['command'] or 'codex exec' in i['command'])]
+            for aid, a in facts.agents.items():
+                for q in a['planned']:
+                    if not q['path'].startswith('tmp/'):
+                        self.assertTrue(any(os.path.basename(q['path']) in cmd for cmd in launch), (c.id, aid, q['path'], launch))
+        # the files of the repository
+        on_disk = set()
+        for dirpath, dirs, files in os.walk(top):
+            dirs[:] = [d for d in dirs if d != '.git']
+            on_disk |= {os.path.relpath(os.path.join(dirpath, f), top) for f in files}
+        want = {rel for rel in facts.files if not rel.startswith('tmp/')}
+        extra = {f for f in on_disk - want if f != 'notes.md'}
+        self.assertEqual((sorted(want - on_disk), sorted(extra)), ([], []), c.id)
+        for rel, meta in facts.files.items():
+            path = where(rel)
+            if os.path.isfile(path):
+                self.assertAlmostEqual(os.path.getmtime(path), b.T(meta['mtime']), delta=0.01, msg=(c.id, rel))
+                self.assertEqual(os.path.getsize(path) > 0, meta['size'] > 0, (c.id, rel))
+                if 'body' in meta:
+                    with open(path) as f:
+                        self.assertEqual(f.read(), meta['body'], (c.id, rel))
+
+    def test_the_debate_scenes(self):
+        n = 0
+        for c in run.select():
+            if c.bundle not in ('deb', 'cpl') or int(axes.digest(c.id, n=4), 16) % 4:
+                continue
+            b = build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+            v = dict(c.v) if c.bundle == 'deb' else dict(c.v, kind='cli', role='writer', nstyle='plain', structure='single', rdir='r1', homonym='none', decl='yes')
+            status = oracle.life_state(v['kind'], v['life'], 'just_ended', v['os'] == 'mac_nops')[0]
+            scene = plan.deb_scene(v, status)
+            self.check(c, b, scene, b.meta['repo'], b.scratch)
+            shutil.rmtree(os.path.join(self.root, axes.digest(c.id, n=10)), ignore_errors=True)
+            n += 1
+        self.assertGreater(n, 100)
+
+    def test_the_room_scenes(self):
+        n = 0
+        for c in run.select():
+            if c.bundle != 'room' or int(axes.digest(c.id, n=4), 16) % 4:
+                continue
+            b = build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+            scene = plan.room_scene(c.v)
+            self.check(c, b, scene, b.work, os.path.join(b.work, 'scratch'))
+            # launched together = the Agent calls are lines of one message; each in a message of its own, or in a line with no message id
+            msgs = [d['message'].get('id') for d in _read_lines(b.paths['orch']) if d.get('type') == 'assistant' for blk in d['message']['content'] if blk.get('type') == 'tool_use' and blk['name'] == 'Agent'
+                    and blk['input']['description'] != 'look around']
+            groups = [scene.F.agents['p%d' % (i + 1)]['launch'] and scene.F.agents['p%d' % (i + 1)]['launch']['group'] for i in scene.page]
+            self.assertEqual(len(msgs), len(groups), c.id)
+            for (m1, g1), (m2, g2) in itertools.combinations(zip(msgs, groups), 2):
+                self.assertEqual((m1 is not None and m1 == m2), (g1 is not None and g1 == g2), (c.id, m1, m2, g1, g2))
+            shutil.rmtree(os.path.join(self.root, axes.digest(c.id, n=10)), ignore_errors=True)
+            n += 1
+        self.assertGreater(n, 150)
+
+    def test_the_contract_scenes(self):
+        n = 0
+        for c in run.select():
+            if c.bundle != 'ctr':
+                continue
+            b = build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+            scene = plan.ctr_scene(c.v)
+            self.check(c, b, scene, b.meta['repo'], b.scratch)
+            orch_cmds = sum(1 for nm, i, _ in self.claude_calls(b.paths['orch']) if nm == 'Bash')
+            self.assertEqual(orch_cmds, len(scene.F.orch['windows']), (c.id, 'the commands of the orchestrator'))
+            msgs = {}
+            for d in _read_lines(b.paths['orch']):
+                if d.get('type') == 'assistant':
+                    for blk in d['message']['content']:
+                        if blk.get('type') == 'tool_use' and blk['name'] in ('Agent', 'Bash') and ('launch' in blk['input'].get('description', '') or blk['name'] == 'Agent'):
+                            desc = blk['input'].get('description', '')
+                            role = desc.split()[0] if blk['name'] == 'Agent' else 'S'
+                            msgs[role] = d['message'].get('id')
+            if c.v['launch'] == 'call':
+                msgs['P'] = msgs['S']                                                                     # one Bash call starts both
+            ids = [r for r in scene.F.agents if r in msgs]
+            for ra, rb in itertools.combinations(ids, 2):
+                ga, gb = scene.F.agents[ra]['launch'], scene.F.agents[rb]['launch']
+                same_plan = bool(ga and gb and ga['group'] == gb['group'])
+                same_records = msgs[ra] is not None and msgs[ra] == msgs[rb]
+                self.assertEqual(same_records, same_plan, (c.id, ra, rb, msgs[ra], msgs[rb]))
+            shutil.rmtree(os.path.join(self.root, axes.digest(c.id, n=10)), ignore_errors=True)
+            n += 1
+        self.assertGreater(n, 100)
+
+    def test_the_codex_orchestrator_debate_scenes(self):
+        n = 0
+        for c in run.select():
+            if c.bundle != 'cxo' or c.v['topic'] == 'none' or oracle.cxo_truth(c).subjects.get('child', {}).get('listed') == 'none':
+                continue
+            b = build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+            self.check(c, b, plan.cxo_talk_scene(c.v), b.meta['repo'], b.scratch)
+            shutil.rmtree(os.path.join(self.root, axes.digest(c.id, n=10)), ignore_errors=True)
+            n += 1
+        self.assertGreater(n, 10)
+
+
 class OracleDecisions(unittest.TestCase):
     """The decisions the oracle's truth follows, one assertion each. They are about the truth, not about the board."""
 
@@ -553,8 +938,8 @@ class OracleDecisions(unittest.TestCase):
         def seat(fstate):
             c = axes.normalize(Case('deb', {'kind': 'sub', 'nstyle': 'collide', 'rpath': 'var_ext', 'marker': 'own', 'fstate': fstate}))
             return oracle.truth(c).subjects['child']['seat']
-        self.assertEqual(seat('written'), 'B_gate')
-        self.assertEqual(seat('none'), 'B')                                                                # no write: the plain answer stays
+        self.assertEqual(seat('written'), 'B_gate')                                                       # the file it wrote, under the name it wrote it
+        self.assertIsNone(seat('none'))                                                                   # no write: nothing seats it, whatever files of its letter are there
 
     def test_limit_group_needs_two_members_with_the_same_reset(self):
         def diag(at):
@@ -586,21 +971,23 @@ class OracleDecisions(unittest.TestCase):
             c = axes.normalize(Case('aff', {'bait': bait}))
             self.assertEqual(('orphan_launch', 'orch') in oracle.truth(c).diag, orphan, bait)
 
-    def test_a_successful_write_settles_the_folder_of_an_ambiguous_path(self):
+    def test_a_write_names_the_folder_whatever_the_instruction_fits(self):
+        """Two debates fit the relative path of the instruction; the write that was made names its folder, and no write names none (the instruction is not read)."""
         def truth(fstate):
             c = axes.normalize(Case('deb', {'homonym': 'two', 'kind': 'cli', 'fstate': fstate}))
             return oracle.truth(c)
         T = truth('written')
         self.assertEqual((T.subjects['child']['unit'], T.subjects['child']['seat'], T.subjects['child']['role']), ('docs/rev', 'B', 'writer'))
-        self.assertIn(('path_ambiguous', 'child'), T.diag)                                    # the instruction itself is still ambiguous
+        self.assertEqual(T.diag, [])                                                          # `path_ambiguous` is gone: no instruction is read
         T = truth('none')
-        self.assertEqual((T.subjects['child']['unit'], T.subjects['child']['seat']), (None, None))
-        self.assertIn(('path_ambiguous', 'child'), T.diag)
+        self.assertEqual((T.subjects['child']['seat'], T.subjects['child']['role']), (None, 'none'))
+        self.assertEqual(T.diag, [])
 
-    def test_a_reader_needs_a_cell_to_be_a_reader_of(self):
-        c = axes.normalize(Case('deb', {'structure': 'flat', 'role': 'reader', 'decl': 'no'}))
+    def test_a_reader_is_somebody_who_read_a_cell(self):
+        """The read of a file that is somebody's cell makes a reader; a flat review has no cell, so its report is only a file."""
+        c = axes.normalize(Case('deb', {'structure': 'flat', 'role': 'reader'}))
         self.assertEqual(oracle.truth(c).subjects['child']['role'], 'none')
-        c = axes.normalize(Case('deb', {'structure': 'flat', 'role': 'reader', 'decl': 'yes'}))
+        c = axes.normalize(Case('deb', {'structure': 'single', 'role': 'reader'}))
         self.assertEqual(oracle.truth(c).subjects['child']['role'], 'reader')
 
     def test_a_tag_alone_is_no_seat(self):
@@ -621,6 +1008,8 @@ class OracleDecisions(unittest.TestCase):
         self.assertEqual(reason_of(cell('sta', 'status', 'wrong', 'done', 'ended', skind='cli', life='normal_end', flaw='torn')), 'S-TORN')
         self.assertEqual(reason_of(cell('cpl', 'status', 'miss', 'running', 'MISSING', spawner='grand')), 'C-GRAND-SCREEN')
         self.assertEqual(reason_of(cell('cpl', 'status', 'miss', 'running', 'MISSING', spawner='sub')), 'C-UNLINKED')
+        self.assertEqual(reason_of(cell('cpl', 'seat', 'miss', 'B', None, spawner='grand', rpath='redirect', life='normal_end')), 'J1-LAUNCH-REDIRECT')      # the launcher's own redirect owns the file
+        self.assertEqual(reason_of(cell('cpl', 'seat', 'miss', 'B', None, spawner='sub', rpath='var', life='normal_end')), 'J1-LAUNCH-REDIRECT')
 
 
 class LaterShapes(unittest.TestCase):
@@ -796,15 +1185,14 @@ class LaterShapes(unittest.TestCase):
         got = {'cells': frozenset(['docs/rev', 'docs/rev/t1', 'docs/rev/t2'])}
         self.assertEqual(run.grade('units', oracle.truth(c).subjects['listing']['units'], got['cells']), 'wrong')
 
-    def test_a_tag_with_a_path_that_cannot_be_resolved_seats_nobody(self):
-        c = axes.normalize(Case('deb', {'kind': 'sub', 'rpath': 'var_ext', 'marker': 'none', 'fstate': 'none'}))
-        T = oracle.truth(c)
-        self.assertEqual((T.subjects['child']['seat'], T.subjects['child']['role']), (None, 'none'))
-        self.assertIn(('path_unresolved', 'child'), T.diag)
-        c = axes.normalize(Case('deb', {'kind': 'sub', 'rpath': 'var_ext', 'marker': 'own', 'fstate': 'none'}))
-        self.assertEqual(oracle.truth(c).subjects['child']['seat'], 'B')                                              # its own marker does
+    def test_a_path_nobody_can_resolve_and_a_marker_seat_nobody_and_a_write_of_its_own_does(self):
+        for marker in ('none', 'own'):
+            c = axes.normalize(Case('deb', {'kind': 'sub', 'rpath': 'var_ext', 'marker': marker, 'fstate': 'none'}))
+            T = oracle.truth(c)
+            self.assertEqual((T.subjects['child']['seat'], T.subjects['child']['role']), (None, 'none'), marker)        # no instruction is read, so no marker seats anybody either
+            self.assertEqual(T.diag, [], marker)                                                                       # `path_unresolved` is gone
         c = axes.normalize(Case('deb', {'kind': 'sub', 'rpath': 'var_ext', 'marker': 'none', 'fstate': 'written', 'nstyle': 'numbered'}))
-        self.assertEqual(oracle.truth(c).subjects['child']['seat'], 'opus1')                                          # so does a write of its own, under the name it wrote
+        self.assertEqual(oracle.truth(c).subjects['child']['seat'], 'opus1')                                          # a write of its own does, under the name it wrote
 
     def test_a_reader_that_only_names_the_report_is_a_reader_in_both_languages(self):
         for lang in ('en', 'ko'):
@@ -826,42 +1214,42 @@ class LaterShapes(unittest.TestCase):
             c, b = self.build('deb', role='quoter', marker='quoted', lang=lang, kind='cli')
             T = oracle.truth(c).subjects['child']
             self.assertEqual((T['seat'], T['role']), (None, 'none'))
-            self.assertIn(('debate_in_misc', 'child'), oracle.truth(c).diag)
+            self.assertEqual(oracle.truth(c).diag, [])
             text = ' '.join(cmd for _, cmd, _ in self.bash(b.paths['orch']))
             self.assertIn('[REVIEW-B]', text)
             self.assertIn('"' if lang == 'en' else '\u201c', text[text.index('[REVIEW-B]') - 3:text.index('[REVIEW-B]')])      # inside quotes
         self.assertEqual(axes.normalize(Case('deb', {'role': 'writer', 'marker': 'quoted'})).v['marker'], 'none')
 
     def test_a_collision_of_names_and_a_marker_only(self):
-        """With a marker only, the seat of `nstyle=collide` is the plain letter, and the folder has files of that letter with content: the cell is done, not missing.
-        With a marker only and two round folders, nothing says which folder is meant: held."""
+        """A marker seats nobody, and files of the participant's letter that others wrote are files, not its cell: only a write of its own is. Two round folders of different spelling
+        say so (`alias_collision`), and the write names the folder."""
         c = axes.normalize(Case('deb', {'kind': 'sub', 'rpath': 'var_ext', 'nstyle': 'collide', 'marker': 'own', 'fstate': 'none', 'life': 'taskstop_kill'}))
         T = oracle.truth(c).subjects['child']
-        self.assertEqual((T['seat'], T['cell']), ('B', 'done'))
+        self.assertEqual((T['seat'], T['cell'], T['placements']), (None, None, frozenset()))
         self.assertTrue(os.path.getsize(os.path.join(self.build('deb', **{k: c.v[k] for k in ('kind', 'rpath', 'nstyle', 'marker', 'fstate', 'life')})[1].meta['unit'], 'r1', 'B.md')) > 0)
         c = axes.normalize(Case('deb', {'kind': 'cli', 'rpath': 'instr_only', 'marker': 'own', 'rdir': 'both'}))
         T = oracle.truth(c)
         self.assertEqual((T.subjects['child']['seat'], T.subjects['child']['role']), (None, 'none'))
         self.assertIn(('alias_collision', 'child'), T.diag)
-        c = axes.normalize(Case('deb', {'kind': 'cli', 'rpath': 'abs', 'marker': 'own', 'rdir': 'both'}))
-        self.assertEqual(oracle.truth(c).subjects['child']['seat'], 'B')                                              # a path names the folder
         c = axes.normalize(Case('deb', {'kind': 'cli', 'rpath': 'instr_only', 'marker': 'own', 'rdir': 'both', 'fstate': 'written'}))
-        self.assertEqual(oracle.truth(c).subjects['child']['seat'], 'B')                                              # a successful write fixes the folder
+        T = oracle.truth(c)
+        self.assertEqual((T.subjects['child']['seat'], T.subjects['child']['placements']), ('B', frozenset(['docs/rev|1|B|r1/B'])))        # the write fixes the folder
+        self.assertIn(('alias_collision', 'child'), T.diag)
 
     def test_two_round_folders_of_different_spelling_hold_two_files(self):
         c, b = self.build('deb', rdir='both', kind='cli', fstate='none')
         T = oracle.truth(c)
         self.assertIn(('alias_collision', 'child'), T.diag)
-        self.assertEqual(T.subjects['child']['cell'], 'writing')                                                       # the participant's own file is not there
+        self.assertIsNone(T.subjects['child']['cell'])                                                                 # it was told a path and wrote nothing, and no launch names a file
         unit = b.meta['unit']
         self.assertTrue(os.path.getsize(os.path.join(unit, 'r01', 'B.md')) > 0)                                        # somebody else's file of the same name is
         self.assertFalse(os.path.exists(os.path.join(unit, 'r1', 'B.md')))
         self.assertEqual(axes.normalize(Case('deb', {'rdir': 'both', 'role': 'reader'})).v['rdir'], 'r1')
 
-    def test_a_file_written_by_the_launch_beside_the_report_is_no_second_seat(self):
+    def test_a_file_the_launch_writes_beside_the_report_is_a_cell_of_its_own(self):
         for kind, flag in (('codex', ' -o '), ('cli', ' > ')):
             c, b = self.build('deb', rpath='dash_o_aux', kind=kind, life='normal_end', fstate='written')
-            self.assertEqual(oracle.truth(c).subjects['child']['placements'], {'docs/rev|1|B|r1/B'})
+            self.assertEqual(oracle.truth(c).subjects['child']['placements'], {'docs/rev|1|B|r1/B', 'docs/rev|1|B_last|r1/B_last'})       # the run asked for it: its cell, beside the one it wrote
             aux = os.path.join(b.meta['unit'], 'r1', 'B_last.md')
             self.assertTrue(os.path.exists(aux), kind)
             launch = [cmd for _, cmd, _ in self.bash(b.paths['orch']) if kind + ' ' in cmd or 'claude -p' in cmd][0]
@@ -869,55 +1257,54 @@ class LaterShapes(unittest.TestCase):
             self.assertIn(b.meta['report'], launch)                                                                  # the report path is in the instruction too
         self.assertEqual(axes.normalize(Case('deb', {'rpath': 'dash_o_aux', 'kind': 'sub'})).v['rpath'], 'abs')
 
-    def test_two_flat_reviews_that_declare_the_same_file_hold_the_seat_until_a_write(self):
-        for fstate, seat in (('none', None), ('written', 'sol')):
+    def test_two_flat_reviews_that_declare_the_same_file_are_no_debate_and_hold_no_seat(self):
+        for fstate in ('none', 'written'):
             c, b = self.build('deb', structure='flat', homonym='two', kind='cli', fstate=fstate)
             T = oracle.truth(c)
-            self.assertEqual(T.subjects['child']['seat'], seat)
-            self.assertIn(('path_ambiguous', 'child'), T.diag)
-            self.assertEqual(T.subjects['listing']['units'], {'docs/rev', 'docs/rev2'})
+            self.assertIsNone(T.subjects['child']['seat'])                                                          # a folder with a guide and files beside it has no round folder: it is no debate
+            self.assertEqual(T.diag, [])
+            self.assertEqual(T.subjects['listing']['units'], frozenset())
             for u in (b.meta['unit'], b.meta['unit2']):
                 with open(os.path.join(u, 'brief.md')) as fh:
                     self.assertIn('sol.md', fh.read())                                                              # both declare it
 
     def test_a_participant_whose_process_cannot_be_seen_is_still_working_for_the_cell(self):
         for kind in ('cli', 'codex'):
-            for fstate, cell in (('none', 'writing'), ('written', 'draft')):
+            for fstate, cell in (('none', None), ('written', 'draft')):
                 c = axes.normalize(Case('deb', {'kind': kind, 'life': 'stalled_silent', 'os': 'mac_nops', 'fstate': fstate}))
                 self.assertEqual((c.v['os'], c.v['life']), ('mac_nops', 'stalled_silent'))
-                self.assertEqual(oracle.truth(c).subjects['child']['cell'], cell)                                   # otherwise as before: quiet, not over
+                self.assertEqual(oracle.truth(c).subjects['child']['cell'], cell)                                   # a quiet participant that wrote is at work (`unknown` is open), one that wrote nothing has no cell
         self.assertEqual(axes.normalize(Case('deb', {'kind': 'sub', 'os': 'mac_nops'})).v['os'], 'linux')            # a sub-agent has no process
         self.assertEqual(axes.normalize(Case('deb', {'kind': 'cli', 'life': 'normal_end', 'os': 'mac_nops'})).v['os'], 'mac')
 
     # --- a launch that writes the report's own name into the other spelling of the round folder ---
     def test_a_launch_that_writes_the_reports_name_into_the_other_round_folder_has_written_another_file(self):
-        """`Write r1/B.md` in the instruction, `-o r01/B.md` (or `> r01/B.md`) in the launch, the file in `r01` only: the seat is `r1/B`, and the report was not submitted."""
+        """`Write r1/B.md` in the instruction, `-o r01/B.md` (or `> r01/B.md`) in the launch, the file in `r01` only: the instruction is not read, the launch's output is the cell."""
         for kind, flag in (('codex', ' -o '), ('cli', ' > ')):
             c, b = self.build('deb', aux='alias', kind=kind, life='normal_end', fstate='none', rpath='short')
             self.assertEqual((c.v['aux'], c.v['rdir'], c.v['rpath']), ('alias', 'both', 'short'))
             unit = b.meta['unit']
             self.assertTrue(os.path.getsize(os.path.join(unit, 'r01', 'B.md')) > 0, kind)                              # the file is in r01 only ...
-            self.assertFalse(os.path.exists(os.path.join(unit, 'r1', 'B.md')), kind)                                   # ... and the seat's own file is not there
+            self.assertFalse(os.path.exists(os.path.join(unit, 'r1', 'B.md')), kind)                                   # ... and the file the instruction names is not there
             self.assertTrue(os.path.isdir(os.path.join(unit, 'r1')), kind)
             launch = [cmd for _, cmd, _ in self.bash(b.paths['orch']) if kind + ' ' in cmd or 'claude -p' in cmd][0]
             self.assertIn(flag + 'r01/B.md', launch)                                                                  # the launch writes the other spelling
             self.assertIn('`r1/B.md`', launch)                                                                        # the instruction says `r1/B.md`
             self.assertTrue(launch.startswith('cd %s &&' % unit), launch)                                              # both are relative to the folder the launch runs in
             T = oracle.truth(c)
-            self.assertEqual(T.subjects['child']['placements'], {'docs/rev|1|B|r1/B'})
-            self.assertEqual((T.subjects['child']['seat'], T.subjects['child']['cell']), ('B', 'missing'))              # not submitted, whatever sits in the other folder
-            self.assertIn(('alias_collision', 'child'), T.diag)
+            self.assertEqual(T.subjects['child']['placements'], {'docs/rev|1|B|r01/B'})                                # the cell is the file the launch was told to fill
+            self.assertEqual((T.subjects['child']['seat'], T.subjects['child']['cell']), ('B', 'done'))               # the run ended well and the file holds its last message
+            self.assertIn(('alias_collision', 'child'), T.diag)                                                       # two round folders of one round
         c, b = self.build('deb', aux='alias', kind='codex', life='running', fstate='none', rpath='abs')
         self.assertFalse(os.path.exists(os.path.join(b.meta['unit'], 'r01', 'B.md')))                                  # `-o` writes when the run ends
         self.assertTrue(os.path.isdir(os.path.join(b.meta['unit'], 'r01')))
         self.assertEqual(oracle.truth(c).subjects['child']['cell'], 'writing')
-        self.assertIn(('alias_collision', 'child'), oracle.truth(c).allowed)                                           # no file of that name in the other folder yet: not asked
-        self.assertNotIn(('alias_collision', 'child'), oracle.truth(c).diag)
+        self.assertIn(('alias_collision', 'child'), oracle.truth(c).diag)                                              # the folders say it, whatever the files
         c, b = self.build('deb', aux='alias', kind='cli', life='running', fstate='none', rpath='abs')
         self.assertEqual(os.path.getsize(os.path.join(b.meta['unit'], 'r01', 'B.md')), 0)                              # a redirect creates it empty at the launch
         c, b = self.build('deb', aux='alias', kind='codex', life='normal_end', fstate='written', rpath='abs')
-        self.assertTrue(os.path.getsize(os.path.join(b.meta['unit'], 'r1', 'B.md')) > 0)                               # both files: the seat's own is the cell
-        self.assertEqual(oracle.truth(c).subjects['child']['cell'], 'done')
+        self.assertTrue(os.path.getsize(os.path.join(b.meta['unit'], 'r1', 'B.md')) > 0)                               # both files
+        self.assertEqual(oracle.truth(c).subjects['child']['placements'], {'docs/rev|1|B|r1/B', 'docs/rev|1|B|r01/B'})   # both are its cells: it wrote one and the launch filled the other
 
     def test_an_aux_output_in_the_other_round_folder_needs_a_launched_writer_in_a_debate_with_round_folders(self):
         for v in ({'kind': 'sub'}, {'role': 'reader'}, {'structure': 'flat'}, {'structure': 'deep3'}, {'homonym': 'two'}, {'nstyle': 'numbered'}):
@@ -964,7 +1351,7 @@ class LaterShapes(unittest.TestCase):
             c, b = self.build('deb', role='failed_write', wmode=mode)
             T = oracle.truth(c)
             self.assertEqual((T.subjects['child']['seat'], T.subjects['child']['role']), (None, 'none'), mode)
-            self.assertIn(('debate_in_misc', 'child'), T.diag)
+            self.assertEqual(T.diag, [], mode)
             calls = self.own_calls(b)
             self.assertEqual([err for cmd, err in calls if 'B.md' in cmd], [True], (mode, calls))                          # the write is attempted and fails
             self.assertNotIn('Write', self.tools_of(b), mode)
@@ -981,7 +1368,7 @@ class LaterShapes(unittest.TestCase):
             c, b = self.build('deb', role=role, wmode=mode, kind='sub')
             T = oracle.truth(c)
             self.assertEqual((T.subjects['child']['seat'], T.subjects['child']['role']), (None, 'none'), mode)
-            self.assertIn(('debate_in_misc', 'child'), T.diag)
+            self.assertEqual(T.diag, [], mode)
             note = [cmd for cmd, err in self.own_calls(b) if b.meta['report'] in cmd]
             self.assertEqual(len(note), 1, (mode, self.own_calls(b)))
             cmd = note[0]
@@ -1061,11 +1448,12 @@ class LaterShapes(unittest.TestCase):
         self.assertEqual({c.v['busy'] for c in cases if c.bundle == 'aff'}, set(AXES['busy']))
         b = types.SimpleNamespace(ids={}, t0=0)
 
-        def reason(bundle, field, ws, gs, **v):
+        def reason(bundle, field, ws, gs, result='wrong', **v):
             c = axes.normalize(Case(bundle, v))
-            return run.reason_of(run.Cell(c, 'child', field, 'wrong', ws, gs, b))
-        self.assertEqual(reason('deb', 'placements', 'x', 'y', aux='alias', kind='codex'), 'B-ALIAS-FILE')
-        self.assertEqual(reason('deb', 'seat', 'opus1', None, wmode='tee', rpath='var_ext', marker='none', nstyle='numbered', fstate='written'), 'B-BASH-WRITE')
+            return run.reason_of(run.Cell(c, 'child', field, result, ws, gs, b))
+        self.assertEqual(reason('deb', 'placed', 'docs/rev|-|guide_read', 'MISSING', 'miss', role='reader'), 'J11-PLACED')
+        self.assertEqual(reason('deb', 'unit', 'docs/rev', None, 'miss', role='reader'), 'J11-PLACED')
+        self.assertIsNone(reason('deb', 'seat', None, 'B', role='quoter', qform='fence'))                      # the words of an instruction seat nobody: a red cell of that kind is nobody's reason yet
         self.assertEqual(reason('aff', 'tree', None, '@orch', starter='person', author='peer'), 'A-TREE-NO-LAUNCH')
         self.assertEqual(reason('aff', 'tree', '@orch', None, author='peer', seen='ended_unseen'), 'A-TREE-AUTHOR')
 
@@ -1170,8 +1558,8 @@ class BuilderChecks(unittest.TestCase):
         self.assertNotRegex(text, r'(?i)reviewers?\b|(?:^|[^\w/])(?:r|round)\d+/|\*\*[A-Z]\s*[—–-]\s*[^\W\d_]')        # nothing in it declares a participant, a reviewer or a report path
         listing = oracle.truth(c).subjects['listing']
         self.assertEqual((listing['edit_rows'], listing['edit_rounds']), (frozenset(), frozenset()))
-        self.assertIn('docs/rev/' + axes.EDIT_DIR, listing['units'])                                         # it is listed, as a title
-        self.assertEqual(sorted(listing['units']), ['docs/rev/' + axes.EDIT_DIR, 'docs/rev/t1', 'docs/rev/t2'])
+        self.assertNotIn('docs/rev/' + axes.EDIT_DIR, listing['units'])                                      # a guide with no round folder is no debate: it is not listed at all
+        self.assertEqual(sorted(listing['units']), ['docs/rev/t1', 'docs/rev/t2'])
 
     def test_an_editing_job_needs_the_topics_and_the_ids_of_the_other_cases_do_not_change(self):
         for structure in ('single', 'deep3', 'flat', 'dot'):
@@ -1189,7 +1577,7 @@ class BuilderChecks(unittest.TestCase):
             obs.set('listing', field, shown)
             cell = next(x for x in run.grade_case(c, b, obs, truth) if x.role == 'listing' and x.field == field)
             self.assertEqual(cell.result, 'wrong', field)
-            self.assertEqual(run.reason_of(cell), 'B-EDIT-CELLS')
+            self.assertEqual(run.reason_of(cell), 'J9-LISTING')
             obs.set('listing', field, frozenset())
             self.assertEqual(next(x for x in run.grade_case(c, b, obs, truth) if x.role == 'listing' and x.field == field).result, 'pass')
 
@@ -1630,8 +2018,12 @@ class RoomScenes(unittest.TestCase):
         c = self.case(**v)
         return c, build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
 
+    def rooms(self, **v):
+        """{folder: kind} of the rooms the truth says the scene has."""
+        return dict(r.split('|') for r in oracle.truth(self.case(**v)).subjects['listing']['rooms'])
+
     def kind(self, **v):
-        return oracle.room_kind(self.case(**v).v)[0]
+        return self.rooms(**v).get('docs/meeting')
 
     def prompt(self, b, role):
         return _read_lines(b.paths[role])[0]['message']['content']
@@ -1640,36 +2032,52 @@ class RoomScenes(unittest.TestCase):
         return [blk['input'] for d in _read_lines(path) if d.get('type') == 'assistant' for blk in d['message']['content']
                 if blk.get('type') == 'tool_use' and blk['name'] == name]
 
-    # --- the rules ---
-    def test_a_room_needs_a_shared_guide_and_a_file_of_each_participants_own(self):
-        self.assertEqual(self.kind(), 'cells')
-        # the first half only: everybody points at one guide, and the files are no per-participant files in its folder
-        for guide in ('top_readme', 'top_claude', 'top_agents', 'docs_guide'):
-            c = self.case(guide=guide)
-            self.assertEqual(c.v['shape'], 'far', guide)                                    # a common document has no folder to write beside
-            self.assertIsNone(oracle.room_kind(c.v)[0], guide)
-        for shape in ('deep', 'far', 'same', 'scatter'):
-            self.assertIsNone(self.kind(shape=shape), shape)
-        # the second half only: a file of each beside the others, and no shared guide in the first instruction
-        for guide in ('own', 'missing', 'late'):
-            self.assertIsNone(self.kind(guide=guide), guide)
-        self.assertIsNone(self.kind(people='1'))
-        self.assertIsNone(self.kind(trees='two', people='2'))                               # one participant on each orchestrator's page
-        self.assertEqual(self.kind(trees='two', people='3'), 'cells')                       # two of them on this page, the third is another orchestrator's
+    # --- the rules (CONTRACT J14): participants launched together, a file of their own each in one folder; nothing a guide or an instruction says ---
+    def test_a_room_needs_participants_launched_together_and_a_file_of_each_ones_own(self):
+        self.assertEqual(self.rooms(), {'docs/meeting': 'cells'})
+        for v in ({'launch': 'far'}, {'launch': 'none'}, {'rtime': 'sequential'}, {'rtime': 'quiet'}):                  # started by messages of their own, or by calls nobody can tell: no group
+            self.assertEqual(self.rooms(**v), {}, v)
+        self.assertEqual(self.rooms(proof='told'), {})                                                                # nothing was written
+        for shape in ('same', 'scatter'):                                                                             # one file all of them write, code in other repositories: no file of their own
+            self.assertEqual(self.rooms(shape=shape), {}, shape)
+        self.assertEqual(self.rooms(people='1'), {})
+        self.assertEqual(self.rooms(trees='two', people='2'), {})                                                      # one participant on each orchestrator's page
+        self.assertEqual(self.rooms(trees='two', people='3'), {'docs/meeting': 'cells'})                              # two of them on this page, the third is another orchestrator's
+        for guide in ('agenda', 'brief', 'readme', 'plan', 'own', 'missing', 'late', 'top_readme', 'docs_guide'):         # the guide is not read: whatever it is, or is not, the files make the room
+            self.assertEqual(self.rooms(guide=guide, shape='beside') if guide not in ('top_readme', 'docs_guide') else self.rooms(guide='agenda', shape='beside'),
+                             {'docs/meeting': 'cells'}, guide)
+        # lookalikes the contract accepts as rooms (a known limit): files of their own in a common output folder, or two folders below the guide
+        self.assertEqual(self.rooms(shape='far'), {'work/reports': 'cells'})                                           # (O1: the folder that holds their files directly)
+        self.assertEqual(self.rooms(shape='deep'), {'docs/meeting/out/x': 'cells'})
+        self.assertEqual(self.rooms(shape='below'), {'docs/meeting/out': 'cells'})
+        self.assertEqual(self.rooms(shape='mixed'), {})                                                                 # their files are in different folders (O1: all the same, or no room)
+        self.assertEqual(self.rooms(code='all'), {})                                                                   # most of them change code outside the folder
+        self.assertEqual(self.rooms(scratch='log'), {})                                                                # a command's log in the repository is such a change too (a known limit)
+        self.assertEqual(self.rooms(scratch='tmp'), {'docs/meeting': 'cells'})                                         # files kept outside the repository are no change of the work
+        self.assertEqual(self.rooms(copy='worktree', bundle='root'), {'docs/records/bundle/meeting': 'cells'})        # (the copy in a worktree is no second room)
 
-    def test_a_guide_of_any_name_and_a_file_beside_it_or_one_below_make_a_room(self):
-        for guide, shape, people in itertools.product(('agenda', 'brief', 'readme', 'plan'), ('beside', 'below', 'mixed'), ('2', '3', '5')):
-            self.assertEqual(self.kind(guide=guide, shape=shape, people=people), 'cells', (guide, shape, people))
+    def test_a_room_is_a_room_whatever_the_guide_is_called_and_each_participant_sits_in_its_file(self):
+        folder = {'beside': 'docs/meeting', 'below': 'docs/meeting/out'}                                               # the folder that holds their files directly (O1)
+        for guide, shape, people in itertools.product(('agenda', 'brief', 'readme', 'plan'), ('beside', 'below'), ('2', '3', '5')):
             T = oracle.truth(self.case(guide=guide, shape=shape, people=people))
+            self.assertEqual(dict(r.split('|') for r in T.subjects['listing']['rooms']), {folder[shape]: 'cells'}, (guide, shape, people))
             self.assertEqual(sum(1 for r, f in T.subjects.items() if f.get('role') == 'writer'), int(people))
+            self.assertEqual(T.subjects['listing']['rooms_sure'], frozenset(['%s|False|launch' % folder[shape]]))          # launched together: estimated
+        for guide, people in itertools.product(('agenda', 'brief'), ('2', '3', '5')):                                     # each one's own way (`A.md`, `notes_B.md`, `out/C.md` ...)
+            T = oracle.truth(self.case(guide=guide, shape='mixed', people=people))
+            same_folder = people == '2'                                                                                    # the first two are beside the guide; the third is in `out/`: different folders, no room
+            self.assertEqual(T.subjects['listing']['rooms'], frozenset(['docs/meeting|cells']) if same_folder else frozenset(), (guide, people))
+            self.assertEqual(sum(1 for r, f in T.subjects.items() if f.get('role') == 'writer'), 2 if same_folder else 0)
 
-    def test_the_title_of_a_room_is_the_first_heading_of_its_guide(self):
+    def test_the_title_of_a_room_is_the_first_heading_of_a_guide_the_contract_knows(self):
         for lang in ('en', 'ko'):
-            for guide in ('agenda', 'brief', 'readme', 'plan'):
+            for guide in ('brief', 'readme'):
                 c, b = self.build(guide=guide, lang=lang)
                 with open(os.path.join(b.meta['unit'], axes.ROOM_GUIDES[guide])) as fh:
                     heading = re.match(r'# (.+)', fh.read()).group(1)
                 self.assertEqual(oracle.truth(c).subjects['listing']['titles'], frozenset(['docs/meeting|' + heading]), (guide, lang))
+        for guide in ('agenda', 'plan'):                                                                               # a guide with another name is not asked for its title
+            self.assertNotIn('titles', oracle.truth(self.case(guide=guide)).subjects['listing'], guide)
 
     def test_the_words_of_the_instruction_are_never_evidence(self):
         for guide, (shape, talk), lang in itertools.product(('agenda', 'brief', 'late'), (('beside', 'none'), ('below', 'none'), ('none', 'peer'), ('none', 'none'), ('r1', 'none'), ('far', 'none')), AXES['lang']):
@@ -1687,42 +2095,38 @@ class RoomScenes(unittest.TestCase):
         c = self.case(shape='none', talk='peer')
         T = oracle.truth(c)
         self.assertEqual(T.subjects['listing']['units'], frozenset(['docs/meeting']))
+        self.assertEqual(T.subjects['listing']['rooms'], frozenset(['docs/meeting|members']))
         for role in ('p1', 'p2', 'p3'):
-            self.assertEqual(T.subjects[role], dict(unit='docs/meeting', seat=None, cell=None, role='none', placements=frozenset()))
+            self.assertEqual(T.subjects[role], dict(seat=None, cell=None, role='none', placements=frozenset(), placed=None))
         for talk in ('none', 'orch'):                                                         # nobody tells the others anything: the orchestrator alone does, or nobody
-            self.assertIsNone(self.kind(shape='none', talk=talk), talk)
-        self.assertIsNone(self.kind(shape='none', talk='peer', guide='top_readme'))          # a common document and messages: still no room
-        self.assertIsNone(self.kind(shape='none', talk='peer', guide='late'))
-        for shape in ('same', 'far', 'deep', 'scatter'):                                      # messages beside files that are no per-participant files: those are not meetings by message only
-            self.assertIsNone(self.kind(shape=shape, talk='peer'), shape)
+            self.assertEqual(self.rooms(shape='none', talk=talk), {}, talk)
+        self.assertEqual(self.rooms(shape='none', talk='peer', guide='top_readme'), {})        # a document everybody reads at the top of a repository: no room
+        self.assertEqual(self.rooms(shape='none', talk='peer', guide='late'), {'docs/meeting': 'members'})            # what they read is what counts, not what the first instruction says
+        self.assertEqual(self.rooms(shape='none', talk='peer', guide='own'), {})              # each reads a guide of its own: no one file all of them read
+        self.assertEqual(self.rooms(shape='none', talk='peer', delivery='failed'), {})        # messages that came to nothing are no talk
+        for shape in ('same', 'beside'):                                                      # a file all of them write, or a file each: somebody wrote a `.md`, so it is no meeting by message only
+            self.assertNotIn('members', self.rooms(shape=shape, talk='peer').values(), shape)
         self.assertEqual(self.case(people='1', shape='none', talk='peer').v['talk'], 'none')
 
-    def test_a_round_folder_makes_a_debate_whatever_the_guide_is_called(self):
+    def test_a_round_folder_makes_a_debate_not_a_room(self):
         for guide in ('agenda', 'plan', 'readme', 'brief'):
             c = self.case(shape='r1', guide=guide, people='2')
             T = oracle.truth(c)
-            self.assertEqual(oracle.room_kind(c.v)[0], 'debate')
+            self.assertEqual(T.subjects['listing']['rooms'], frozenset(), guide)
             self.assertEqual(T.subjects['listing']['units'], frozenset(['docs/meeting']))
             self.assertNotIn('titles', T.subjects['listing'])                                 # the title of a folder that was a debate already is not asked
             self.assertEqual(T.subjects['p1']['placements'], frozenset(['docs/meeting|1|A|r1/A']))
-        self.assertEqual(oracle.room_kind(self.case(shape='r1', people='1').v)[0], 'debate')   # one participant is enough for a debate
+        self.assertEqual(self.rooms(shape='r1', people='1'), {})
         self.assertEqual(self.case(shape='r1', guide='top_readme').v['shape'], 'far')          # a common document has no folder of its own to hold a round folder
         self.assertEqual(self.case(shape='r1', guide='own').v['guide'], 'agenda')              # a debate has the guide of its folder
 
-    def test_the_seat_is_the_letter_a_marker_names_else_the_tag_else_the_stem_of_the_file(self):
-        marks = ('bracket', 'dam', 'dam_paren', 'en_participant', 'en_as', 'en_seat', 'tag')
-        for mark in marks:
-            c = self.case(seatmark=mark, fname='prefix', shape='below')
-            self.assertEqual(oracle.truth(c).subjects['p2']['seat'], 'B', mark)
-            self.assertEqual(oracle.truth(c).subjects['p2']['placements'], frozenset(['docs/meeting|1|B|out/notes_B']), mark)       # the place is the file, the seat the letter
-        for mark in ('none', 'quoted', 'negated', 'other'):                                  # a letter that is quoted, negated or means something else seats nobody
-            for lang in AXES['lang']:
-                c = self.case(seatmark=mark, fname='prefix', shape='below', lang=lang)
-                self.assertEqual(oracle.truth(c).subjects['p2']['seat'], 'notes_B', (mark, lang))
+    def test_the_seat_is_the_stem_of_the_file_and_a_marker_changes_nothing(self):
         for mark in AXES['seatmark']:
-            self.assertEqual(oracle.truth(self.case(seatmark=mark, fname='plain')).subjects['p2']['seat'], 'B', mark)           # the file is named by the letter: all agree
-        self.assertEqual(oracle.truth(self.case(shape='mixed', people='5')).subjects['p2']['placements'], frozenset(['docs/meeting|1|notes_B|notes_B']))
-        self.assertEqual(oracle.truth(self.case(shape='mixed', people='5')).subjects['p3']['placements'], frozenset(['docs/meeting|1|C|out/C']))
+            c = self.case(seatmark=mark, fname='prefix', shape='below')
+            self.assertEqual(oracle.truth(c).subjects['p2']['seat'], 'notes_B', mark)
+            self.assertEqual(oracle.truth(c).subjects['p2']['placements'], frozenset(['docs/meeting/out|1|notes_B|notes_B']), mark)       # the place is the file, the seat its name
+            self.assertEqual(oracle.truth(self.case(seatmark=mark, fname='plain')).subjects['p2']['seat'], 'B', mark)
+        self.assertEqual(oracle.truth(self.case(shape='mixed', people='5')).subjects['p2']['placements'], frozenset())                  # files in different folders: no room, no cell
 
     def test_a_marker_needs_the_language_it_is_written_in(self):
         for mark in ('dam', 'dam_paren'):
@@ -1730,8 +2134,8 @@ class RoomScenes(unittest.TestCase):
         for mark in ('en_participant', 'en_as', 'en_seat'):
             self.assertEqual(self.case(seatmark=mark, lang='ko').v['lang'], 'en')
 
-    def test_the_cells_follow_the_files_and_whether_the_participants_work_on(self):
-        for proof, phase, want in (('told', 'working', 'writing'), ('told', 'done', 'missing'), ('wrote', 'working', 'draft'), ('both', 'done', 'done')):
+    def test_the_cells_follow_the_writes_and_whether_the_participants_work_on(self):
+        for proof, phase, want in (('told', 'working', None), ('told', 'done', None), ('wrote', 'working', 'draft'), ('both', 'done', 'done')):          # what is only told is no cell
             T = oracle.truth(self.case(proof=proof, phase=phase))
             self.assertEqual({T.subjects[r]['cell'] for r in ('p1', 'p2', 'p3')}, {want}, (proof, phase))
 
@@ -2242,7 +2646,8 @@ class CodexOrchestratorScenes(unittest.TestCase):
         self.assertIn(' -o %s' % os.path.join(b.work, 'repo', 'talk', 'r1', 'B.md'), x['command'][2])
         self.assertTrue(os.path.isfile(os.path.join(b.work, 'repo', 'talk', 'r1', 'B.md')))
         _, b = self.build(topic='talk', subj='cl', look='live')
-        self.assertFalse(os.path.exists(os.path.join(b.work, 'repo', 'talk', 'r1')))
+        self.assertTrue(os.path.isdir(os.path.join(b.work, 'repo', 'talk', 'r1')))                          # the round folder is made before the participants run ...
+        self.assertFalse(os.path.exists(os.path.join(b.work, 'repo', 'talk', 'r1', 'A.md')))                # ... and the report is not there until it is written
 
     def test_a_codex_exec_child_has_the_dash_o_of_its_command_in_its_own_arguments(self):
         W = lambda b, *p: os.path.join(b.work, 'repo', *p)                            # noqa: E731
@@ -2265,7 +2670,7 @@ class CodexOrchestratorScenes(unittest.TestCase):
         _, b = self.build(topic='talk_rel', subj='cx', look='live')
         self.assertNotIn('r1', self.kid(b)['argv'][-1])                                       # the instruction has no path either
         t = self.truth(topic='talk_rel', subj='cx', look='live').subjects['child']
-        self.assertEqual((t['unit'], t['seat'], t['cell']), ('talk', 'B', 'writing'))
+        self.assertEqual((t['unit'], t['seat'], t['cell']), ('talk', 'B', 'writing'))                    # the command's `cd` tells the folder: the output is the cell of the run asked for it
 
     def test_the_instruction_names_the_report_and_dash_o_is_another_file_of_the_round(self):
         W = os.path.join
@@ -2278,8 +2683,8 @@ class CodexOrchestratorScenes(unittest.TestCase):
         self.assertEqual([list(c['changes']) for c in changes], [[W(folder, 'B.md')]])          # the run writes the report with a patch
         self.assertEqual(sorted(os.listdir(folder)), ['B.md', 'B_last.md'])
         t = self.truth(topic='talk_aux', subj='cx', look='live')
-        self.assertEqual(t.subjects['child']['placements'], {'talk|1|B|r1/B'})              # `-o` names the last message: it seats nobody and makes no second place
-        self.assertEqual(t.subjects['child']['seat'], 'B')
+        self.assertEqual(t.subjects['child']['placements'], {'talk|1|B_last|r1/B_last'})    # the run is asked for `-o`'s file (its cell); the report it was only told is nothing yet
+        self.assertEqual(self.truth(topic='talk_aux', subj='cx', look='ended').subjects['child']['placements'], {'talk|1|B|r1/B', 'talk|1|B_last|r1/B_last'})     # written by a patch, and `-o`
         _, b = self.build(topic='talk_aux', subj='cx', look='live')
         argv = self.kid(b)['argv']
         self.assertEqual(argv[argv.index('-o') + 1], W(b.work, 'repo', 'talk', 'r1', 'B_last.md'))
@@ -2313,12 +2718,15 @@ class CodexOrchestratorScenes(unittest.TestCase):
         for off in (dict(look='ended'), dict(how='detach'), dict(env='none'), dict(topic='none'), dict(lure='relay'), dict(chain='cx>cx')):
             self.assertEqual(n(**dict(dict(topic='talk', os='mac'), **off))['os'], 'linux', off)       # macOS only where a running participant's arguments would have told its report
 
-    def test_macos_has_no_arguments_to_read_so_only_the_instruction_can_seat_a_running_participant(self):
+    def test_macos_has_no_arguments_to_read_so_the_record_of_the_call_is_all_there_is_for_a_running_participant(self):
         for subj in ('cl', 'cx'):
             _, b = self.build(topic='talk', subj=subj, look='live', os='mac')
             self.assertEqual(b.case.v['os'], 'mac')
             t = oracle.truth(b.case).subjects['child']
-            self.assertEqual((t['unit'], t['seat'], t['cell']), ('talk', 'B' if subj == 'cx' else 'A', 'writing'))       # the truth is the same as on Linux: the world has not changed
+            if subj == 'cx':
+                self.assertEqual((t['unit'], t['seat'], t['cell']), ('talk', 'B', 'writing'))             # the launch command's `-o` is in the record of the call: the truth is the same as on Linux
+            else:
+                self.assertEqual((t['seat'], t['placements']), (None, frozenset()))                       # a run only told its path has no cell yet
         ids = {c.id for c in run.select()}
         for subj, top in itertools.product(('cl', 'cx'), ('cx_tui', 'cx_exec')):
             self.assertIn(axes.normalize(Case('cxo', dict(topic='talk', subj=subj, how='fg', look='live', top=top, env='codex', os='mac'))).id, ids)
@@ -2328,18 +2736,13 @@ class CodexOrchestratorScenes(unittest.TestCase):
         for topic, subj in (('talk_rel', 'cx'), ('talk_aux', 'cx'), ('talk_redir', 'cl')):
             for how, look, top in itertools.product(('fg', 'detach'), AXES['look'], ('cx_tui', 'cx_exec')):
                 self.assertIn(axes.normalize(Case('cxo', dict(topic=topic, subj=subj, how=how, look=look, top=top))).id, ids)
-        text = run.REASONS['X-DEBATE'][1]
-        for words in ('macOS', '`>` redirect', 'relative `-o`'):
-            self.assertIn(words, text)
         with open(os.path.join(REPO, 'tests', 'scenarios_xfail.json')) as f:
             doc = json.load(f)
         for cid, cells in doc['cells'].items():
-            if cid.startswith('cxo:') and ('topic=talk_rel' in cid or 'topic=talk_redir' in cid):
-                self.assertEqual({r[3] for r in cells.values()}, {'X-DEBATE'}, cid)
-            if cid.startswith('cxo:') and 'os=mac' in cid:
-                self.assertEqual({r[3] for k, r in cells.items() if k.split('.')[1] in ('unit', 'round', 'seat', 'cell', 'role', 'placements')}, {'X-DEBATE'}, cid)
-            if cid.startswith('cxo:') and 'topic=talk_aux' in cid:
-                self.fail('a participant whose `-o` is another file has its seat from the instruction: no red cell is expected (%s)' % cid)
+            if cid.startswith('cxo:') and 'topic=' in cid and 'topic=none' not in cid:
+                fields = {k.split('.')[1] for k in cells if k.startswith('child.')}
+                if fields & {'unit', 'round', 'seat', 'cell', 'role', 'placements'}:
+                    self.assertLessEqual({r[3] for k, r in cells.items() if k.split('.')[1] in ('unit', 'round', 'seat', 'cell', 'role', 'placements')}, {'J7-LIVE-OUT', 'J7-LIVE-REDIRECT', 'X-MAC-LIVE'}, cid)
 
     def test_a_claude_sub_agent_of_a_claude_run_below_a_codex_page(self):
         _, b = self.build(chain='cx>cl>sub', look='live')
@@ -2711,9 +3114,15 @@ class CodexOrchestratorScenes(unittest.TestCase):
 
     def test_the_debate_seat_of_a_participant_follows_its_life_and_needs_a_link(self):
         t = self.truth(topic='talk', subj='cl', look='live').subjects['child']
-        self.assertEqual((t['unit'], t['round'], t['seat'], t['cell']), ('talk', 1, 'A', 'writing'))
+        self.assertEqual((t['seat'], t['placements']), (None, frozenset()))                  # a run only told its path has written nothing yet
+        t = self.truth(topic='talk', subj='cl', look='ended').subjects['child']
+        self.assertEqual((t['unit'], t['round'], t['seat'], t['cell']), ('talk', 1, 'A', 'done'))       # it wrote the report with its Write tool
         t = self.truth(topic='talk', subj='cx', look='ended').subjects['child']
-        self.assertEqual((t['seat'], t['cell']), ('B', 'done'))
+        self.assertEqual((t['seat'], t['cell']), ('B', 'done'))                              # `-o` of its command, and the run ended well
+        t = self.truth(topic='talk_redir', subj='cl', look='ended', how='detach').subjects['child']
+        self.assertEqual((t['seat'], t['cell']), ('A', 'done'))                              # the shell's redirect: the run ended well and the file holds its last message
+        t = self.truth(topic='talk_redir', subj='cl', look='live').subjects['child']
+        self.assertEqual((t['seat'], t['cell']), ('A', 'writing'))                          # asked for from the launch, not saved yet
         t = self.truth(topic='talk', subj='cl', how='detach', look='ended', env='none', rec='lost').subjects['child']
         self.assertNotIn('seat', t)                                                     # a run nothing links has no place in the page's debates
 
@@ -2880,6 +3289,168 @@ class RerunScenes(unittest.TestCase):
         self.assertNotIn(('seat_tie_held', 'a1'), t.diag)
 
 
+class ContractScenes(unittest.TestCase):
+    """The contract scene (`ctr`): a debate folder, the participant under test `S`, a peer `P`, what comes later and the orchestrator's conclusion, varied by the structure axes
+    `launch`, `wmethod`, `overlap`, `read`, `tag`, `later`, `final`, `life`. The truth is the contract's judgment of the plan; the builder writes what the plan says."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = tempfile.mkdtemp(prefix='scen-ctr-')
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def case(self, **v):
+        return axes.normalize(Case('ctr', v))
+
+    def truth(self, **v):
+        return oracle.truth(self.case(**v)).subjects
+
+    def build(self, **v):
+        c = self.case(**v)
+        return c, build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
+
+    def test_the_axes_fold_to_what_can_be(self):
+        self.assertEqual(self.case(launch='call').v['launch'], 'call')                         # one call starts both: the peer is a `claude -p` run as well
+        self.assertEqual(self.case(overlap='orch', wmethod='python', launch='call').v['overlap'], 'orch')      # (O2: the launch call's window is no rival, so these combinations mean something)
+        self.assertEqual(self.case(life='crash').v['life'], 'running')
+        self.assertEqual(self.case(overlap='agent', wmethod='write').v['overlap'], 'none')      # only a file nobody was seen to write has a window to be told from others'
+        self.assertEqual(self.case(overlap='orch', wmethod='python', tag='room').v['overlap'], 'orch')
+        c = self.case(overlap='agent', wmethod='python', launch='far')
+        self.assertEqual((c.v['overlap'], c.v['launch']), ('agent', 'msg'))                    # the other agent has to be at work
+        self.assertEqual(self.case(later='none', final='early').v['final'], 'late')             # nothing comes later: after everything
+        self.assertEqual(self.case(later='group', final='early').v['final'], 'early')
+        self.assertEqual(Case.from_id(self.case(wmethod='python', overlap='orch').id).key(), self.case(wmethod='python', overlap='orch').key())
+
+    def test_how_the_participant_saves_its_report_decides_who_owns_it(self):
+        for wmethod in ('write', 'redirect', 'window'):                                         # a tool, a command in a deciding place, a command in a masked place saved inside its window
+            t = self.truth(wmethod=wmethod)['S']
+            self.assertEqual((t['seat'], t['cell'], t['placements']), ('S', 'done', frozenset(['talk|1|S|r1/S'])), wmethod)
+        t = self.truth(wmethod='edit')['S']
+        self.assertEqual((t['seat'], t['placements'], t['edits']), (None, frozenset(), frozenset(['talk|1|S|r1/S'])))     # an Edit of a file that was there: an editor, no owner
+        t = self.truth(wmethod='stale')['S']
+        self.assertEqual((t['seat'], t['placements'], t['edits']), (None, frozenset(), frozenset()))                      # `set -C; ...; true`: the old file stays, the save is not in the window
+        t = self.truth(wmethod='python')['S']
+        self.assertEqual((t['seat'], t['placements'], t['hint']), (None, frozenset(), 'S'))                               # nobody wrote it, one window could have
+        for v in (dict(overlap='agent'), dict(overlap='orch'), dict(tag='room', overlap='orch'), dict(launch='call', overlap='agent')):     # another agent's window, any other of the orchestrator's: no one guess
+            self.assertIsNone(self.truth(wmethod='python', **v)['S']['hint'], v)
+        # O2: the call that launched the participant covers its whole run and is no rival of its own window: a `claude -p` run gets the hint too, unless the launch is not known
+        for v in (dict(tag='room'), dict(launch='call'), dict(tag='seat', launch='far')):
+            self.assertEqual(self.truth(wmethod='python', life='normal_end', **v)['S']['hint'], 'S', v)
+        self.assertIsNone(self.truth(wmethod='python', life='normal_end', tag='room', launch='none')['S']['hint'])        # a call with no key cannot be told to be the launch
+        self.assertIsNone(self.truth(wmethod='python', life='running', tag='room')['S']['hint'])                         # still at work: its own look-around call is open as well
+        self.assertIsNone(self.truth(wmethod='write')['S']['hint'])
+        self.assertEqual(self.truth(wmethod='write', life='running')['S']['cell'], 'draft')     # at work with a file: a draft
+        self.assertEqual(self.truth(wmethod='write', life='normal_end')['S']['cell'], 'done')
+
+    def test_who_is_placed_beside_the_others_and_why(self):
+        for read in ('tool', 'cat'):
+            for launch in ('msg', 'call'):                                                                                  # one message, or one call, started them both
+                self.assertEqual(self.truth(wmethod='none', launch=launch, read=read)['S']['placed'], 'talk|-|launch_peer')     # started with a participant of the debate
+            self.assertEqual(self.truth(wmethod='none', launch='far', read=read)['S']['placed'], 'talk|-|guide_read')       # only the guide it read (a command's read counts as well)
+        for launch in ('far', 'none'):
+            self.assertIsNone(self.truth(wmethod='none', launch=launch, read='none')['S']['placed'], launch)               # a call nobody can tell is no group
+        self.assertEqual(self.truth(wmethod='none', tag='room', launch='far', read='none', life='running')['S']['placed'], 'talk|-|tag')
+        t = self.truth(wmethod='none', tag='seat', launch='far', read='none', life='running')['S']
+        self.assertEqual((t['seat'], t['cell']), ('S', 'writing'))                              # a tag with a seat asks for the cell: it is the participant's before it writes
+        self.assertEqual(self.truth(wmethod='none', tag='seat', launch='far', read='none', life='normal_end')['S']['cell'], 'missing')
+
+    def test_what_comes_later_and_the_conclusion(self):
+        t = self.truth(later='group', final='early')
+        self.assertEqual(t['Q1']['placements'], frozenset(['talk|2|Q1|r2/Q1']))
+        self.assertEqual(t['listing']['finals'], frozenset())                                   # the conclusion came before round 2 was written
+        self.assertEqual(self.truth(later='group', final='late')['listing']['finals'], frozenset(['talk|ruling.md']))
+        self.assertEqual(self.truth(later='group', final='late')['listing']['closable'], frozenset(['talk']))
+        self.assertEqual(self.truth(later='group', final='late', life='running')['listing']['finals'], frozenset())        # a participant is still at work
+        t = self.truth(later='editors', final='early')
+        self.assertEqual((t['E1']['edits'], t['E2']['edits']), (frozenset(['talk|1|P|r1/P']), frozenset(['talk|1|S|r1/S'])))
+        self.assertEqual((t['E1']['seat'], t['listing']['finals']), (None, frozenset()))        # fixes after the conclusion take it back
+        self.assertEqual(self.truth(later='editors', final='late')['listing']['finals'], frozenset(['talk|ruling.md']))
+        self.assertEqual(self.truth(later='alone', final='late')['Q']['cell'], 'done')
+        self.assertEqual(self.truth(final='none')['listing']['finals'], frozenset())
+
+    def test_the_name_of_the_conclusion_changes_the_sort_of_the_candidates_and_nothing_else(self):
+        """CONTRACT 3.3, L3: `ruling.md` -> `판정문.md` -> `notes.md` (a name that says a conclusion, one in the other language, one that does not): `confirmed`, the path's role and `why`
+        are the same, and so is whether the debate can be closed; only the order of the candidates may differ."""
+        for later, life in itertools.product(('none', 'group', 'editors'), ('running', 'normal_end')):
+            for final in ('early', 'late'):
+                seen = []
+                for cname in AXES['cname']:
+                    c = self.case(final=final, later=later, life=life, cname=cname)
+                    ct = contract.truth(plan.ctr_scene(c.v).F.case())
+                    f = ct['finals'][plan.CTR_UNIT]
+                    name = plan.CTR_RULING_NAME[cname]
+                    self.assertEqual(f['path'] in (None, plan.CTR_UNIT + '/' + name), True, (c.id, f))
+                    seen.append((f['confirmed'], f['path'] is None, f['by'], f['why'], ct['closable'][plan.CTR_UNIT],
+                                 [p.rsplit('/', 1)[-1] == name for p in f['candidates']]))
+                self.assertEqual(len({str(x) for x in seen}), 1, (later, life, final, seen))
+        # the order of the candidates is the one thing a name changes: with two documents the name that says a conclusion comes first, whatever else is the same
+        facts = plan.ctr_scene(self.case(final='late', later='none', cname='plain').v).F
+        facts.file(plan.CTR_UNIT + '/judgement.md', 120.0)
+        facts.write('orch', plan.CTR_UNIT + '/judgement.md', 120.0, orch=True)
+        got = contract.truth(facts.case())['finals'][plan.CTR_UNIT]
+        self.assertEqual(got['candidates'], [plan.CTR_UNIT + '/judgement.md', plan.CTR_UNIT + '/notes.md'])      # neither name says a conclusion: the latest first ...
+        facts = plan.ctr_scene(self.case(final='late', later='none', cname='plain').v).F
+        facts.file(plan.CTR_UNIT + '/ruling.md', 119.0)
+        facts.write('orch', plan.CTR_UNIT + '/ruling.md', 119.0, orch=True)
+        got = contract.truth(facts.case())['finals'][plan.CTR_UNIT]
+        self.assertEqual((got['candidates'][0], got['confirmed'], got['why']), (plan.CTR_UNIT + '/ruling.md', False, ['several']))     # ... `ruling.md` does: first, though nothing is confirmed
+
+    def test_the_scene_is_built_as_the_axes_say(self):
+        c, b = self.build(wmethod='window', tag='seat', read='cat', launch='far', life='running')
+        self.assertTrue(b.paths['S'].endswith('.jsonl') and 'subagents' not in b.paths['S'])               # a `claude -p` run carries a tag, a sub-agent cannot
+        calls = BuilderMatchesPlan.claude_calls(b.paths['S'])
+        cmds = [i['command'] for n, i, _ in calls if n == 'Bash']
+        self.assertEqual(cmds[0], 'cat %s' % os.path.join(b.meta['unit'], 'brief.md'))                    # `cat` of the guide ...
+        write = [x for x in cmds if x.startswith('cat > ')][0]                                            # ... and the masked write
+        self.assertIn('\nls ', write)                                                                     # a later command: the exit status says nothing about the write
+        launch = [i['command'] for n, i, _ in BuilderMatchesPlan.claude_calls(b.paths['orch']) if n == 'Bash'][0]
+        self.assertIn('BULLPEN_ROOM=%s BULLPEN_SEAT=r1/S claude -p' % b.meta['unit'], launch)               # the names are in the command (an ended run) ...
+        kid = [p for ph in b.phases for p in ph.procs if p['session'] and p['session'].get('sessionId') == b.ids['S']][0]
+        self.assertEqual((kid['env']['BULLPEN_ROOM'], kid['env']['BULLPEN_SEAT']), (b.meta['unit'], 'r1/S'))   # ... and in the environment of a live one
+        c, b = self.build(wmethod='python', overlap='orch', read='none')
+        self.assertIn('subagents', b.paths['S'])
+        self.assertEqual([x['command'] for n, x, _ in BuilderMatchesPlan.claude_calls(b.paths['orch']) if n == 'Bash'], ['git status'])
+        c, b = self.build(wmethod='stale')
+        self.assertIn('set -C; printf new > ', [x['command'] for n, x, _ in BuilderMatchesPlan.claude_calls(b.paths['S']) if n == 'Bash'][0])
+        self.assertEqual(os.path.getmtime(b.meta['report']), b.T(plan.GUIDE_T + 6))                           # the old file stays old
+        c, b = self.build(launch='none')
+        self.assertTrue(all('id' not in d['message'] for d in _read_lines(b.paths['orch']) if d.get('type') == 'assistant' and any(x.get('name') == 'Agent' for x in d['message']['content'])))
+        c, b = self.build(later='group', final='early')
+        self.assertTrue(os.path.isdir(os.path.join(b.meta['unit'], 'r2')))
+        self.assertTrue(os.path.isfile(os.path.join(b.meta['unit'], 'ruling.md')))
+        c, b = self.build(later='none')
+        self.assertFalse(os.path.exists(os.path.join(b.meta['unit'], 'r2')))                               # an empty next round would block every conclusion
+
+    def test_the_words_are_the_same_whatever_the_axes_say(self):
+        texts = set()
+        for v in (dict(), dict(wmethod='python', read='cat'), dict(tag='seat', launch='none'), dict(later='group', final='late', life='running')):
+            c, b = self.build(**v)
+            first = [d for d in _read_lines(b.paths['S']) if d.get('type') == 'user'][0]['message']['content']
+            texts.add((first[:18], first[-26:]))                                                              # the frame of the sentence, whatever its words
+        self.assertEqual(texts, {('Please review the ', 'and report in plain words.')})
+
+    def test_the_selection_has_every_value_of_every_axis_and_the_reasons_name_the_contract(self):
+        cases = [c for c in run.select() if c.bundle == 'ctr']
+        self.assertGreater(len(cases), 120)
+        for name in BUNDLES['ctr']:
+            self.assertEqual({c.v[name] for c in cases}, {'running', 'normal_end'} if name == 'life' else set(AXES[name]), name)
+        b = types.SimpleNamespace(ids={}, t0=0)
+
+        def reason(field, ws, gs, role='S', result='wrong', **v):
+            c = axes.normalize(Case('ctr', v))
+            return run.reason_of(run.Cell(c, role, field, result, ws, gs, b))
+        self.assertEqual(reason('seat', 'S', None, 'S', 'miss', launch='call', tag='seat', wmethod='python'), 'J13-TAG-SEAT')       # the seat of one run is read for both runs of one call
+        self.assertEqual(reason('diag:seat_tie_held', None, 'seat_tie_held', 'P', launch='call', tag='seat', wmethod='python'), 'J13-TAG-SEAT')
+        self.assertEqual(reason('placed', 'talk|-|tag', 'MISSING', 'S', 'miss', launch='call', tag='room', life='normal_end'), 'J13-TAG-LINK')      # an ended run with a tag prefix is not linked
+        self.assertEqual(reason('placed', 'talk|-|tag', 'MISSING', 'S', 'miss', launch='call', tag='room', life='running'), 'J11-PLACED')
+        self.assertEqual(reason('placed', 'talk|-|guide_read', 'MISSING', 'S', 'miss', launch='msg', tag='none', wmethod='none'), 'J11-PLACED')
+        self.assertEqual(reason('unit', 'talk', None, 'S', 'miss', launch='msg', tag='none', wmethod='python'), 'J11-PLACED')
+        self.assertEqual(reason('units', 'x', 'y', 'listing', final='late'), 'J9-LISTING')
+        self.assertIsNone(reason('finals', 'x', 'y', 'listing', final='late'))                                   # a final the board does not confirm (or does) against J15 has no reason of its own now
+
+
 class BundleScenes(unittest.TestCase):
     """The room's folder as one topic of a bundle (`bundle=root`): the folder above it holds the bundle's brief and, by `above`, a document that may close it; `copy` reaches the
     bundle's folder by a link the participants write their paths with, or copies it into a linked worktree of the repository where another agent works."""
@@ -2963,12 +3534,12 @@ class BundleScenes(unittest.TestCase):
         self.assertEqual(first['cwd'], wt)
         self.assertNotIn('meeting', first['message']['content'])                       # it points at no guide: it is no participant
 
-    def test_the_truth_closes_the_room_only_when_the_conclusion_is_after_the_files_and_the_files_are_in_and_nobody_works(self):
+    def test_a_conclusion_beside_the_room_closes_nothing(self):
+        """A room is no topic of the bundle (it has no round folder) and the document beside it is written by no record: whatever it is called and whenever it came, no final is
+        confirmed (J15 reads the documents beside the cells and the writes that prove them)."""
         for above, phase, proof in itertools.product(AXES['above'], AXES['phase'], ('told', 'wrote')):
             c = axes.normalize(Case('room', dict(bundle='root', above=above, phase=phase, proof=proof)))
-            got = oracle.truth(c).subjects['listing']['finals']
-            want = above in ('closing', 'unnamed') and phase == 'done' and proof == 'wrote'
-            self.assertEqual(got, frozenset(['docs/records/bundle/meeting|../CLOSING.md']) if want else frozenset(), (above, phase, proof))
+            self.assertEqual(oracle.truth(c).subjects['listing']['finals'], frozenset(), (above, phase, proof))
 
 
 class ReviewShapes(unittest.TestCase):
@@ -2992,9 +3563,9 @@ class ReviewShapes(unittest.TestCase):
         c = self.case(bundle, **v)
         return c, build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
 
-    def why(self, **v):
-        kind, _, _, why = oracle.room_trace(self.case(**v).v)
-        return kind, why
+    def rooms(self, **v):
+        """{folder: kind} of the rooms the truth says the scene has."""
+        return dict(r.split('|') for r in oracle.truth(self.case(**v)).subjects['listing']['rooms'])
 
     def calls(self, path, name):
         return [blk['input'] for d in _read_lines(path) if d.get('type') == 'assistant' for blk in d['message']['content'] if blk.get('type') == 'tool_use' and blk['name'] == name]
@@ -3004,7 +3575,7 @@ class ReviewShapes(unittest.TestCase):
 
     # --- ids: nothing that does not use the new axes is renamed ---
     def test_the_new_axes_are_named_in_an_id_only_when_they_are_not_at_the_baseline(self):
-        for bundle, names in (('room', ('rtime', 'code', 'cite', 'delivery')), ('deb', ('qform',)), ('sta', ('entry', 'tail', 'process'))):
+        for bundle, names in (('room', ('rtime', 'code', 'cite', 'delivery', 'launch')), ('deb', ('qform',)), ('sta', ('entry', 'tail', 'process'))):
             base = Case(bundle, {}).id
             for a in names:
                 self.assertNotIn(a + '=', base)
@@ -3016,19 +3587,21 @@ class ReviewShapes(unittest.TestCase):
 
     # --- runs that never overlap ---
     def test_participants_that_run_one_after_the_other_are_no_room(self):
+        """Started by calls of their own (a launch group is the only thing that ties them), they are no room, however their runs lay in time: the contract has no time rule."""
         for people, phase in itertools.product(('2', '3', '5'), AXES['phase']):
-            self.assertEqual(self.why(rtime='overlap', people=people, phase=phase), ('cells', None), (people, phase))
-            self.assertEqual(self.why(rtime='sequential', people=people, phase=phase), (None, 'timing'), (people, phase))
+            self.assertEqual(self.rooms(rtime='overlap', people=people, phase=phase), {'docs/meeting': 'cells'}, (people, phase))
+            self.assertEqual(self.rooms(rtime='sequential', people=people, phase=phase), {}, (people, phase))
+            self.assertEqual(self.rooms(rtime='quiet', people=people, phase=phase), {}, (people, phase))               # every one still running: no more a room for that
         T = oracle.truth(self.case(rtime='sequential', phase='done'))
         self.assertEqual(T.subjects['listing']['units'], frozenset())
         for role in ('p1', 'p2', 'p3'):
-            self.assertEqual(T.subjects[role], dict(seat=None, cell=None, role='none', placements=frozenset(), unit=None))
+            self.assertEqual(T.subjects[role], dict(seat=None, cell=None, role='none', placements=frozenset(), placed=None))
         # it only means something where a room could be one; and runs that never coexist send no message
         self.assertEqual(self.case(rtime='sequential', shape='r1').v['rtime'], 'overlap')                  # a round folder is a debate whenever it ran
         self.assertEqual(self.case(rtime='sequential', shape='none', talk='peer').v['rtime'], 'overlap')
         self.assertEqual(self.case(rtime='sequential', talk='peer').v['talk'], 'none')
         self.assertEqual(self.case(rtime='sequential', talk='orch').v['talk'], 'orch')                        # the orchestrator may message each of them
-        self.assertEqual(self.why(rtime='sequential', talk='orch'), (None, 'timing'))
+        self.assertEqual(self.rooms(rtime='sequential', talk='orch'), {})
         self.assertEqual(self.case(rtime='sequential', people='1').v['rtime'], 'overlap')
         self.assertEqual(self.case(rtime='sequential', guide='top_readme').v['rtime'], 'overlap')
 
@@ -3063,11 +3636,11 @@ class ReviewShapes(unittest.TestCase):
 
     # --- parallel work on code that reports beside a plan ---
     def test_participants_that_mostly_change_code_outside_the_folder_are_no_room(self):
-        want = {('2', 'none'): 'cells', ('2', 'one'): 'cells', ('2', 'all'): None, ('3', 'one'): 'cells', ('3', 'majority'): None, ('3', 'all'): None,
-                ('5', 'one'): 'cells', ('5', 'majority'): None, ('5', 'all'): None}
-        for (people, code), kind in want.items():
-            for shape in ('beside', 'below', 'mixed'):
-                self.assertEqual(self.why(people=people, code=code, shape=shape), (kind, None if kind else 'code'), (people, code, shape))
+        want = {('2', 'none'): True, ('2', 'one'): True, ('2', 'all'): False, ('3', 'one'): True, ('3', 'majority'): False, ('3', 'all'): False,
+                ('5', 'one'): True, ('5', 'majority'): False, ('5', 'all'): False}
+        for (people, code), room in want.items():
+            for shape in ('beside', 'below'):
+                self.assertEqual(bool(self.rooms(people=people, code=code, shape=shape)), room, (people, code, shape))
         self.assertEqual(self.case(people='2', code='majority').v['code'], 'all')                           # two of two
         self.assertEqual({len(axes.room_coders(self.case(people=p, code='majority').v)) for p in ('3',)}, {2})
         self.assertEqual(len(axes.room_coders(self.case(people='5', code='majority').v)), 3)
@@ -3078,8 +3651,7 @@ class ReviewShapes(unittest.TestCase):
         self.assertEqual({T.subjects[r]['seat'] for r in ('p1', 'p2', 'p3')}, {'A', 'B', 'C'})
         T = oracle.truth(self.case(people='3', code='all', rtime='overlap'))
         self.assertEqual(T.subjects['listing']['units'], frozenset())
-        for kind in oracle.room_trace(self.case(people='3', code='all').v)[:1]:
-            self.assertIsNone(kind)
+        self.assertEqual(self.rooms(people='3', code='all'), {})
 
     def test_the_code_is_told_and_written_where_the_axis_says(self):
         for code, people, proof in itertools.product(('one', 'majority', 'all'), ('3', '5'), AXES['proof']):
@@ -3098,20 +3670,20 @@ class ReviewShapes(unittest.TestCase):
 
     # --- an earlier instruction that is only shown ---
     def test_an_instruction_that_is_only_quoted_or_reviewed_is_no_room_and_seats_nobody(self):
+        """Nothing is written (the scene is the words of an earlier instruction), so there is no room and no cell, in every form of the quote: the words are not read in any case."""
         for cite, shape, lang in itertools.product(AXES['cite'][1:], ('beside', 'below', 'mixed'), AXES['lang']):
             c = self.case(cite=cite, shape=shape, lang=lang)
-            self.assertEqual(oracle.room_trace(c.v)[0::3], (None, 'cite'), c.id)
+            self.assertEqual(self.rooms(cite=cite, shape=shape, lang=lang), {}, c.id)
             T = oracle.truth(c)
             self.assertEqual(T.subjects['listing']['units'], frozenset(), c.id)
             for role in ('p1', 'p2', 'p3'):
-                self.assertEqual(T.subjects[role], dict(seat=None, cell=None, role='none', placements=frozenset()), c.id)
-        # a folder that already has a round folder is a debate on the list, and nobody in it is seated by words that were only quoted
+                self.assertEqual(T.subjects[role], dict(seat=None, cell=None, role='none', placements=frozenset(), placed=None), c.id)
+        # a folder that already has a round folder is a debate on the list (the walk finds it), and nobody in it sits anywhere: nothing was written
         for cite in AXES['cite'][1:]:
             c = self.case(cite=cite, shape='r1')
-            self.assertEqual(oracle.room_trace(c.v)[0::3], ('debate', 'cite'))
             T = oracle.truth(c)
             self.assertEqual(T.subjects['listing']['units'], frozenset(['docs/meeting']))
-            self.assertEqual(T.subjects['p1'], dict(seat=None, cell=None, role='none', placements=frozenset()))
+            self.assertEqual(T.subjects['p1'], dict(seat=None, cell=None, role='none', placements=frozenset(), placed=None))
         # nothing is written and nothing but the earlier words names the files; the scene is the same wherever else the axes sit
         c = self.case(cite='fence', seatmark='bracket', proof='wrote', talk='peer', code='all', rtime='sequential', trees='two')
         self.assertEqual((c.v['proof'], c.v['seatmark'], c.v['talk'], c.v['code'], c.v['rtime'], c.v['trees']), ('told', 'none', 'none', 'none', 'overlap', 'one'))
@@ -3143,8 +3715,7 @@ class ReviewShapes(unittest.TestCase):
             c, b = self.build('deb', role='quoter', qform=qform, kind=kind, lang=lang)
             T = oracle.truth(c)
             self.assertEqual(T.subjects['child']['seat'], None, c.id)
-            self.assertNotIn(('debate_in_misc', 'child'), T.diag, c.id)
-            self.assertIn(('debate_in_misc', 'child'), T.allowed, c.id)
+            self.assertEqual(T.diag, [], c.id)
             if kind == 'sub':
                 text = [x['prompt'] for x in self.calls(b.paths['orch'], 'Agent')][-1]
             else:
@@ -3155,20 +3726,20 @@ class ReviewShapes(unittest.TestCase):
         c = self.case('deb', role='quoter', qform='fence', marker='quoted', wmode='redirect')
         self.assertEqual((c.v['marker'], c.v['wmode']), ('none', 'tool'))
         self.assertEqual(self.case('deb', role='writer', qform='fence').v['qform'], 'inline')               # only a quoter shows an earlier instruction
-        self.assertIn(('debate_in_misc', 'child'), oracle.truth(self.case('deb', role='quoter')).diag)       # the one-line quote is as it was
+        self.assertEqual(oracle.truth(self.case('deb', role='quoter')).diag, [])                              # the one-line quote is no different: the words are not read
 
     # --- messages that were never delivered ---
     def test_a_message_that_was_answered_with_an_error_makes_no_meeting(self):
         for people, guide in itertools.product(('2', '3', '5'), ('agenda', 'brief')):
-            self.assertEqual(self.why(shape='none', talk='peer', people=people, guide=guide), ('members', None), (people, guide))
-            self.assertEqual(self.why(shape='none', talk='peer', people=people, guide=guide, delivery='failed'), (None, 'delivery'), (people, guide))
-            self.assertEqual(self.why(shape='beside', talk='peer', people=people, guide=guide, delivery='failed'), ('cells', None), (people, guide))     # files make a room by themselves
+            self.assertEqual(self.rooms(shape='none', talk='peer', people=people, guide=guide), {'docs/meeting': 'members'}, (people, guide))
+            self.assertEqual(self.rooms(shape='none', talk='peer', people=people, guide=guide, delivery='failed'), {}, (people, guide))
+            self.assertEqual(self.rooms(shape='beside', talk='peer', people=people, guide=guide, delivery='failed'), {'docs/meeting': 'cells'}, (people, guide))     # files make a room by themselves
         self.assertEqual(self.case(delivery='failed').v['delivery'], 'ok')                                  # nobody to message
         self.assertEqual(self.case(delivery='failed', talk='orch').v['delivery'], 'ok')
         self.assertEqual(self.case(delivery='failed', talk='peer', people='1').v['delivery'], 'ok')
         T = oracle.truth(self.case(shape='none', talk='peer', delivery='failed'))
         self.assertEqual(T.subjects['listing']['units'], frozenset())
-        self.assertEqual(T.subjects['p1'], dict(seat=None, cell=None, role='none', placements=frozenset(), unit=None))
+        self.assertEqual(T.subjects['p1'], dict(seat=None, cell=None, role='none', placements=frozenset(), placed=None))
 
     def test_the_failed_message_carries_the_error_flag_in_its_result(self):
         for delivery, flag in (('ok', False), ('failed', True)):
@@ -3247,21 +3818,17 @@ class ReviewShapes(unittest.TestCase):
                          {(e, t, p) for e, t, p in itertools.product(AXES['entry'], AXES['tail'], AXES['process']) if not (e == 'sdk' and t in ('commands', 'commands_only'))})
         b = types.SimpleNamespace(ids={}, t0=0)
 
-        def reason(bundle, subject, field, ws, gs, **v):
-            c = axes.normalize(Case(bundle, v))
-            return run.reason_of(run.Cell(c, subject, field, 'wrong', ws, gs, b))
-        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', rtime='sequential'), 'R-ROOM-TIMING')
-        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', code='all'), 'R-ROOM-CODE')
-        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', cite='fence'), 'R-ROOM-CITE')
-        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', cite='fence', shape='r1'), 'R-ROOM-CITE')
-        self.assertEqual(reason('room', 'p1', 'unit', None, 'x', shape='none', talk='peer', delivery='failed'), 'R-ROOM-MSG-FAIL')
-        self.assertEqual(reason('room', 'p1', 'seat', None, 'A', shape='none', talk='peer'), 'R-ROOM-MEMBERS')
-        self.assertEqual(reason('deb', 'child', 'seat', None, 'B', role='quoter', qform='fence'), 'B-CITE')
-        self.assertEqual(reason('deb', 'child', 'seat', None, 'B', role='quoter'), 'B-QUOTE')
+        def reason(bundle_, subject, field, ws, gs, result='wrong', **v):
+            c = axes.normalize(Case(bundle_, v))
+            return run.reason_of(run.Cell(c, subject, field, result, ws, gs, b))
+        self.assertEqual(reason('room', 'p1', 'placed', 'x', frozenset(), 'miss'), 'J11-PLACED')
+        self.assertEqual(reason('room', 'listing', 'units', frozenset(['docs/meeting']), frozenset()), 'J9-LISTING')
+        self.assertIsNone(reason('room', 'p1', 'seat', None, 'A', rtime='sequential'))                         # a room that is none for the contract has no reason of its own now: it is not red
+        self.assertIsNone(reason('deb', 'child', 'seat', None, 'B', role='quoter', qform='fence'))
         for shape, want in ((dict(process='gone', tail='mid'), 'S-ORCH-DEAD'), (dict(tail='commands'), 'S-ORCH-COMMANDS'), (dict(entry='sdk', tail='end'), 'S-ORCH-SDK-END'),
                             (dict(), 'S-ORCH-STATE')):
             self.assertEqual(reason('sta', 'orch', 'orch_state', 'idle', 'working', skind='main', life='running', **shape), want, shape)
-        for r in ('R-ROOM-TIMING', 'R-ROOM-CODE', 'R-ROOM-CITE', 'R-ROOM-MSG-FAIL', 'B-CITE', 'S-ORCH-DEAD', 'S-ORCH-COMMANDS', 'S-ORCH-SDK-END'):
+        for r in ('J9-LISTING', 'J11-PLACED', 'J13-TAG-LINK', 'J13-TAG-SEAT', 'J7-LIVE-OUT', 'J7-LIVE-REDIRECT', 'S-ORCH-DEAD', 'S-ORCH-COMMANDS', 'S-ORCH-SDK-END'):
             self.assertIn(r, run.REASONS)
 
 
@@ -3461,11 +4028,14 @@ class OrchestratorWriteScenes(unittest.TestCase):
             self.assertIn(wt, cwds, top)                                                      # another agent of the page works in the worktree
             accepted = oracle.truth(axes.normalize(Case('owr', dict(top=top, dsite='repo', copy='worktree')))).accepted[('listing', 'units')]
             self.assertEqual(accepted, {frozenset(['work/wt/docs/talk'])})                   # the folder of the page or its copy: one debate
+            nothing = oracle.truth(axes.normalize(Case('owr', dict(top=top, dsite='repo', copy='worktree', ow='failed')))).subjects['listing']['units']
+            self.assertEqual(nothing, frozenset(['work/repo/docs/talk']))      # no write and nobody in either: one stands for them, the main checkout's (J17, O10)
 
     def test_the_truth_lists_a_folder_by_the_orchestrators_write_and_the_disk_and_by_nothing_else(self):
         def expected(ow, shape, site, kid):
-            walked = site in ('repo', 'top', 'docs') and shape != 'notes'                     # a walk of the repository lists what is there, a README of notes confirms nothing
-            by_write = ow in ('tool', 'patch', 'redirect', 'mkdir_only') and shape in ('brief_r1', 'readme_r1', 'declared2') and site != 'state'
+            rounded = shape in ('brief_r1', 'readme_r1') or (ow == 'mkdir_only' and shape in ('brief_r1', 'readme_r1', 'declared2'))      # a debate is a folder with a round folder (J9)
+            walked = site in ('repo', 'top', 'docs') and rounded                              # a walk of the repository lists what is a debate: a lone guide, declared result files or notes are none
+            by_write = ow in ('tool', 'patch', 'redirect', 'mkdir_only') and rounded and site != 'state'
             return walked or kid == 'seated' or by_write
         n = 0
         for ow, shape, site, kid in itertools.product(AXES['ow'], AXES['dshape'], AXES['dsite'], AXES['kid']):
@@ -3481,10 +4051,12 @@ class OrchestratorWriteScenes(unittest.TestCase):
         self.assertEqual(self.truth(ow='tool', dshape='brief_only').subjects['listing']['units'], frozenset())           # a brief.md alone is a title, not a debate
         self.assertEqual(self.truth(ow='tool', dshape='declared1').subjects['listing']['units'], frozenset())
         self.assertEqual(self.truth(ow='tool', dshape='notes').subjects['listing']['units'], frozenset())
-        self.assertEqual(self.truth(ow='tool', dshape='declared2').subjects['listing']['units'], frozenset(['work/plain/talk']))
+        self.assertEqual(self.truth(ow='tool', dshape='declared2').subjects['listing']['units'], frozenset())             # a brief.md that declares result files is no debate (J9, V2)
+        self.assertEqual(self.truth(ow='mkdir_only', dshape='declared2').subjects['listing']['units'], frozenset(['work/plain/talk']))      # until the round folder is made
         self.assertEqual(self.truth(ow='failed', dshape='brief_r1').subjects['listing']['units'], frozenset())
         self.assertEqual(self.truth(ow='tool', dshape='brief_r1', dsite='state').subjects['listing']['units'], frozenset())
-        self.assertEqual(self.truth(ow='failed', dshape='brief_only', dsite='repo').subjects['listing']['units'], frozenset(['work/repo/docs/talk']))      # the walk, whatever the orchestrator did
+        self.assertEqual(self.truth(ow='failed', dshape='brief_only', dsite='repo').subjects['listing']['units'], frozenset())                   # a lone brief.md is no unit: the walk does not list it
+        self.assertEqual(self.truth(ow='failed', dshape='brief_r1', dsite='repo').subjects['listing']['units'], frozenset(['work/repo/docs/talk']))      # the walk, whatever the orchestrator did
         self.assertEqual(self.truth(ow='words', dshape='brief_r1', dsite='top').subjects['listing']['units'], frozenset(['work/repo']))
         self.assertEqual(self.truth(ow='words', dshape='readme_r1', dsite='docs').subjects['listing']['units'], frozenset(['work/repo/docs']))
 
@@ -3529,16 +4101,11 @@ class OrchestratorWriteScenes(unittest.TestCase):
         self.assertEqual(got[('orch', 'cells')], ['work/repo/docs/talk|1|A|kid'])
         self.assertEqual(got[('listing', 'units')], ['work/repo/docs/talk'])
 
-    def test_the_red_cells_are_only_folders_that_nothing_but_the_orchestrators_write_names(self):
+    def test_no_folder_of_the_orchestrators_writes_is_red(self):
+        """The page lists a folder by its round folder (J9), whatever the orchestrator wrote and whatever a guide says it declares: all the cells of this bundle are green."""
         with open(os.path.join(REPO, 'tests', 'scenarios_xfail.json')) as f:
             doc = json.load(f)
-        for cid, cells in doc['cells'].items():
-            if not cid.startswith('owr:'):
-                continue
-            v = Case.from_id(cid).v
-            self.assertTrue(axes.owr_listed(v) and not axes.owr_walked(v) and v['kid'] != 'seated', cid)
-            self.assertEqual(set(cells), {'listing.units'}, cid)
-            self.assertEqual({r[3] for r in cells.values()}, {'O-HINT'}, cid)
+        self.assertEqual([cid for cid in doc['cells'] if cid.startswith('owr:')], [])
 
     def test_the_diagnostics_asked_for_are_a_capped_list_only(self):
         self.assertEqual(oracle.diag_scope(axes.normalize(Case('owr', {}))), frozenset(['listing_capped']))
