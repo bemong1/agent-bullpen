@@ -210,6 +210,10 @@ def _nums(q, spec):
     return out
 
 
+class _BadRange(ValueError):
+    """A time range that is not one: it ends before it starts, or is longer than a request may name."""
+
+
 class Handler(BaseHTTPRequestHandler):
     server = None            # BaseRequestHandler.__init__ sets the real one; a Handler made without it has no token check
 
@@ -341,7 +345,10 @@ class Handler(BaseHTTPRequestHandler):
             if u.path == '/api/state':
                 t = _nums(q, {'t': (None, float)})['t']
             elif u.path == '/api/timeline':
-                since = _nums(q, {'since': (time.time() - 3600, float)})['since']
+                a = _nums(q, {'since': (time.time() - 3600, float), 'until': (None, float)})
+                since, until, everyone = a['since'], a['until'], q.get('all') in ('1', 'true')
+                if until is not None and not since < until <= since + views.TL_SPAN_MAX:      # a range named with `until` runs forward and is at most TL_SPAN_MAX long
+                    raise _BadRange(until)
             elif u.path == '/api/talk':
                 a = _nums(q, {'before': (10 ** 12, int), 'limit': (80, int)})
                 before, limit = a['before'], a['limit']
@@ -354,6 +361,8 @@ class Handler(BaseHTTPRequestHandler):
                 idx = _nums(q, {'idx': (None, int)})['idx']
                 if idx is None or idx < 0:
                     raise ValueError('idx')
+        except _BadRange:
+            return self._fail(400, 'bad range', 'bad_range')
         except ValueError:
             return self._fail(400, 'bad parameter', 'bad_parameter')
         if u.path == '/api/state':
@@ -369,7 +378,7 @@ class Handler(BaseHTTPRequestHandler):
                 items = list(getattr(s, '_diag', None) or [])
             return self._send(200, dict(diag.counts(items), session=s.id, now=time.time(), items=items))
         if u.path == '/api/timeline':
-            return self._send(200, s.timeline(since))
+            return self._send(200, s.timeline(since) if until is None and not everyone else views.timeline(s, since, until, everyone))
         if u.path == '/api/talk':
             # scope=user (default): the user ↔ orchestrator conversation (instructions, reports, multiple-choice questions, answers). scope=agents: the agent talk card.
             # the newest `limit` items that come before `before`

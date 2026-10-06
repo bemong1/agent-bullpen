@@ -13,10 +13,10 @@ const OFFICE_OPEN_MIN = 768;   // the office card starts open from this window w
 const ui = {
   // Saved choices (localStorage)
   debate: store.get('debate', null), agentFilter: store.get('agentFilter', 'debate'),
-  feedFilter: store.get('feedFilter', 'all'), tlWin: store.get('tlWin', 'debate'),
+  feedFilter: store.get('feedFilter', 'all'), tlWin: store.get('tlWin', 'debate'), tlEnd: store.get('tlEnd', null), tlFrom: store.get('tlFrom', null), tlTo: store.get('tlTo', null),
   gameOpen: store.get('gameOpen', innerWidth >= OFFICE_OPEN_MIN),
   // Drawer, feed and agent list
-  drawer: null, dTab: 'overview', openEvents: new Set(), oldOpen: false, unlinkedOpen: false,
+  drawer: null, dTab: 'overview', openEvents: new Set(), oldOpen: false, unlinkedOpen: false, tlAll: false, tlSig: '', tlPicked: '', tlToShown: '',
   // Open modal: 'file' (document) | 'talk' (conversation: one message opened by its event number, or the whole conversation) | 'diag' (the diagnostics list) | null
   modalKind: null,
   // User ↔ orchestrator conversation
@@ -51,11 +51,12 @@ function dur(sec) {
   if (sec < 86400) return t('time.dur.hourMin', { h: Math.floor(sec / 3600), m: Math.floor(sec / 60) % 60 });
   return t('time.dur.dayHour', { d: Math.floor(sec / 86400), h: Math.floor(sec / 3600) % 24 });
 }
+const monthDay = ts => { const d = new Date(ts * 1000); return t('time.monthDay', { m: d.getMonth() + 1, d: d.getDate(), mon: I18N.date(ts, 'monthShort') }); };
+const dayTime = ts => t('time.dayTime', { date: monthDay(ts), time: I18N.date(ts, 'time') });          // the date and the time of day, in the words of the language
 function hm(ts) {
   if (!ts) return '';
   const d = new Date(ts * 1000), n = new Date(now() * 1000);
-  const tm = I18N.date(ts, 'time');
-  return d.toDateString() === n.toDateString() ? tm : t('time.dayTime', { date: t('time.monthDay', { m: d.getMonth() + 1, d: d.getDate(), mon: I18N.date(ts, 'monthShort') }), time: tm });
+  return d.toDateString() === n.toDateString() ? I18N.date(ts, 'time') : dayTime(ts);
 }
 const kfmt = n => n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e8 ? Math.round(n / 1e6) + 'M' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(n || 0);
 const TOK_KEYS = ['input', 'cache_write', 'cache_read', 'output', 'calls', 'adv_input', 'adv_output', 'adv_calls',
@@ -623,49 +624,188 @@ function renderFeed() {
 
 // ---------- timeline ----------
 let TL = null;
-const TL_WINS = [['30m', 1800], ['2h', 7200], ['debate', 0], ['12h', 43200]];     // key, seconds (0 = since this debate began)
-function tlSince() {
-  const w = TL_WINS.find(x => x[0] === ui.tlWin) || TL_WINS[2];
-  if (w[1]) return now() - w[1];
+// key, seconds (0 = decided when it is asked for: this debate, all of the session, a range that was picked). The first TL_TABS are always tabs; the others are tabs on a wide page and a box on a narrow one
+const TL_WINS = [['30m', 1800], ['2h', 7200], ['debate', 0], ['12h', 43200], ['24h', 86400], ['3d', 259200], ['7d', 604800], ['all', 0], ['custom', 0]];
+const TL_TABS = 4, TL_NARROW = 760;
+const TL_MAX = 31 * 86400;                   // the longest range that is picked (the longest the server answers for a range that has an end)
+const TL_ROWS = 60;                          // a long range shows this many rows (the most recently active) until "show all"
+const TL_BIN_SPAN = 13 * 3600;               // the server sends a range longer than this binned, and (this debate) with the lanes of all the agents: the page picks the debate's own
+const TL_LATE = 600;                         // a range that ended less than this ago is asked for again by the refresh: records arrive late (a command is written when it ends)
+const TL_EARLIEST = 946684800, TL_LATEST = 4102444800;      // a time that was kept is believed between 2000 and 2100: Date shows more, but nothing here happened then
+const tlWinOf = k => TL_WINS.find(w => w[0] === k) || TL_WINS[2];
+const tlTime = v => typeof v === 'number' && isFinite(v) && v >= TL_EARLIEST && v <= TL_LATEST && !isNaN(new Date(v * 1000).getTime()) ? v : null;
+// A picked range: it starts and ends in that order, an open end (null) is "up to now", and it is at most TL_MAX long
+const tlOk = (from, to, n) => from != null && from < (to == null ? n : to) && (to == null ? n : to) - from <= TL_MAX;
+// What was kept in the browser is only believed when it makes sense: a window this page knows, times that Date can show, a picked range that runs forward and is not too long
+(function tlInit() {
+  if (!TL_WINS.some(w => w[0] === ui.tlWin)) ui.tlWin = 'debate';
+  ui.tlEnd = tlTime(ui.tlEnd); ui.tlFrom = tlTime(ui.tlFrom); ui.tlTo = tlTime(ui.tlTo);
+  if (!tlOk(ui.tlFrom, ui.tlTo, now())) ui.tlFrom = ui.tlTo = null;
+  if (ui.tlWin === 'custom' && ui.tlFrom == null) ui.tlWin = 'debate';
+  if (!tlWinOf(ui.tlWin)[1] || (ui.tlEnd != null && ui.tlEnd - tlWinOf(ui.tlWin)[1] < TL_EARLIEST)) ui.tlEnd = null;     // a step back is of a window that has a length
+})();
+const tlSave = () => { store.set('tlWin', ui.tlWin); store.set('tlEnd', ui.tlEnd); store.set('tlFrom', ui.tlFrom); store.set('tlTo', ui.tlTo); };
+// The range on show: since, and until (null = up to now, an open end: it is not a time, so the range goes on with the clock). A window ends at now unless a step moved it into the past
+// (ui.tlEnd); a picked range ends where it was picked, or is open. `n` is now: one moment for all that one action works out
+function tlRaw(n) {
+  const k = ui.tlWin, w = tlWinOf(k);
+  if (k === 'custom') return { since: ui.tlFrom, until: ui.tlTo != null && ui.tlTo < n ? ui.tlTo : null };
+  if (w[1]) { const end = ui.tlEnd != null && ui.tlEnd < n ? ui.tlEnd : null; return { since: (end || n) - w[1], until: end }; }
+  if (k === 'all') return { since: ((S && S.session.started) || n - 7200) - 60, until: null };
   const d = currentDebate();
   const ids = d ? S.agents.filter(a => inDebate(a, d)) : [];
-  const t0 = ids.length ? Math.min(...ids.map(a => a.spawn_ts || a.first_ts || now())) : now() - 7200;
-  return t0 - 120;
+  const t0 = ids.length ? Math.min(...ids.map(a => a.spawn_ts || a.first_ts || n)) : n - 7200;
+  return { since: t0 - 120, until: null };
 }
+const tlSane = r => r.since != null && tlTime(r.since) != null && (r.until == null || (tlTime(r.until) != null && r.since < r.until));
+function tlRange(n = now()) {
+  let r = tlRaw(n);
+  if (!tlSane(r) && ui.tlWin !== 'debate') { ui.tlWin = 'debate'; ui.tlEnd = ui.tlFrom = ui.tlTo = null; tlSave(); r = tlRaw(n); }       // values that do not fit together: the default window
+  return tlSane(r) ? r : { since: n - 7200, until: null };
+}
+const tlSince = () => tlRange().since;
+// One step: a range of its own length into the past (dir -1) or toward now (+1, which stops at now: a step that lands within a minute of it, or a thousandth of the length, ends open).
+// The window of a debate becomes a picked range when it is stepped; all of a session has nothing before it
+function tlStep(dir) {
+  const n = now(), r = tlRange(n), k = ui.tlWin;
+  if (k === 'all' || !S) return;
+  const len = Math.max(60, Math.min((r.until || n) - r.since, TL_MAX));
+  let from, to;
+  if (dir < 0) { to = r.since; from = to - len; if (from < TL_EARLIEST) return; }
+  else if (r.until == null) return;
+  else { from = r.since + len; to = r.until + len; if (to >= n - Math.max(60, len / 1000)) { to = null; from = n - len; } }
+  if (tlWinOf(k)[1]) ui.tlEnd = to;
+  else { ui.tlWin = 'custom'; ui.tlFrom = from; ui.tlTo = to; ui.tlEnd = null; }
+  tlSave(); tlControls(); loadTimeline();
+}
+function tlPick(k) {
+  const n = now();
+  ui.tlWin = k; ui.tlEnd = null; ui.tlAll = false;
+  if (k === 'custom' && !tlOk(ui.tlFrom, ui.tlTo, n)) { ui.tlTo = null; ui.tlFrom = n - 86400; }          // the last 24 hours, and still going
+  tlSave(); tlControls(); loadTimeline();
+}
+// The picked range, as the date-time inputs hold it (the local time, to the minute)
+const p2 = n => String(n).padStart(2, '0');
+const tlInputOf = ts => { const d = new Date(ts * 1000); return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate()) + 'T' + p2(d.getHours()) + ':' + p2(d.getMinutes()); };
+const tlTimeOf = v => { const m = /^(\d{4})-(\d\d)-(\d\d)T(\d\d):(\d\d)/.exec(v || ''); return m ? new Date(+m[1], +m[2] - 1, +m[3], +m[4], +m[5]).getTime() / 1000 : null; };
+function tlCustom() {
+  const n = now(), nm = Math.floor(n / 60) * 60;
+  const from = tlTimeOf($('#tlFrom').value);
+  let to = tlTimeOf($('#tlTo').value);
+  if (ui.tlTo == null && $('#tlTo').value === ui.tlToShown) to = null;       // an end that is open and was not touched stays open (the input shows the minute it was set)
+  else if (to != null && to >= nm) to = null;                                  // this minute or later is "up to now", never a time that is past in a few seconds
+  const bad = tlTime(from) == null || (to != null && tlTime(to) == null) || !tlOk(from, to, n);
+  ['#tlFrom', '#tlTo'].forEach(q => { const el = $(q); if (el.setAttribute) el.setAttribute('aria-invalid', bad ? 'true' : 'false'); });
+  $('#tlHint').textContent = bad ? t('board.tl.custom.bad') : '';
+  if (bad) return;                                                             // only a range that is one is kept and asked for
+  ui.tlFrom = from; ui.tlTo = to; tlSave(); tlControls(); loadTimeline();
+}
+// The window picker: tabs (all of the windows on a wide page; the first four and a box for the rest on a narrow one), the step buttons, the picked range's inputs, and the range on show when it is not "up to now".
+// Drawn again only when what it shows changed, so a box that is open is not closed by the 15-second refresh
+function tlControls() {
+  const narrow = innerWidth < TL_NARROW, room = isRoom(currentDebate()), r = tlRange(), custom = ui.tlWin === 'custom';
+  const label = k => t('board.tl.win.' + (k === 'debate' && room ? 'room' : k));
+  const sig = [narrow, ui.tlWin, room, t('board.tl.win.30m')].join('|');
+  if (sig !== ui.tlSig) {
+    ui.tlSig = sig;
+    tabBar($('#tlWin'), TL_WINS.filter((w, i) => !narrow || i < TL_TABS).map(([k]) => [k, label(k)]), ui.tlWin, tlPick);
+    if (narrow) {
+      const longer = TL_WINS.slice(TL_TABS).map(([k]) => k), on = longer.includes(ui.tlWin);
+      $('#tlWin').insertAdjacentHTML('beforeend', `<select id="tlMore" class="sel tl-more${on ? ' on' : ''}" aria-label="${esc(t('board.tl.more'))}"><option value="" disabled${on ? '' : ' selected'}>${esc(t('board.tl.more'))}</option>`
+        + longer.map(k => `<option value="${k}"${k === ui.tlWin ? ' selected' : ''}>${esc(label(k))}</option>`).join('') + '</select>');
+      const box = $('#tlMore');
+      if (box) box.onchange = () => { if (box.value) tlPick(box.value); };
+    }
+  }
+  $('#tlCustom').hidden = !custom;
+  const picked = custom ? ui.tlFrom + '|' + ui.tlTo : '';
+  if (custom && picked !== ui.tlPicked) {                     // the inputs are set when the picked range changed (a step, a pick), never under the hand of someone who is typing in them
+    ui.tlPicked = picked;
+    $('#tlFrom').value = tlInputOf(ui.tlFrom); $('#tlTo').value = ui.tlToShown = tlInputOf(ui.tlTo != null ? ui.tlTo : now());       // an open end shows this minute
+    $('#tlHint').textContent = ''; ['#tlFrom', '#tlTo'].forEach(q => { const el = $(q); if (el.setAttribute) el.setAttribute('aria-invalid', 'false'); });
+  }
+  if (custom) $('#tlTo').max = tlInputOf(now());
+  $('#tlPrev').disabled = ui.tlWin === 'all';
+  $('#tlNext').disabled = ui.tlWin === 'all' || r.until == null;
+  $('#tlRange').textContent = r.until != null || custom ? dayTime(r.since) + ' – ' + dayTime(r.until || now()) : '';
+}
+(function tlBind() {
+  const on = (q, ev, f) => { const el = $(q); if (el) el.addEventListener(ev, f); };
+  on('#tlPrev', 'click', () => tlStep(-1)); on('#tlNext', 'click', () => tlStep(1));
+  on('#tlFrom', 'change', tlCustom); on('#tlTo', 'change', tlCustom);
+})();
 let tlReq = null;                            // Timeline request in flight { key, g }
+const tlHasAll = () => !!TL && (TL.lanes_total == null || TL.lanes.length >= TL.lanes_total);      // the answer has every lane (a long range comes with the most recently active ones unless all were asked for)
+// Whether the request asks for the lanes of all the agents: when it was asked for, and for a long window of a debate (the page keeps the debate's own, and the server's most recently active
+// ones may be none of them)
+const tlWantAll = r => ui.tlAll || (ui.tlWin === 'debate' && (r.until || now()) - r.since > TL_BIN_SPAN);
 async function loadTimeline() {
   if (!S) return;
-  tabBar($('#tlWin'), TL_WINS.map(([k]) => [k, t('board.tl.win.' + (k === 'debate' && isRoom(currentDebate()) ? 'room' : k))]), ui.tlWin, k => { ui.tlWin = k; store.set('tlWin', k); loadTimeline(); });
+  tlControls();
   // The 15 s refresh waits if a request for the same window has not finished (so a response slower than the period is not pushed aside and discarded every time).
-  // After a change of window or debate it is a different request, so a new one is sent and the late response of the earlier one is dropped
-  const d = currentDebate(), key = ui.tlWin + '|' + (d ? d.root : '');
+  // After a change of window or debate it is a different request, so a new one is sent and the late response of the earlier one is dropped.
+  // A range that ended some time ago does not change: it is asked for again only when it is another range (the live refresh does not move it, and has nothing new to bring);
+  // one that ended a few minutes ago is asked for again, for the records that come late
+  const n = now(), d = currentDebate(), r = tlRange(n), since = Math.round(r.since), until = r.until != null ? Math.round(r.until) : null, all = tlWantAll(r);
+  const key = ui.tlWin + '|' + (d ? d.root : '') + '|' + (until || '') + '|' + (ui.tlWin === 'custom' ? since : '') + '|' + (all ? 'all' : '');
+  if (until != null && n - until >= TL_LATE && TL && TL.since === since && TL.until === until && (!all || tlHasAll())) { renderTimeline(); return; }
   if (tlReq && tlReq.key === key && isLatest('timeline', tlReq.g)) return;
   const g = nextGen('timeline'), req = tlReq = { key, g };
   let T = null;
-  try { T = await apiGuarded('/api/timeline?since=' + tlSince().toFixed(0)); } catch {}
+  try { T = await apiGuarded('/api/timeline?since=' + since + (until != null ? '&until=' + until : '') + (all ? '&all=1' : '')); } catch {}
   if (tlReq === req) tlReq = null;
   if (!T || !isLatest('timeline', g)) return;
   TL = T;
   renderTimeline();
 }
+// The ticks of half a day or more: local midnight and noon (12 h), or local midnight of the days that count in whole steps (the day number is a multiple of the step). They are counted on the
+// calendar: a day is not always 86400 s (the clocks change), and a tick at midnight must not be on 23:00 of the day before
+function tlLocalTicks(t0, t1, step) {
+  const out = [], days = step / 86400, d = new Date(t0 * 1000);
+  d.setHours(0, 0, 0, 0);
+  for (let i = 0; i < 5000; i++, d.setDate(d.getDate() + 1), d.setHours(0, 0, 0, 0)) {
+    const mid = d.getTime() / 1000;
+    if (mid > t1 + 86400) break;
+    if (days < 1) [0, 12].forEach(h => { const x = new Date(d); x.setHours(h, 0, 0, 0); out.push(x.getTime() / 1000); });
+    else if (Math.round(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / 86400000) % days === 0) out.push(mid);
+  }
+  return out.filter(tt => tt >= t0 && tt <= t1);
+}
 function renderTimeline() {
   if (!TL) return;
   const box = $('#tlBox'), W = Math.max(300, box.clientWidth || 700), labelW = W < 560 ? 92 : 128, rowH = 24, pad = 22;
-  const t0 = TL.since, t1 = now(), span = Math.max(60, t1 - t0);
-  const x = ts => labelW + (ts - t0) / span * (W - labelW - 10);
+  const past = TL.until != null;                      // a range that ends before now: no "now" line, and what is live now was not live then
+  const t0 = TL.since, t1 = past ? TL.until : now(), span = Math.max(60, t1 - t0);
+  const x0 = ts => labelW + (ts - t0) / span * (W - labelW - 10);
+  const x = TL.binned ? ts => Math.round(x0(ts) * 10) / 10 : x0, tsAttr = TL.binned ? Math.round : ts => ts;     // thousands of marks: a tenth of a pixel and a second are enough, and the drawing is half the size
   const d = currentDebate();
-  const lanes = TL.lanes.map(l => ({ ...l, a: agentById(l.id) })).filter(l => l.a)
-    .filter(l => ui.tlWin !== 'debate' || !d || inDebate(l.a, d) || l.a.status === 'running')
-    .sort((p, q) => (p.a.tag || p.a.title).localeCompare(q.a.tag || q.a.title));
+  let lanes = TL.lanes.map(l => ({ ...l, a: agentById(l.id) })).filter(l => l.a)
+    .filter(l => ui.tlWin !== 'debate' || !d || inDebate(l.a, d) || l.a.status === 'running');
+  // A long range has a lane for every agent that was at work in it, which can be hundreds: the answer holds the most recently active ones (TL_ROWS) until "show all", which asks for the rest.
+  // The lanes of a binned answer come in the order of the work in the range (the latest first), which the server works out from the ticks themselves: a tick of a long range is the first of its
+  // column, and cannot say who worked last. The ones kept are the first TL_ROWS of what is left after the page took out those of other work (this debate) and of agents it does not know, in
+  // that order; the order of the rows on the page (by name) is made after the cut. The count is of the rows that can be shown: the server's own count when it cut the lanes (then none was
+  // taken out here), else the lanes that are left
+  const have = tlHasAll(), expanded = ui.tlAll && have, count = have ? lanes.length : TL.lanes_total;
+  if (TL.binned && !expanded && lanes.length > TL_ROWS) lanes = lanes.slice(0, TL_ROWS);
+  const capped = !!TL.binned && !expanded && count > lanes.length;
+  lanes.sort((p, q) => (p.a.tag || p.a.title).localeCompare(q.a.tag || q.a.title));
   const H = pad + (lanes.length + 1) * rowH + 6;
   const COL = { read: 'var(--blue)', write: 'var(--green)', bash: 'var(--amber)', web: 'var(--purple)', msg: 'var(--orange)', recv: 'var(--orange)', error: 'var(--red)', other: 'var(--faint)' };
   let g = '';
   // Time ticks
-  const stepCands = [60, 300, 600, 900, 1800, 3600, 7200, 10800, 21600];
-  const step = stepCands.find(s => span / s <= 8) || 21600;
-  for (let tt = Math.ceil(t0 / step) * step; tt <= t1; tt += step) {
-    g += `<line x1="${x(tt)}" x2="${x(tt)}" y1="${pad - 6}" y2="${H}" stroke="var(--line)" /><text x="${x(tt) + 3}" y="${pad - 9}" font-size="10.5" fill="var(--muted)">${hm(tt)}</text>`;
-  }
+  // Over a day the labels carry the date (so does a day that goes across midnight), so fewer fit: the number is by the width of the card, a label of a date and a time taking more than one of a
+  // date only. From half a day on the ticks are at the local hours of the day (midnight, noon) counted on the calendar, not at multiples of the time since 1970 in UTC
+  const stepCands = [60, 300, 600, 900, 1800, 3600, 7200, 10800, 21600, 43200, 86400, 172800, 604800, 1209600, 2592000];
+  const dated = span > 90000 || (span > 46800 && new Date(t0 * 1000).toDateString() !== new Date(t1 * 1000).toDateString()), axisW = W - labelW - 10;
+  const fits = s => span / s <= (dated ? Math.max(2, Math.min(8, Math.floor(axisW / (s >= 86400 ? 44 : 84)))) : 8);
+  const step = stepCands.find(fits) || stepCands[stepCands.length - 1];
+  const tickText = tt => !dated ? hm(tt) : step >= 86400 ? monthDay(tt) : dayTime(tt);
+  const ticks = step >= 43200 ? tlLocalTicks(t0, t1, step) : [];
+  if (step < 43200) for (let tt = Math.ceil(t0 / step) * step; tt <= t1; tt += step) ticks.push(tt);
+  ticks.forEach(tt => {
+    g += `<line x1="${x(tt)}" x2="${x(tt)}" y1="${pad - 6}" y2="${H}" stroke="var(--line)" /><text x="${x(tt) + 3}" y="${pad - 9}" font-size="10.5" fill="var(--muted)">${tickText(tt)}</text>`;
+  });
   const row = (i, name, st, cx) => {
     const y = pad + i * rowH, fill = st === 'running' ? 'var(--green)' : st === 'stalled' || st === 'interrupted' ? 'var(--amber)' : st === 'orch' ? 'var(--orange)' : 'var(--faint)';
     return `<rect x="0" y="${y}" width="${W}" height="${rowH}" fill="${i % 2 ? 'transparent' : 'var(--panel2)'}" opacity=".6"/>` +
@@ -678,32 +818,44 @@ function renderTimeline() {
   TL.orch.forEach(([ts, k]) => {
     const y = pad + rowH / 2, cx = x(ts);
     const col = k === 'user_say' || k === 'user_answer' ? 'var(--purple)' : k === 'handback' ? 'var(--teal)' : 'var(--orange)';
-    g += `<rect x="${cx - 2.5}" y="${y - 6}" width="5" height="12" rx="1.5" fill="${col}" data-tip="${esc(hm(ts) + ' · ' + (I18N.has('board.tl.ev.' + k) ? t('board.tl.ev.' + k) : k))}"/>`;
+    g += `<rect x="${cx - 2.5}" y="${y - 6}" width="5" height="12" rx="1.5" fill="${col}" data-ts="${tsAttr(ts)}" data-k="ev:${esc(k)}"/>`;
   });
   lanes.forEach((l, i) => {
     const y = pad + (i + 1) * rowH, mid = y + rowH / 2;
     g += row(i + 1, (l.a.tag ? l.a.tag + ' ' : '') + l.a.title, l.a.status, isCx(l.a));
-    const s = Math.max(t0, l.spawn_ts || t0), e = isLive(l.a) ? t1 : (l.a.last_ts || t1);
-    if (e > t0) g += `<line x1="${x(s)}" x2="${x(Math.min(e, t1))}" y1="${mid}" y2="${mid}" stroke="var(--line2)" stroke-width="2"/>`;
-    l.ticks.forEach(([ts, c]) => { if (ts >= t0) g += c === 'recv'
-      ? `<path d="M${x(ts)} ${mid - 6} l5 6 -5 6 -5 -6z" fill="var(--orange)" data-tip="${esc(hm(ts) + ' · ' + t('board.tl.recv'))}"/>`
-      : `<line x1="${x(ts)}" x2="${x(ts)}" y1="${mid - 6}" y2="${mid + 6}" stroke="${COL[c] || COL.other}" stroke-width="1.6" data-tip="${esc(hm(ts) + ' · ' + c)}"/>`; });
-    l.writes.forEach(([ts, p]) => { if (/\/r\d+\/[^/]+\.md$/.test(p)) g += `<circle cx="${x(ts)}" cy="${mid}" r="4.5" fill="var(--green)" stroke="var(--panel)" stroke-width="1.5" data-tip="${esc(hm(ts) + ' · ' + t('board.tl.saved', { path: p }))}"/>`; });
-    l.handbacks.forEach(ts => g += `<path d="M${x(ts) - 5} ${mid - 7} h10 l-5 7z" fill="var(--teal)" data-tip="${esc(hm(ts) + ' · ' + t('board.tl.handback'))}"/>`);
+    const s = Math.max(t0, l.spawn_ts || t0), e = isLive(l.a) && !past ? t1 : (l.a.last_ts || t1);
+    if (e > t0 && s <= t1) g += `<line x1="${x(s)}" x2="${x(Math.min(e, t1))}" y1="${mid}" y2="${mid}" stroke="var(--line2)" stroke-width="2"/>`;
+    l.ticks.forEach(([ts, c, n]) => { const more = n > 1 ? ` data-n="${n}"` : ''; if (ts >= t0) g += c === 'recv'     // n: how many ticks of that kind the server put into this one (a long range)
+      ? `<path d="M${x(ts)} ${mid - 6} l5 6 -5 6 -5 -6z" fill="var(--orange)" data-ts="${tsAttr(ts)}" data-k="recv"${more}/>`
+      : `<line x1="${x(ts)}" x2="${x(ts)}" y1="${mid - 6}" y2="${mid + 6}" stroke="${COL[c] || COL.other}" stroke-width="1.6" data-ts="${tsAttr(ts)}" data-k="${esc(c)}"${more}/>`; });
+    l.writes.forEach(([ts, p]) => { if (/\/r\d+\/[^/]+\.md$/.test(p)) g += `<circle cx="${x(ts)}" cy="${mid}" r="4.5" fill="var(--green)" stroke="var(--panel)" stroke-width="1.5" data-ts="${tsAttr(ts)}" data-k="saved" data-p="${esc(p)}"/>`; });
+    l.handbacks.forEach(ts => g += `<path d="M${x(ts) - 5} ${mid - 7} h10 l-5 7z" fill="var(--teal)" data-ts="${tsAttr(ts)}" data-k="handback"/>`);
   });
-  g += `<line x1="${x(t1)}" x2="${x(t1)}" y1="${pad - 6}" y2="${H}" stroke="var(--red)" stroke-dasharray="3 3" opacity=".7"/>`;
-  box.innerHTML = lanes.length || TL.orch.length ? `<svg viewBox="0 0 ${W} ${H}" height="${H}">${g}</svg>` : `<div class="empty">${t('board.tl.empty')}</div>`;
+  if (!past) g += `<line x1="${x(t1)}" x2="${x(t1)}" y1="${pad - 6}" y2="${H}" stroke="var(--red)" stroke-dasharray="3 3" opacity=".7"/>`;
+  const rows = TL.binned && count > TL_ROWS ? `<div class="tl-rows"><span>${capped ? t('board.tl.capped', { shown: lanes.length, count }) : ''}</span><button type="button" id="tlAll">${capped ? t('board.tl.showAll', { count }) : t('board.tl.showFewer', { shown: TL_ROWS })}</button></div>` : '';
+  box.innerHTML = lanes.length || TL.orch.length ? `<svg viewBox="0 0 ${W} ${H}" height="${H}">${g}</svg>${rows}` : `<div class="empty">${t('board.tl.empty')}</div>`;
+  const allBtn = $('#tlAll', box);
+  if (allBtn) allBtn.onclick = () => { ui.tlAll = !ui.tlAll; if (ui.tlAll && !tlHasAll()) loadTimeline(); else renderTimeline(); };
   // Legend: the ◆ entry is added only when there is a Codex row
   const cxLegend = $('#tlCx'), wantCx = orchCx() || lanes.some(l => isCx(l.a));
   if (wantCx && !cxLegend) $('.tl .legend').insertAdjacentHTML('beforeend', `<span id="tlCx">${CXG.replace('class="cxg"', 'class="cxg" style="margin:0"')}Codex</span>`);
   else if (!wantCx && cxLegend) cxLegend.remove();
-  const tip = $('#tip');
-  box.querySelectorAll('[data-tip]').forEach(el => {
-    el.addEventListener('mouseenter', ev => { tip.textContent = el.dataset.tip; tip.style.display = 'block'; });
-    el.addEventListener('mousemove', ev => { tip.style.left = Math.min(ev.clientX + 12, innerWidth - 390) + 'px'; tip.style.top = ev.clientY + 12 + 'px'; });
-    el.addEventListener('mouseleave', () => tip.style.display = 'none');
-  });
 }
+// The tip of a mark is worked out when the pointer is over it, from what the mark carries (its time, its kind, how many it stands for), and the handlers are one set on the box: a long range
+// has thousands of marks, and a text and three listeners for each was most of the cost of drawing one
+const tlTipText = d => {
+  const k = d.k || '', what = k === 'recv' ? t('board.tl.recv') : k === 'saved' ? t('board.tl.saved', { path: d.p }) : k === 'handback' ? t('board.tl.handback')
+    : k.startsWith('ev:') ? (I18N.has('board.tl.ev.' + k.slice(3)) ? t('board.tl.ev.' + k.slice(3)) : k.slice(3)) : k;
+  return hm(+d.ts) + ' · ' + what + (d.n ? ' ×' + d.n : '');
+};
+(function tlTip() {
+  const box = $('#tlBox'), tip = $('#tip');
+  if (!box || !tip) return;
+  const mark = ev => ev.target && ev.target.closest ? ev.target.closest('[data-ts]') : null;
+  box.addEventListener('mouseover', ev => { const m = mark(ev); if (m) { tip.textContent = tlTipText(m.dataset); tip.style.display = 'block'; } });
+  box.addEventListener('mousemove', ev => { if (mark(ev)) { tip.style.left = Math.min(ev.clientX + 12, innerWidth - 390) + 'px'; tip.style.top = ev.clientY + 12 + 'px'; } });
+  box.addEventListener('mouseout', ev => { const m = mark(ev); if (m && !(ev.relatedTarget && m.contains && m.contains(ev.relatedTarget))) tip.style.display = 'none'; });
+})();
 
 // ---------- agent drawer ----------
 let DETAIL = null, DETAIL_ID = null;         // DETAIL is the detail of the agent DETAIL_ID (kept together so the drawer never draws a mix while it switches to another agent)
@@ -1212,7 +1364,7 @@ function startMain() {
   setInterval(() => loadTimeline(), 15000);
   setInterval(() => refreshDrawer(), 5000);
   setInterval(() => { if (S && !ui.atalkLoaded) loadAtalk(false); }, 15000);      // Try again if the agent talk could not be loaded
-  addEventListener('resize', () => renderTimeline());
+  addEventListener('resize', () => { if (S) tlControls(); renderTimeline(); });
 }
 // Bottom row: the same order for both services (plan → 5 hours → week → extra usage and credits → recorded time)
 const PLAN_NAMES = { prolite: 'Pro Lite', pro: 'Pro', plus: 'Plus', team: 'Team', enterprise: 'Enterprise', free: 'Free', business: 'Business' };

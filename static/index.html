@@ -59,7 +59,14 @@
 
   <div class="lower">
     <section class="card tl">
-      <div class="sec-head"><h2 data-i18n="page.timeline.title">Activity timeline</h2><div class="tabs" id="tlWin"></div></div>
+      <div class="sec-head tl-head"><h2 data-i18n="page.timeline.title">Activity timeline</h2><div class="tabs" id="tlWin"></div>
+        <div class="tl-nav"><button type="button" class="icon-btn" id="tlPrev" title="Earlier" aria-label="Earlier" data-i18n-title="page.timeline.prev" data-i18n-aria-label="page.timeline.prev">◀</button><button type="button" class="icon-btn" id="tlNext" title="Later" aria-label="Later" data-i18n-title="page.timeline.next" data-i18n-aria-label="page.timeline.next">▶</button></div></div>
+      <div class="tl-custom" id="tlCustom" hidden>
+        <label><span data-i18n="page.timeline.from">From</span><input type="datetime-local" id="tlFrom" aria-describedby="tlHint"></label>
+        <label><span data-i18n="page.timeline.to">To</span><input type="datetime-local" id="tlTo" aria-describedby="tlHint"></label>
+        <span class="tl-hint" id="tlHint" role="status"></span>
+      </div>
+      <div class="tl-range" id="tlRange"></div>
       <div id="tlBox"></div>
       <div class="legend">
         <span><i style="background:var(--blue)"></i><span data-i18n="page.legend.read">Read</span></span><span><i style="background:var(--green)"></i><span data-i18n="page.legend.write">Write</span></span>

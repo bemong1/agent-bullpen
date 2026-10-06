@@ -4,6 +4,7 @@ import glob
 import os
 import re
 import time
+from bisect import bisect_left, bisect_right
 from datetime import datetime
 
 from . import diag, runstate as RS
@@ -362,20 +363,186 @@ def agent_detail(s, aid):
         return d
 
 
-def timeline(s, since):
+TL_BIN_SPAN = 13 * 3600      # a range longer than this is sent binned (the windows up to 12 h are sent whole, as they always were)
+TL_BINS = 1000               # the time columns a binned range is cut into: more than a page has pixels
+TL_MARKS_MAX = 20000         # the ticks a binned answer holds at most (about 600 KB): when there are more, the columns get wider
+TL_ROWS = 60                 # the lanes a binned answer holds unless it is asked for all of them: the most recently active ones
+TL_SPAN_MAX = 31 * 86400     # the longest range a request may name with `until`
+TL_REPORT_RE = re.compile(r'/r\d+/[^/]+\.md$')       # the saved files the timeline draws (a round's report)
+_TL_ORCH = frozenset(('orch_msg', 'spawn', 'user_say', 'orch_say', 'handback', 'orch_ask', 'user_answer'))      # the orchestrator's marks
+
+
+def _cells(ticks, since, until, size):
+    """The ticks (ts, kind) of a binned range counted into time columns of `size` seconds: {(column, kind): [the first ts, how many]}. One pass over the ticks."""
+    cells = {}
+    for ts, c in ticks:
+        if ts and since <= ts <= until:
+            k = (int((ts - since) // size), c)
+            e = cells.get(k)
+            if e is None:
+                cells[k] = [ts, 1]
+            else:
+                e[1] += 1
+                if ts < e[0]:
+                    e[0] = ts
+    return cells
+
+
+def _merge(cells, f):
+    """The same cells in columns f times as wide (a whole number): what counting again at that width gives, from the cells instead of the ticks."""
+    out = {}
+    for (col, c), (ts, n) in cells.items():
+        k = (col // f, c)
+        e = out.get(k)
+        if e is None:
+            out[k] = [ts, n]
+        else:
+            e[1] += n
+            if ts < e[0]:
+                e[0] = ts
+    return out
+
+
+def _marks(cells):
+    """The marks of cells in time order: [ts, kind], with the count as a third value when it stands for more than one."""
+    return [[ts, c, n] if n > 1 else [ts, c] for ts, c, n in sorted((e[0], k[1], e[1]) for k, e in cells.items())]
+
+
+def _bin_marks(marks, since, until, size, key=lambda m: m[1]):
+    """Marks [ts, kind, ...] of a binned range: one for each kind in each time column of `size` seconds (the first of them), with the count when it stands for more than one."""
+    seen = {}
+    for m in marks:
+        ts = m[0]
+        if ts and since <= ts <= until:
+            k = (int((ts - since) // size), key(m))
+            e = seen.get(k)
+            if e is None:
+                seen[k] = [ts, m[1], 1]
+            else:
+                e[2] += 1
+    return [[ts, c, n] if n > 1 else [ts, c] for ts, c, n in sorted(seen.values())]
+
+
+def _bin_times(times, since, until, size):
+    """The same for plain times: one for each column."""
+    seen = set()
+    out = []
+    for ts in sorted(t for t in times if t and since <= t <= until):
+        k = int((ts - since) // size)
+        if k not in seen:
+            seen.add(k)
+            out.append(ts)
+    return out
+
+
+def _in_order(a):
+    """Whether the ticks of an agent are in time order (the order the records were read): kept on the agent and brought up to date with what was added. A tick with no time, or one
+    before the last, makes the list not in order, and it is looked at whole then."""
+    ticks = a.ticks
+    n, ok = getattr(a, '_tl_order', (0, True))
+    if len(ticks) < n:
+        n, ok = 0, True
+    if ok and len(ticks) > n:
+        prev = ticks[n - 1][0] if n else 0
+        for ts, _ in ticks[n:]:
+            if not ts or ts < prev:
+                ok = False
+                break
+            prev = ts
+        a._tl_order = (len(ticks), ok)
+    elif n != len(ticks):
+        a._tl_order = (len(ticks), ok)
+    return ok and bool(ticks)
+
+
+def _bounds(a, since, hi):
+    """(first, end) positions in the ticks of an agent of those from `since` to `hi`, found by bisection; None when its list is not in order."""
+    if not _in_order(a):
+        return None
+    ticks = a.ticks
+    return bisect_left(ticks, (since,)), bisect_right(ticks, (hi, '\uffff'))
+
+
+def _last_tick(a, since, hi):
+    """The time of the latest tick of an agent from `since` to `hi`, or None when there is none."""
+    ticks, b = a.ticks, _bounds(a, since, hi)
+    if b is not None:
+        return ticks[b[1] - 1][0] if b[1] > b[0] else None
+    return max((ts for ts, _ in ticks if ts and since <= ts <= hi), default=None)
+
+
+def _ticks_between(a, since, hi):
+    """A copy of the ticks (ts, kind) of an agent from `since` to `hi`: the part between the bounds when its list is in order, else those of the whole list that are."""
+    b = _bounds(a, since, hi)
+    return a.ticks[b[0]:b[1]] if b is not None else [t for t in a.ticks if t[0] and since <= t[0] <= hi]
+
+
+def _rank(a, since, hi):
+    """What puts an agent among the rows of a range: first the ones with ticks in it, the latest tick first (the last activity of the agent decides between equals); then the ones that
+    were there without a tick, by their last activity."""
+    last = _last_tick(a, since, hi)
+    return (0, -last, -(a.last_ts or 0)) if last is not None else (1, 0, -(a.last_ts or 0))
+
+
+def _lane_whole(a, since, hi):
+    """The lane of an agent in a range that is sent whole (the caller holds the session's lock)."""
+    ticks = [[ts, c] for ts, c in a.ticks if ts and since <= ts <= hi]
+    if not ticks and (a.last_ts or 0) < since:
+        return None
+    return {'id': a.id, 'ticks': ticks, 'spawn_ts': a.spawn_ts or a.first_ts,
+            'writes': [[w['ts'], short_path(w['path'])] for w in a.writes if w['ts'] and since <= w['ts'] <= hi],
+            'handbacks': [h['ts'] for h in a.handbacks if h['ts'] and since <= h['ts'] <= hi],
+            'received': [m['ts'] for m in a.received if m['ts'] and since <= m['ts'] <= hi]}
+
+
+def timeline(s, since, until=None, all_lanes=False):
+    """The activity timeline of a session from `since` to `until` (default: now, and the answer says nothing of it). A range of up to TL_BIN_SPAN is sent whole; a longer one is
+    binned: for each lane one tick of each kind in each time column (the first, with a third value, how many it stands for, when more than one), only the saved reports of the
+    writes, one hand-back and one received message in a column, and the orchestrator's marks one of each kind in a column. The columns are TL_BINS of the range; they get a whole
+    number of times wider when the lanes have more than TL_MARKS_MAX ticks in it. A binned answer holds the TL_ROWS lanes that were most recently at work in the range (ticks in it
+    first, the latest first) unless `all_lanes`, and its lanes come in that order, worked out from the ticks themselves (a binned tick is the first of its column and cannot tell who worked
+    last: a page that cuts the lanes again keeps the first of them); `lanes_total` says how many there are. `binned`, `bin` (the width of a column in seconds) and `lanes_total` are only in a binned
+    answer, `until` only when there was one. `until` leaves out what is after it, and the lanes of agents that began after it. The session's lock is held to choose and copy what is
+    needed (the ticks of the lanes, the lists beside them, the feed); the binning is done after it."""
+    now = time.time()
+    hi = float('inf') if until is None else until
+    span = (now if until is None else until) - since
+    binned = span > TL_BIN_SPAN
+    if not binned:
+        with s.lock:
+            lanes = [lane for lane in (_lane_whole(a, since, hi) for a in s.agents.values() if until is None or (a.spawn_ts or a.first_ts or 0) <= until) if lane]
+            out = {'since': since, 'now': now, 'lanes': lanes,
+                   'orch': [[ev['ts'], ev['kind']] for ev in s.feed if ev['ts'] and since <= ev['ts'] <= hi and ev['kind'] in _TL_ORCH]}
+        if until is not None:
+            out['until'] = until
+        return out
     with s.lock:
-        lanes = []
-        for a in s.agents.values():
-            ticks = [[ts, c] for ts, c in a.ticks if ts and ts >= since]
-            if ticks or (a.last_ts or 0) >= since:
-                lanes.append({'id': a.id, 'ticks': ticks, 'spawn_ts': a.spawn_ts or a.first_ts,
-                              'writes': [[w['ts'], short_path(w['path'])] for w in a.writes
-                                         if w['ts'] and w['ts'] >= since],
-                              'handbacks': [h['ts'] for h in a.handbacks if h['ts'] and h['ts'] >= since],
-                              'received': [m['ts'] for m in a.received if m['ts'] and m['ts'] >= since]})
-        orch = [[ev['ts'], ev['kind']] for ev in s.feed if ev['ts'] and ev['ts'] >= since and
-                ev['kind'] in ('orch_msg', 'spawn', 'user_say', 'orch_say', 'handback', 'orch_ask', 'user_answer')]
-        return {'since': since, 'now': time.time(), 'lanes': lanes, 'orch': orch}
+        agents = [a for a in s.agents.values() if (a.last_ts or 0) >= since and not (until is not None and (a.spawn_ts or a.first_ts or 0) > until)]
+        total = len(agents)
+        agents.sort(key=lambda a: _rank(a, since, hi))
+        if not all_lanes:
+            agents = agents[:TL_ROWS]
+        copies = [(a, _ticks_between(a, since, hi), list(a.writes), list(a.handbacks), list(a.received)) for a in agents]
+        feed = [(ev['ts'], ev['kind']) for ev in s.feed if ev['ts'] and since <= ev['ts'] <= hi and ev['kind'] in _TL_ORCH]
+    size = span / TL_BINS
+    cells = [_cells(ticks, since, hi, size) for _, ticks, _, _, _ in copies]
+    factor = 1
+    for _ in range(5):                                      # more ticks than a page may hold: columns a whole number of times wider, made from the cells (the ticks are not looked at again)
+        marks = sum(len(c) for c in cells)
+        if marks <= TL_MARKS_MAX:
+            break
+        f = max(2, int(1.2 * marks / TL_MARKS_MAX) + 1)
+        cells, factor = [_merge(c, f) for c in cells], factor * f
+    size *= factor
+    lanes = []
+    for (a, _, writes, handbacks, received), c in zip(copies, cells):
+        reports = ([w['ts'], p] for w in writes for p in (short_path(w['path']),) if TL_REPORT_RE.search(p))
+        lanes.append({'id': a.id, 'ticks': _marks(c), 'spawn_ts': a.spawn_ts or a.first_ts, 'writes': [[m[0], m[1]] for m in _bin_marks(reports, since, hi, size)],
+                      'handbacks': _bin_times([h['ts'] for h in handbacks], since, hi, size), 'received': _bin_times([m['ts'] for m in received], since, hi, size)})
+    out = {'since': since, 'now': now, 'lanes': lanes, 'orch': _bin_marks([[ts, k] for ts, k in feed], since, hi, size), 'binned': True, 'bin': size, 'lanes_total': total}
+    if until is not None:
+        out['until'] = until
+    return out
 
 
 def allowed_file(s, path):
