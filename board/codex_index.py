@@ -141,7 +141,7 @@ class CodexIndex:
     def _resolve_subs(self):
         """A v2 child without a history boundary stays hidden until its parent pairs its started item with an explicit fork_turns: none spawn call.
         Parents may be found after children; repeat for nested children. A parent that went away or was rewritten withdraws its proof too."""
-        changed = False
+        changed, unverified = False, set()
         for _ in range(CX_DEPTH_MAX + 1):
             moved = False
             for e in list(self.files.values()):
@@ -149,7 +149,13 @@ class CodexIndex:
                     continue
                 parent = self.by_id.get(e['parent'])
                 proof = parent.get('_spawns') if parent and parent['_readable'] else None
-                none = bool(proof and self._verified_spawn(parent, e['id']))
+                none = False
+                if proof:
+                    key = (parent['id'], parent['gen'], e['id'])
+                    if key not in unverified:
+                        none = self._verified_spawn(parent, e['id'])
+                        if not none:
+                            unverified.add(key)          # retry next refresh, not a later pass of this one
                 if (e['kind'] == 'sub') == none:
                     continue
                 new = self._new(e['path'], no_copy=none)
@@ -207,8 +213,7 @@ class CodexIndex:
                 proof.invalidate()
                 return False
         except OSError:
-            proof.invalidate()
-            return False
+            return False                               # access may recover: keep the offsets and hashes for the next refresh
         return proof.has_none(child)
 
     def _same_file(self, e):

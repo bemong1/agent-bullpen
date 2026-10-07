@@ -404,10 +404,11 @@ class V2History(Rollouts):
         self.overwrite_parent_line(3, change)
         self.assert_hidden()
 
-    def test_unreadable_spawn_proof_hides_a_child_even_when_the_parent_is_cached(self):
+    def test_unreadable_cached_spawn_proof_hides_then_recovers_without_parent_changes(self):
         self.parent()
         self.child()
         self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        generation = self.idx.get(ROOT)['gen']
         real_open = open
 
         def read(path, *args, **kw):
@@ -417,6 +418,62 @@ class V2History(Rollouts):
 
         with mock.patch('builtins.open', read):
             self.assert_hidden()
+        for _ in range(3):
+            e = self.entry(SUB1)
+            self.assertEqual((e['kind'], e['drift']), ('sub', False))
+            self.assertEqual(e['thread_total'], {'input_tokens': 120, 'output_tokens': 12})
+        self.assertEqual(self.idx.get(ROOT)['gen'], generation)
+
+    def test_one_verification_failure_hides_until_the_next_refresh(self):
+        self.parent()
+        self.child()
+        self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        real_open = open
+        failed = False
+
+        def read(path, *args, **kw):
+            nonlocal failed
+            if path == self.path(ROOT) and not failed:
+                failed = True
+                raise PermissionError('synthetic one-time verification failure')
+            return real_open(path, *args, **kw)
+
+        with mock.patch('builtins.open', read):
+            self.assert_hidden()
+            self.assertTrue(failed)
+            e = self.entry(SUB1)
+            self.assertEqual((e['kind'], e['drift']), ('sub', False))
+
+    def test_parent_proof_changed_during_read_failure_stays_hidden_after_recovery(self):
+        self.parent()
+        self.child()
+        self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        generation = self.idx.get(ROOT)['gen']
+        real_open = open
+
+        def read(path, *args, **kw):
+            if path == self.path(ROOT) and args and args[0] == 'rb':
+                raise PermissionError('synthetic proof cannot be verified')
+            return real_open(path, *args, **kw)
+
+        def change(p):
+            args = json.loads(p['arguments'])
+            args['fork_turns'] = 'all'
+            args['message'] += 'x'
+            p['arguments'] = json.dumps(args)
+
+        with mock.patch('builtins.open', read):
+            self.assert_hidden()
+            self.overwrite_parent_line(2, change)
+            self.put(SUB1, v2_meta(), [(T0 + 1, 'event_msg', {'type': 'task_started'}),
+                                     (T0 + 2, 'response_item', user_message('Synthetic copied parent instruction.')),
+                                     (T0 + 7, 'event_msg', {'type': 'task_started'})])
+            self.assert_hidden()
+        for _ in range(3):
+            self.assert_hidden()
+            self.assertIsNone(self.idx.get(SUB1)['first_user'])
+            self.assertEqual(self.idx.get(SUB1)['turns'], [])
+        self.assertEqual(self.idx.get(ROOT)['gen'], generation)
 
     def test_a_byte_identical_large_replacement_cannot_reuse_another_inodes_proof(self):
         self.large_parent()
