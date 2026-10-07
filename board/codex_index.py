@@ -2,6 +2,7 @@
 
 import copy
 import glob
+import hashlib
 import heapq
 import json
 import os
@@ -32,7 +33,7 @@ def _num(x):
     return x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
 
 
-_PRIVATE = ('_facts', '_fork', '_nline', '_off', '_head', '_anchor', '_kdrift', '_turn_text', '_pending', '_readable', '_spawns')       # what the scan keeps in an entry for itself: never in a snapshot (the facts are read by `cmds` and `collab`)
+_PRIVATE = ('_facts', '_fork', '_nline', '_off', '_head', '_anchor', '_kdrift', '_turn_text', '_pending', '_readable', '_spawns', '_file_id')       # what the scan keeps in an entry for itself: never in a snapshot (the facts are read by `cmds` and `collab`)
 
 
 def _snapshot(e):
@@ -114,7 +115,7 @@ class CodexIndex:
         if not stat.S_ISREG(st.st_mode) or self._bad.get(p) == (st.st_size, st.st_mtime):
             return False
         e = self.files.get(p)
-        if e and e['_readable'] and e['size'] == st.st_size and e['mtime'] == st.st_mtime:
+        if e and e['_readable'] and e['size'] == st.st_size and e['mtime'] == st.st_mtime and e['_file_id'] == (st.st_dev, st.st_ino):
             return False
         had = e is not None
         if had and (st.st_size < e['size'] or not self._same_file(e)):
@@ -148,7 +149,7 @@ class CodexIndex:
                     continue
                 parent = self.by_id.get(e['parent'])
                 proof = parent.get('_spawns') if parent and parent['_readable'] else None
-                none = bool(proof and proof.has_none(e['id']))
+                none = bool(proof and self._verified_spawn(parent, e['id']))
                 if (e['kind'] == 'sub') == none:
                     continue
                 new = self._new(e['path'], no_copy=none)
@@ -171,10 +172,52 @@ class CodexIndex:
                 break
         return changed
 
+    @staticmethod
+    def _verified_spawn(parent, child):
+        """A retained no-copy claim is usable only while its file identity, meta, spawn line and started line can still be verified, even outside a big file's tail."""
+        proof = parent['_spawns']
+        calls = proof.none_calls(child)
+        if not calls:
+            return False
+        try:
+            st = os.stat(parent['path'])
+            if (st.st_dev, st.st_ino) != parent['_file_id'] or not stat.S_ISREG(st.st_mode):
+                proof.invalidate()
+                return False
+            with open(parent['path'], 'rb') as f:
+                st = os.fstat(f.fileno())
+                head = f.readline(4 << 20)
+                if (st.st_dev, st.st_ino) != parent['_file_id'] or (len(head), zlib.crc32(head)) != parent['_head']:
+                    proof.invalidate()
+                    return False
+                for c in calls:
+                    for key in ('call_line', 'started_line'):
+                        stamp = c.get(key)
+                        if stamp is None:
+                            c['bad'] = True
+                            break
+                        off, length, digest = stamp
+                        f.seek(off)
+                        raw = f.read(length + 1)
+                        if len(raw) != length + 1 or raw[-1:] != b'\n' or hashlib.sha256(raw[:-1]).digest() != digest:
+                            c['bad'] = True
+                            break
+            st = os.stat(parent['path'])
+            if (st.st_dev, st.st_ino) != parent['_file_id']:
+                proof.invalidate()
+                return False
+        except OSError:
+            proof.invalidate()
+            return False
+        return proof.has_none(child)
+
     def _same_file(self, e):
         """False when the file is not the one that was read: its first line is another, or the last bytes that were read are not where they were. A file that only grew is the same."""
         try:
             with open(e['path'], 'rb') as f:
+                st = os.fstat(f.fileno())
+                if (st.st_dev, st.st_ino) != e['_file_id']:
+                    return False
                 line = f.readline(4 << 20)
                 if (len(line), zlib.crc32(line)) != e['_head']:
                     return False
@@ -199,6 +242,7 @@ class CodexIndex:
         try:
             with open(p, 'rb') as f:
                 line = f.readline(4 << 20)
+                st = os.fstat(f.fileno())
             d = json.loads(line)
         except (OSError, ValueError, RecursionError):
             return None
@@ -230,6 +274,7 @@ class CodexIndex:
                 '_turn_text': (origin_exec and k['kind'] == 'root') or k['kind'] == 'sub',   # the instruction text of a turn is kept (up to 20,000 characters): for these only; the others keep spans
                 '_off': 0,                         # where the line being read starts in the file
                 '_head': (len(line), zlib.crc32(line)),   # the first line as it was, and the last bytes read (set by the scan): to tell a file written over from one that grew
+                '_file_id': (st.st_dev, st.st_ino),
                 '_anchor': None,
                 '_kdrift': k['drift'],             # `drift` of the kind alone (drift also rises when a record of a kind we read cannot be read)
                 '_pending': pending, '_readable': False}
@@ -363,7 +408,8 @@ class CodexIndex:
                 p = json.loads(raw).get('payload')
             except (ValueError, TypeError, AttributeError, RecursionError):
                 pass
-        e['_spawns'].note_call(cid.group(1).decode('utf-8', 'replace'), e['_off'], p)
+        stamp = (e['_off'], len(raw), hashlib.sha256(raw).digest()) if isinstance(p, dict) else None
+        e['_spawns'].note_call(cid.group(1).decode('utf-8', 'replace'), e['_off'], p, stamp)
 
     @staticmethod
     def _copied(e, raw):
@@ -403,7 +449,7 @@ class CodexIndex:
         c = parse_activity(raw, e['id'], ts)
         if c:
             if c['kind'] == 'started':
-                e['_spawns'].note_started(c)
+                e['_spawns'].note_started(c, (e['_off'], len(raw), hashlib.sha256(raw).digest()))
             e['_facts'].add_collab(c)
 
     def _odd(self, e, raw, ts=None):

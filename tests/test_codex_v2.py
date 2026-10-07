@@ -1,6 +1,7 @@
 """Synthetic v2 rollouts: a missing history boundary needs the parent's matching no-fork call."""
 import json
 import os
+import shutil
 import sys
 import types
 import unittest
@@ -322,6 +323,110 @@ class V2History(Rollouts):
             self.append(ROOT, [line(T0 + 10 + i, 'response_item', message('/root', '/root/s1', 'Synthetic message.', mid='tail-%d' % i))
                                for i in range(20)])
             self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+
+    def large_parent(self):
+        """Keep the real 64 MiB threshold: the spawn is outside the tail that the index reads."""
+        self.parent()
+        self.child()
+        self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        with open(self.path(ROOT), 'ab') as f:
+            f.write(b'{"timestamp":"2026-10-04T00:00:00Z","ordinal":4,"type":"response_item","payload":{"type":"message","role":"assistant","content":"')
+            for _ in range(65):
+                f.write(b'x' * (1 << 20))
+            f.write(b'"}}\n')
+        self.append(ROOT, [line(T0 + 90, 'token_usage_record', {'thread_token_usage': {'input_tokens': 1, 'output_tokens': 1}})])
+        self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        self.assertTrue(self.idx.get(ROOT)['partial'])
+        self.assertIsNone(self.idx.by_id[ROOT]['_anchor'])
+
+    def overwrite_parent_line(self, ordinal, change):
+        """An equal-length rewrite on the same inode, with the cached size and mtime unchanged."""
+        path = self.path(ROOT)
+        before = os.stat(path)
+        with open(path, 'r+b') as f:
+            for _ in range(ordinal):
+                f.readline()
+            off = f.tell()
+            old = f.readline()
+            d = json.loads(old)
+            change(d['payload'])
+            new = (json.dumps(d, separators=(',', ':'), ensure_ascii=False) + '\n').encode()
+            self.assertEqual(len(new), len(old))
+            f.seek(off)
+            f.write(new)
+        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+        self.assertEqual(os.stat(path).st_ino, before.st_ino)
+
+    def test_large_parent_replacement_with_the_same_meta_withdraws_old_proof(self):
+        self.large_parent()
+        path = self.path(ROOT)
+        before = os.stat(path)
+        replacement = path + '.replacement'
+        with open(path, 'rb') as src, open(replacement, 'wb') as dst:
+            for _ in range(4):
+                d = json.loads(src.readline())
+                p = d['payload']
+                if p.get('name') == 'spawn_agent':
+                    args = json.loads(p['arguments'])
+                    args['fork_turns'] = 'all'
+                    args['extra'] = 'Synthetic padding makes the replacement larger.'
+                    p['arguments'] = json.dumps(args)
+                dst.write((json.dumps(d, separators=(',', ':'), ensure_ascii=False) + '\n').encode())
+            shutil.copyfileobj(src, dst, length=1 << 20)
+        os.replace(replacement, path)
+        self.assertNotEqual(os.stat(path).st_ino, before.st_ino)
+        self.put(SUB1, v2_meta(), [(T0 + 1, 'event_msg', {'type': 'task_started'}),
+                                 (T0 + 2, 'response_item', user_message('Synthetic copied parent instruction.')),
+                                 (T0 + 7, 'event_msg', {'type': 'task_started'})])
+        self.assert_hidden()
+        self.assertIsNone(self.idx.get(SUB1)['first_user'])
+        self.assertEqual(self.idx.get(SUB1)['turns'], [])
+
+    def test_large_parent_spawn_rewrite_on_the_same_inode_withdraws_old_proof(self):
+        self.large_parent()
+
+        def change(p):
+            args = json.loads(p['arguments'])
+            args['fork_turns'] = 'all'
+            args['message'] += 'x'
+            p['arguments'] = json.dumps(args)
+
+        self.overwrite_parent_line(2, change)
+        self.assert_hidden()
+
+    def test_changed_started_line_cannot_keep_the_original_child_claim(self):
+        self.large_parent()
+
+        def change(p):
+            p['item']['agent_thread_id'] = SUB2
+            p['item']['agent_path'] = '/root/s2'
+
+        self.overwrite_parent_line(3, change)
+        self.assert_hidden()
+
+    def test_unreadable_spawn_proof_hides_a_child_even_when_the_parent_is_cached(self):
+        self.parent()
+        self.child()
+        self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        real_open = open
+
+        def read(path, *args, **kw):
+            if path == self.path(ROOT):
+                raise PermissionError('synthetic proof cannot be verified')
+            return real_open(path, *args, **kw)
+
+        with mock.patch('builtins.open', read):
+            self.assert_hidden()
+
+    def test_a_byte_identical_large_replacement_cannot_reuse_another_inodes_proof(self):
+        self.large_parent()
+        path = self.path(ROOT)
+        before = os.stat(path)
+        replacement = path + '.replacement'
+        shutil.copyfile(path, replacement)
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(replacement, path)
+        self.assert_hidden()
 
     def test_v2_name_status_tokens_and_conversation_cards(self):
         self.parent()

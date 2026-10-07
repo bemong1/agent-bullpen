@@ -107,7 +107,8 @@ INF = float('inf')
 class SpawnProofs:
     """The small structural facts that prove a child copied no history, for one parent's file generation. No message text and no conversation-card limit.
     One call at one file offset must be a readable collaboration spawn_agent with fork_turns none; a second call with its id or a conflicting started claim invalidates it.
-    Re-reading the same offset is no second call. When the separate count is full, existing facts stay and new identities are refused (never evicted and later trusted anew)."""
+    The index verifies the hashes of the call and started lines before using them. Re-reading the same offset is no second call.
+    When the separate count is full, existing facts stay and new identities are refused (never evicted and later trusted anew)."""
 
     __slots__ = ('calls', 'children')
 
@@ -122,7 +123,7 @@ class SpawnProofs:
             e = self.calls[cid] = {'off': None, 'none': False, 'started': None, 'bad': False}
         return e
 
-    def note_call(self, cid, off, p=None):
+    def note_call(self, cid, off, p=None, line=None):
         e = self._entry(cid)
         if e is None:
             return
@@ -141,21 +142,34 @@ class SpawnProofs:
             e['bad'] = True
             return
         e['none'] = isinstance(args, dict) and args.get('fork_turns') == 'none'
+        if e['none']:
+            if line is None:
+                e['bad'] = True
+            else:
+                e['call_line'] = line
 
-    def note_started(self, c):
+    def note_started(self, c, line=None):
         e = self._entry(c['call_id'])
         if e is None or e['bad']:
             return
         child = _str(c['agent_thread_id'])
         claim = (child, c['agent_path'])
-        if child is None or (e['started'] is not None and e['started'] != claim):
+        if child is None or line is None or (e['started'] is not None and e['started'] != claim):
             e['bad'] = True
         elif e['started'] is None:
             e['started'] = claim
+            e['started_line'] = line
             self.children.setdefault(child, set()).add(c['call_id'])
 
+    def none_calls(self, child):
+        return tuple(e for cid in self.children.get(child, ()) if (e := self.calls[cid])['none'] and not e['bad'])
+
     def has_none(self, child):
-        return any(self.calls[cid]['none'] and not self.calls[cid]['bad'] for cid in self.children.get(child, ()))
+        return bool(self.none_calls(child))
+
+    def invalidate(self):
+        for e in self.calls.values():
+            e['bad'] = True
 
 
 class ThreadFacts:
