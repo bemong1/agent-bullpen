@@ -195,6 +195,25 @@ class ContractCases(unittest.TestCase):
     def test_the_constants_are_the_tables(self):
         self.assertEqual(contract.CONSTS, self.table['consts'])
 
+    def test_file_rounds_exclude_macos_scratch_roots_and_aliases(self):
+        source = next(c for c in self.table['cases'] if c['id'] == 'C103')
+        for folder, scratch, alias in (('private/tmp', None, None),
+                                       ('private/var/folders/synthetic/T', ('private/var/folders/synthetic/T/',), None),
+                                       ('private/tmp', ('tmp/',), 'tmp')):
+            with self.subTest(folder=folder, alias=alias):
+                c = copy.deepcopy(source)
+                relocate = lambda p: folder + p[len('talk'):]  # noqa: E731
+                c['disk']['files'] = {relocate(p): meta for p, meta in c['disk']['files'].items()}
+                c['disk']['dirs'] = [folder]
+                if alias:
+                    c['disk']['links'] = {alias: folder}
+                for a in c['agents']:
+                    a['launch'] = None
+                    for w in a['writes']:
+                        w['path'] = (alias or folder) + w['path'][len('talk'):]
+                with mock.patch.object(contract, 'SCRATCH_DIRS', scratch or contract.SCRATCH_DIRS):
+                    self.assertEqual(contract.truth(c)['listed'], [])
+
     def test_every_case_and_every_step_is_reproduced(self):
         bad, compared = [], 0
         for c in self.table['cases']:

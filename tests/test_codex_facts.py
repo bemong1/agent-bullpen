@@ -363,6 +363,15 @@ class CopiedHistory(Rollouts):
 
 
 class TurnSpans(Rollouts):
+    def test_a_broken_task_start_still_records_a_turn_without_an_id(self):
+        self.put(ROOT, root_meta(), [(T0 + 1, 'event_msg', {'type': 'task_started', 'turn_id': 'first-turn'})])
+        broken = line(T0 + 10, 'event_msg', {'type': 'task_started', 'turn_id': 'broken-turn'})[:-1]
+        self.append(ROOT, [broken, line(T0 + 12, 'event_msg', {'type': 'task_complete'})])
+        turns = self.entry(ROOT)['turns']
+        self.assertEqual([(t['start'], t['end']) for t in turns], [(T0 + 1, T0 + 10), (T0 + 10, T0 + 12)])
+        self.assertEqual(turns[0]['id'], 'first-turn')
+        self.assertNotIn('id', turns[1])
+
     def test_recorded_turn_ids_survive_the_retention_limit(self):
         n = codex_index.CX_TURNS_KEEP + 1
         steps = [(T0 + 2 * i, 'event_msg', {'type': 'task_started', 'turn_id': 'turn-%d' % i}) for i in range(n)]

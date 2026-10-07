@@ -22,7 +22,7 @@ SHOWN = ('tool', 'shell')                                    # the evidence of a
 GUIDE_NAMES = ('brief.md', 'README.md', 'index.md')
 COMMON_FOLDERS = ('docs', 'doc')
 STATE_DIRS = ('.claude/', '.codex/')                         # what the tools keep of themselves (units.py STATE_DIRS, below the synthetic root)
-SCRATCH_DIRS = ('tmp/', 'var/tmp/')
+SCRATCH_DIRS = ('tmp/', 'var/tmp/', 'private/tmp/', 'var/folders/', 'private/var/folders/')
 ROUND_DIR_RE = re.compile(r'(?:r|round)(\d+)\Z')
 ROUND_FILE_RE = re.compile(r'(?:r|round)(\d+)_([^/]+)\.md\Z', re.I)
 ROUND_DOC_RE = re.compile(r'^(brief|round\d+.*|r\d+[_-].*)\.md$', re.I)
@@ -91,16 +91,24 @@ class Judge:
         self.topics = sorted({parent(d) for d in self.dirs if ROUND_DIR_RE.fullmatch(name(d))})
         self.round_dirs_of = {u: sorted(d for d in self.dirs if parent(d) == u and ROUND_DIR_RE.fullmatch(name(d))) for u in self.topics}
         self.file_topics = set()
-        # O23: only session agents' confirmed W1/W2 writes qualify a folder; physical round folders win.
-        folders = {parent(w['path']) for w in self.conf if w['agent'] != 'orch' and w['evidence'] in SHOWN and ROUND_FILE_RE.fullmatch(name(w['path']))}
-        for f in sorted(folders):
-            if self.too_broad(f) or f in self.topics or not self.exists_folder(f):
+        # O23: two authors of different seats, with two seats in one round; existing topics and bundles win.
+        authors = [w for w in self.conf if w['agent'] != 'orch' and w['kind'] in AUTHORING and w['evidence'] in SHOWN and ROUND_FILE_RE.fullmatch(name(w['path']))]
+        folders = {parent(w['path']) for w in authors}
+        scratch = {d.rstrip('/') for d in SCRATCH_DIRS}
+        scratch |= {self.real(d) for d in scratch}
+        for f in sorted(folders, key=lambda f: (-f.count('/'), f)):
+            children = any(parent(u) == f and name(u) != 'final' for u in self.topics)
+            if f in scratch or self.is_common(f) or f in self.topics or ROUND_DIR_RE.fullmatch(name(f)) or children or not self.exists_folder(f):
                 continue
-            ws = [w for w in self.conf if parent(w['path']) == f and w['agent'] != 'orch' and w['evidence'] in SHOWN and ROUND_FILE_RE.fullmatch(name(w['path']))]
-            ps = {p for p in self.files if parent(p) == f and ROUND_FILE_RE.fullmatch(name(p))} | {w['path'] for w in ws}
-            if len({ROUND_FILE_RE.fullmatch(name(p)).group(2) for p in ps}) >= 2 and len({w['agent'] for w in ws}) >= 2:
+            ws = [w for w in authors if parent(w['path']) == f]
+            seats = collections.defaultdict(set)
+            for w in ws:
+                m = ROUND_FILE_RE.fullmatch(name(w['path']))
+                seats[int(m.group(1))].add(m.group(2).lower())
+            if len({w['agent'] for w in ws}) >= 2 and any(len(ss) >= 2 for ss in seats.values()):
                 self.file_topics.add(f)
                 self.round_dirs_of[f] = []
+                self.topics.append(f)
         self.topics = sorted(set(self.topics) | self.file_topics)
         self._seat = {}
         self.rooms, self.room_cells = self._rooms()
@@ -297,7 +305,7 @@ class Judge:
                         ps.add(q)
             for p in ps:
                 if u in self.file_topics:
-                    out[(u, name(p).split('_', 1)[0], ROUND_FILE_RE.fullmatch(name(p)).group(2))] = p
+                    out[(u, name(p).split('_', 1)[0], ROUND_FILE_RE.fullmatch(name(p)).group(2).lower())] = p
                 else:
                     out[(u, name(parent(p)), name(p)[:-3])] = p
         for f, files in self.room_cells.items():

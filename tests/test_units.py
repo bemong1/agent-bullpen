@@ -12,6 +12,7 @@ import os
 import sys
 import types
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat import patched, server  # noqa: E402
@@ -73,6 +74,100 @@ class Names(unittest.TestCase):
 
 
 class FileRounds(Fixture):
+    def test_round_folder_reports_keep_the_original_unit_and_empty_round(self):
+        x = self.file('talk/r1/r1_a.md', mtime=200)
+        y = self.file('talk/r1/r1_b.md', mtime=210)
+        final = self.file('talk/r1/summary.md', mtime=300)
+        self.dirs('talk/r2')
+        jd = self.assign(agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(y, 210)]), orch=[wr(final, 300)])
+        self.assertEqual(set(jd.listed), {self.p('talk')})
+        self.assertEqual({(rd, st) for u, rd, st in jd.cells}, {('r1', 'r1_a'), ('r1', 'r1_b'), ('r1', 'summary')})
+        self.assertFalse(jd.finals[self.p('talk')].confirmed)
+        self.assertEqual(jd.finals[self.p('talk')].why, ['none', 'empty_round'])
+
+    def test_file_round_names_keep_the_bundle_and_live_participant(self):
+        self.file('research/brief.md', mtime=50)
+        report = self.file('research/t1/r1/A.md', mtime=150)
+        x = self.file('research/round1_x.md', mtime=200)
+        y = self.file('research/round1_y.md', mtime=210)
+        final = self.file('research/decision.md', mtime=300)
+        jd = self.assign(agent('C', writes=[wr(report, 150)], status='running'),
+                         agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(y, 210)]), orch=[wr(final, 300)])
+        self.assertEqual(jd.roots, {self.p('research'): [self.p('research/t1')]})
+        self.assertFalse(jd.finals[self.p('research')].confirmed)
+        self.assertEqual(jd.finals[self.p('research')].why, ['open_cell', 'live_participant'])
+
+    def test_nested_file_rounds_register_the_child_before_the_parent(self):
+        self.file('research/brief.md', mtime=50)
+        ws = [self.file('research/' + sub + 'round1_' + seat + '.md', mtime=ts)
+              for sub in ('', 't1/') for seat, ts in (('x', 200), ('y', 210))]
+        cat = U.Catalog()
+        jd = self.assign(agent('A', writes=[wr(ws[0], 200), wr(ws[2], 220)]),
+                         agent('B', writes=[wr(ws[1], 210), wr(ws[3], 230)]), catalog=cat)
+        self.assertIsNone(cat.unit_at(self.p('research')))
+        self.assertEqual(jd.roots, {self.p('research'): [self.p('research/t1')]})
+        self.assertEqual({u for u, rd, st in jd.cells}, {self.p('research/t1')})
+
+    def test_macos_scratch_roots_are_excluded_but_subfolders_can_qualify(self):
+        for rel in ('private/tmp', 'private/var/folders/synthetic/T'):
+            with self.subTest(root=rel):
+                x, y = [self.file(rel + '/round1_' + s + '.md', mtime=200 + i * 10) for i, s in enumerate('xy')]
+                sub_x, sub_y = [self.file(rel + '/talk/round1_' + s + '.md', mtime=200 + i * 10) for i, s in enumerate('xy')]
+                with mock.patch.object(U, 'SCRATCH_DIRS', (self.p(rel) + os.sep,)):
+                    self.assertEqual(self.assign(agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(y, 210)])).listed, {})
+                    jd = self.assign(agent('A', writes=[wr(sub_x, 200)]), agent('B', writes=[wr(sub_y, 210)]))
+                    self.assertEqual(set(jd.listed), {self.p(rel, 'talk')})
+
+    def test_scratch_root_aliases_are_checked_by_realpath(self):
+        x = self.file('private/tmp/round1_x.md', mtime=200)
+        y = self.file('private/tmp/round1_y.md', mtime=210)
+        os.symlink(self.p('private/tmp'), self.p('tmp'))
+        with mock.patch.object(U, 'SCRATCH_DIRS', (self.p('tmp') + os.sep,)):
+            jd = self.assign(agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(y, 210)]))
+        self.assertEqual(jd.listed, {})
+
+    def test_updates_and_appends_cannot_qualify_a_second_author(self):
+        x = self.file('talk/round1_x.md', mtime=200)
+        y = self.file('talk/round1_y.md', mtime=210)
+        for kind in ('update', 'append'):
+            with self.subTest(kind=kind):
+                jd = self.assign(agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(y, 210, kind=kind)]))
+                self.assertEqual(jd.listed, {})
+
+    def test_disk_only_seats_cannot_qualify_the_folder(self):
+        x = self.file('talk/round1_x.md', mtime=200)
+        self.file('talk/round1_old.md', mtime=50)
+        jd = self.assign(agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(x, 210)]))
+        self.assertEqual(jd.listed, {})
+
+    def test_two_authors_in_separate_one_seat_rounds_do_not_qualify(self):
+        x = self.file('talk/r1_auth.md', mtime=200)
+        y = self.file('talk/r2_billing.md', mtime=210)
+        jd = self.assign(agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(y, 210)]))
+        self.assertEqual(jd.listed, {})
+
+    def test_repository_top_and_docs_are_excluded(self):
+        self.dirs('repo/.git')
+        for folder in ('repo', 'repo/docs', 'repo/doc'):
+            with self.subTest(folder=folder):
+                x, y = [self.file(folder + '/round1_' + s + '.md', mtime=200 + i * 10) for i, s in enumerate('xy')]
+                jd = self.assign(agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(y, 210)]))
+                self.assertEqual(jd.listed, {})
+
+    def test_case_only_seat_names_do_not_qualify(self):
+        x = self.file('talk/round1_a.md', mtime=200)
+        y = self.file('talk/Round1_A.md', mtime=210)
+        jd = self.assign(agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(y, 210)]))
+        self.assertEqual(jd.listed, {})
+
+    def test_authoring_kinds_qualify_and_seats_are_lowercase(self):
+        for kind in ('create', 'replace', 'unknown'):
+            with self.subTest(kind=kind):
+                x = self.file('talk/round1_X.md', mtime=200)
+                y = self.file('talk/round1_Y.md', mtime=210)
+                jd = self.assign(agent('A', writes=[wr(x, 200, kind=kind)]), agent('B', writes=[wr(y, 210, kind=kind)]))
+                self.assertEqual({st: (c.owner, c.path) for (u, rd, st), c in jd.cells.items()}, {'x': ('A', x), 'y': ('B', y)})
+
     def test_an_unmet_file_round_request_holds_the_final(self):
         from judge_support import tag
         x = self.file('talk/round1_x.md', mtime=200)

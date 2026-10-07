@@ -359,8 +359,11 @@ class CodexIndex:
                 if facts:
                     facts.begin_turn(ts)
                 if facts:
-                    p = json.loads(raw).get('payload') or {}
-                    self._turn(e, ts, p.get('turn_id'))
+                    try:
+                        p = json.loads(raw).get('payload')
+                    except (ValueError, TypeError):
+                        p = None
+                    self._turn(e, ts, p.get('turn_id') if isinstance(p, dict) else None)
             elif pt in (b'task_complete', b'turn_aborted'):
                 e['open'] = False
                 if facts:

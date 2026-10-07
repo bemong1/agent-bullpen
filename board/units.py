@@ -5,7 +5,7 @@ reads a session and nothing reads a word of a text: `debates.py` turns an agent 
 The judgment is a pure function of (the facts, the disk as `Catalog` answers it): the same input gives the same Judgement, and it reads no clock (an open window runs to the end of time).
 
 What the code below keeps:
-  - A folder is a debate when it has an exact round folder (r1, r01, round1), or file rounds with two seat names and two session agents' confirmed tool/shell writes (O23). A `brief.md`, `README.md` or `index.md` is its guide next to those rounds. The folder
+  - A folder is a debate when it has an exact round folder (r1, r01, round1), or two session authors' confirmed tool/shell writes of different seats, with two seats in one file round (O23). A `brief.md`, `README.md` or `index.md` is its guide next to those rounds. The folder
     that holds a guide and the topics below it is the root of a bundle.
   - A cell is a file `<unit>/<round folder>/<name>.md`. It exists when the file is on disk, a write that is sure made it, or a launch command or a room tag names it. No sentence makes one.
   - A write is sure (`J1`) when its result says it worked and the tool or the exit status of the whole command decides it; the others (a command whose later part can hide a failure,
@@ -74,7 +74,7 @@ def round_of(name):
 def file_round_of(name):
     """(round, seat) of round<N>_<seat>.md or r<N>_<seat>.md (O23), or None."""
     m = ROUND_FILE_RE.fullmatch(name)
-    return (int(m.group(1)), m.group(2)) if m else None
+    return (int(m.group(1)), m.group(2).lower()) if m else None
 
 
 def final_sort_key(name, mtime):
@@ -311,20 +311,27 @@ class Catalog:
         return [n[:-3] for n, kind in (self.listdir(folder) or ()) if kind == 'f' and n.endswith('.md')]
 
     def add_file_rounds(self, writes, sure):
-        """O23: recognise file rounds only with two seat names and two session agents' confirmed W1/W2 writes. Round folders take precedence."""
+        """O23: two session authors must make different seats, with two seats in one round. Existing topics and bundles take precedence."""
         by_folder = collections.defaultdict(list)
         for w in writes:
-            if w.agent != 'orch' and w.evidence in ('tool', 'shell') and file_round_of(os.path.basename(w.path)) and sure(w):
+            if w.agent != 'orch' and w.kind in AUTHORING and w.evidence in ('tool', 'shell') and file_round_of(os.path.basename(w.path)) and sure(w):
                 by_folder[os.path.dirname(w.path)].append(w)
-        for folder, ws in by_folder.items():
-            if too_broad(folder) or self.unit_at(folder) is not None:
+        scratch = {os.path.normpath(d) for d in SCRATCH_DIRS} if by_folder else set()
+        scratch.update(self.realpath(d) for d in tuple(scratch))
+        for folder in sorted(by_folder, key=lambda f: (-f.count(os.sep), f)):
+            if folder in scratch or _is_common(folder, self) or self.unit_at(folder) is not None or self.children(folder) or round_of(os.path.basename(folder)) is not None:
+                continue
+            ws = by_folder[folder]
+            seats = collections.defaultdict(set)
+            for w in ws:
+                rnd, seat = file_round_of(os.path.basename(w.path))
+                seats[rnd].add(seat)
+            if len({w.agent for w in ws}) < 2 or not any(len(ss) >= 2 for ss in seats.values()):
                 continue
             names = self.listdir(folder)
             if names is None:
                 continue
             files = sorted({n for n, k in names if k == 'f' and file_round_of(n)} | {os.path.basename(w.path) for w in ws})
-            if len({file_round_of(n)[1] for n in files}) < 2 or len({w.agent for w in ws}) < 2:
-                continue
             rounds = {}
             for n in files:
                 rounds.setdefault(file_round_of(n)[0], []).append(n)

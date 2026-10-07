@@ -464,7 +464,7 @@ class Composite(unittest.TestCase):
 
     def test_file_rounds_read_the_same_whatever_the_session_texts_say(self):
         base = self.read('original', file_rounds=True)
-        self.assertEqual(sorted(k.split('/')[-1] for k in json.loads(base['judged'])['cells']), ['talk|round1|' + a for a in 'ABCD'])
+        self.assertEqual(sorted(k.split('/')[-1] for k in json.loads(base['judged'])['cells']), ['talk|round1|' + a for a in 'abcd'])
         for variant in VARIANTS:
             with self.subTest(variant=variant):
                 got = self.read(variant, file_rounds=True)
