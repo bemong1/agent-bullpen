@@ -197,7 +197,7 @@ class ContractCases(unittest.TestCase):
 
     def test_file_round_collision_truth_is_identical_across_hash_seeds(self):
         script = 'import json, sys; from tools.scenarios.contract import truth; print(json.dumps(truth(json.load(sys.stdin)), sort_keys=True))'
-        for cid in ('C128', 'C129', 'C130', 'C135', 'C137'):
+        for cid in ('C128', 'C129', 'C130', 'C135', 'C137', 'C138', 'C139', 'C140', 'C141'):
             c = next(c for c in self.table['cases'] if c['id'] == cid)
             results = []
             for seed in ('0', '1', '2', '7', '42'):

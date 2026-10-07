@@ -308,6 +308,7 @@ def _debate(s, root, unit_list, jd, cells_of, readers_of, statuses):
     last_ts = jd.unit_ts.get(root, 0)
     rootfinal = jd.finals.get(root) if root not in unit_list and root not in rooms else None
     root_final = _final_dict(s, rootfinal, root) if rootfinal else None
+    cell_keys = {(c.unit, c.path): key for key, c in jd.cells.items()}
     for unit in unit_list:
         un = cat.unit_at(unit)
         tb = _head(s, cat, un.brief if un and un.brief else ((rooms[unit].guide or '') if unit in rooms else os.path.join(unit, 'brief.md')))
@@ -357,6 +358,8 @@ def _debate(s, root, unit_list, jd, cells_of, readers_of, statuses):
                 if info is None and state == 'previous':            # a file the page may not show (a link to a credential file, a secret name) is no file to show
                     state, previous = 'waiting', False
                 cells.append({'round': rnd, 'state': state, 'path': path, 'agent': agent_id, 'owner': c.owner if c else None, 'editors': list(c.editors) if c else [],
+                              'reports': [{'key': list(cell_keys[(x.unit, x.path)]), 'path': x.path, 'owner': x.owner, 'agent': x.agent,
+                                           'editors': list(x.editors), 'evidence': x.evidence, 'state': x.state, 'previous': x.previous, 'hint': x.hint} for x in here],
                               'evidence': c.evidence if c else None, 'hint': c.hint if c else None, 'previous': previous,
                               'rdir': c.rdir if c else (dirs[0] if dirs else 'r%d' % rnd), 'readers': readers,
                               'lines': info['lines'] if info else 0, 'mtime': info['mtime'] if info else None,

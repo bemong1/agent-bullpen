@@ -40,6 +40,11 @@ def name(p):
     return p.rsplit('/', 1)[-1]
 
 
+def cell_identity(unit, stem, path, conflicting):
+    """NUL separates a conflicting physical path from every valid normal seat name."""
+    return '\0' + path[len(unit) + 1:] if conflicting else stem
+
+
 def under(p, d):
     return p == d or p.startswith(d + '/')
 
@@ -316,11 +321,11 @@ class Judge:
             for p in sorted(ps):
                 if u in self.file_topics:
                     seat = ROUND_FILE_RE.fullmatch(name(p)).group(2).lower()
-                    identity = seat + '/' + name(p) if p in self.cell_aliases else seat
+                    identity = cell_identity(u, seat, p, p in self.cell_aliases)
                     out[(u, name(p).split('_', 1)[0], identity)] = p
                 else:
                     seat = name(p)[:-3]
-                    identity = seat + '/' + name(p) if p in self.cell_aliases else seat
+                    identity = cell_identity(u, seat, p, p in self.cell_aliases)
                     out[(u, name(parent(p)), identity)] = p
         for f, files in self.room_cells.items():
             taken = collections.Counter(name(p)[:-3] for p in files)
@@ -330,7 +335,7 @@ class Judge:
                 groups[seats[p]].append(p)
             self.cell_aliases.update({p: tuple(ps) for ps in groups.values() if len(ps) > 1 for p in ps})
             for p in sorted(files):
-                identity = seats[p] + '/' + name(p) if p in self.cell_aliases else seats[p]
+                identity = cell_identity(f, seats[p], p, p in self.cell_aliases)
                 out[(f, '-', identity)] = p
         return out
 
@@ -746,8 +751,11 @@ class Judge:
                 continue
             for code, who in self.seat_of(p)['diag']:
                 seat = ROUND_FILE_RE.fullmatch(name(p)).group(2).lower() if key[0] in self.file_topics else name(p)[:-3] if p in self.cell_aliases else key[2]
-                detail = ','.join(name(q) for q in self.cell_aliases[p]) if code == 'alias_collision' else '%s/%s' % (self.rnum(p) if key[1] != '-' else '-', seat)
+                paths = self.cell_aliases[p] if code == 'alias_collision' else None
+                detail = ','.join(q[len(key[0]) + 1:] for q in paths) if paths else '%s/%s' % (self.rnum(p) if key[1] != '-' else '-', seat)
                 row = {'code': code, 'agent': who, 'unit': key[0], 'detail': detail}
+                if paths is not None:
+                    row['paths'] = list(paths)
                 if row not in out:
                     out.append(row)
         return out

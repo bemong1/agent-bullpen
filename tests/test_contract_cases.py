@@ -151,7 +151,8 @@ class Shown:
         return {'confirmed': f.confirmed, 'path': self.rel(f.path), 'by': f.by, 'why': list(f.why), 'candidates': [self.rel(p) for p in f.candidates]}
 
     def diag(self):
-        return sorted(({'code': d['code'], 'agent': d['agent'], 'unit': self.rel(d['unit']), 'detail': d['detail']} for d in self.jd.diag),
+        return sorted(({'code': d['code'], 'agent': d['agent'], 'unit': self.rel(d['unit']), 'detail': d['detail'],
+                        **({'paths': [self.rel(p) for p in d['paths']]} if 'paths' in d else {})} for d in self.jd.diag),
                       key=lambda d: (d['code'], d['unit'] or '', d['detail'] or '', d['agent'] or ''))
 
     def compare(self, expect):
@@ -242,8 +243,8 @@ class Shape(unittest.TestCase):
     def test_the_file_has_the_cases_of_the_contract(self):
         blob = load_cases()
         self.assertEqual(blob['version'], 4)
-        self.assertEqual(len(blob['cases']), 137)
-        self.assertEqual(len({c['id'] for c in blob['cases']}), 137)
+        self.assertEqual(len(blob['cases']), 141)
+        self.assertEqual(len({c['id'] for c in blob['cases']}), 141)
 
 
 if __name__ == '__main__':

@@ -77,6 +77,11 @@ def file_round_of(name):
     return (int(m.group(1)), m.group(2).lower()) if m else None
 
 
+def cell_identity(unit, stem, path, conflicting):
+    """A conflicting path has its own identity. NUL cannot occur in a filename or a normal seat name."""
+    return '\0' + os.path.relpath(path, unit) if conflicting else stem
+
+
 def final_sort_key(name, mtime):
     """The order of the candidates of a final: a name that looks like a conclusion first, then the latest, then the name. Only an order."""
     return (CONCLUDE_RE.search(name[:-3] if name.lower().endswith('.md') else name) is None, -(mtime or 0), name)
@@ -563,7 +568,7 @@ class Final:
 
 @dataclass
 class Judgement:
-    cells: Dict[Tuple[str, str, str], Cell] = field(default_factory=dict)          # (unit or room folder, round folder or '-', name) -> Cell; conflicting paths use seat/filename as name
+    cells: Dict[Tuple[str, str, str], Cell] = field(default_factory=dict)          # (unit or room folder, round folder or '-', identity) -> Cell; cell_identity keeps conflicting paths apart
     placed: Dict[str, Placement] = field(default_factory=dict)                      # agent id -> where it is thought to work
     units: Dict[str, Unit] = field(default_factory=dict)
     roots: Dict[str, List[str]] = field(default_factory=dict)                       # root -> the topics (unit folders) of it
@@ -583,8 +588,10 @@ class Judgement:
     bound: Dict[str, Set[str]] = field(default_factory=dict)                        # a unit or room -> the agents tied to it for sure
 
 
-def _diag(out, code, agent=None, unit=None, detail=None):
+def _diag(out, code, agent=None, unit=None, detail=None, paths=None):
     row = {'code': code, 'agent': agent, 'unit': unit, 'detail': detail}
+    if paths is not None:
+        row['paths'] = list(paths)
     if row not in out:
         out.append(row)
 
@@ -1324,17 +1331,19 @@ class _Judge:
             elif R not in jd.units:
                 jd.units[R] = Unit(id=R, path=R, brief=os.path.join(R, 'brief.md'))
         # the cells
+        room_paths = {}
         for U in topics:
             aliases = self.cell_aliases(U)
             for p in self.unit_cell_paths(U):
                 ck = self.cell_key(p)
-                key = (ck[0], ck[1], ck[2] + '/' + os.path.basename(p)) if p in aliases else ck
+                key = (ck[0], ck[1], cell_identity(U, ck[2], p, p in aliases))
                 jd.cells[key] = self.cell(ck[0], ck[1], ck[2], p)
         for F, room in rooms.items():
             paths = list(dict.fromkeys(room.files.values()))
             if room.kind == 'cells':
                 for aid in room.members:                              # the seat a member's tag names is a cell of the room too (it may be a file other than its own)
                     paths += [q for q, dem in self.demand[aid].items() if os.path.dirname(q) == F and any(k == 'tag' for _t, k, _r in dem) and q not in paths]
+            room_paths[F] = tuple(sorted(paths))
             seats = {path: os.path.splitext(os.path.basename(path))[0] for path in paths}
             taken = collections.Counter(seats.values())
             stems = {path: seats[path] if taken[seats[path]] == 1 else os.path.splitext(os.path.relpath(path, F))[0] for path in paths}
@@ -1345,7 +1354,7 @@ class _Judge:
             self._cell_alias_paths.update(aliases)
             for path in paths:
                 stem = stems[path]
-                identity = stem + '/' + os.path.basename(path) if path in aliases else stem
+                identity = cell_identity(F, stem, path, path in aliases)
                 jd.cells[(F, '-', identity)] = self.cell(F, '-', stem, path, room=True)
         self.cell_by_path = {c.path: c for c in jd.cells.values()}
         # who is tied to what
@@ -1398,7 +1407,7 @@ class _Judge:
             paths = self.unit_cell_paths(U)
             jd.finals[U], self._live[U], _est = self._final('topic', U, [U], paths, {U}, False)
         for F, room in rooms.items():
-            paths = [c.path for c in jd.cells.values() if c.unit == F]
+            paths = room_paths[F]
             jd.finals[F], live, est = self._final('room', F, [], paths, {F}, not room.sure)
             jd.closable[F] = jd.finals[F].confirmed and not live and room.sure
         for R, us in roots.items():
@@ -1450,8 +1459,9 @@ class _Judge:
         jd = self.jd
         for (unit, rdir, stem), c in jd.cells.items():
             for code, agent in self.seat(c.path)[4]:
-                detail = ','.join(os.path.basename(p) for p in self.cell_aliases(unit)[c.path]) if code == 'alias_collision' else '%s/%s' % (c.round if c.round is not None else '-', c.stem)
-                _diag(jd.diag, code, agent, unit, detail)
+                paths = self.cell_aliases(unit)[c.path] if code == 'alias_collision' else None
+                detail = ','.join(os.path.relpath(p, unit) for p in paths) if paths else '%s/%s' % (c.round if c.round is not None else '-', c.stem)
+                _diag(jd.diag, code, agent, unit, detail, paths)
         for U in topics:
             u = jd.units[U]
             for n, dirs in u.rounds.items():

@@ -218,6 +218,47 @@ class FileRounds(Fixture):
 
 
 class FileRoundCollisions(Fixture):
+    def test_collision_diagnostics_keep_each_nested_group_and_its_paths(self):
+        from judge_support import tag
+        names = ('X/A.MD', 'X/A.md', 'Y/A.MD', 'Y/A.md')
+        paths = [self.file('talk/' + name, mtime=200 + i * 10) for i, name in enumerate(names)]
+        final = self.file('talk/summary.md', mtime=300)
+        authors = [agent(aid, writes=[wr(p, 200 + i * 10)], tag=tag(self.p('talk')))
+                   for i, (aid, p) in enumerate(zip('ABCD', paths))]
+        jd = self.assign(*authors, orch=[wr(final, 300)])
+        evidence = [d for d in jd.diag if d['code'] == 'alias_collision']
+        self.assertEqual(evidence, [
+            dict(code='alias_collision', agent=None, unit=self.p('talk'), detail='X/A.MD,X/A.md', paths=paths[:2]),
+            dict(code='alias_collision', agent=None, unit=self.p('talk'), detail='Y/A.MD,Y/A.md', paths=paths[2:]),
+        ])
+        self.assertEqual(jd.finals[self.p('talk')].why, ['open_cell'])
+
+    def test_nested_room_names_cannot_overwrite_conflicting_reports(self):
+        from judge_support import tag
+        names = ('A.md', 'A.MD', 'A/A.md.md', 'A/A.MD.md', 'B/A.md.md', 'B/A.MD.md')
+        paths = [self.file('talk/' + name, mtime=200 + i * 10) for i, name in enumerate(names)]
+        final = self.file('talk/summary.md', mtime=300)
+        for tagged_upper in (False, True):
+            with self.subTest(tagged_upper=tagged_upper):
+                authors = [agent(aid, writes=[wr(p, 200 + i * 10)], tag=tag(self.p('talk'), 'A.MD' if tagged_upper and i == 1 else None))
+                           for i, (aid, p) in enumerate(zip('ABCDEF', paths))]
+                jd = self.assign(*authors, orch=[wr(final, 300)])
+                self.assertEqual({c.path for c in jd.cells.values()}, set(paths))
+                self.assertEqual(len(jd.cells), len(paths))
+                self.assertEqual(jd.finals[self.p('talk')].why, ['open_cell'])
+                self.assertFalse(jd.closable[self.p('talk')])
+                self.assertTrue(any(d['code'] == 'alias_collision' for d in jd.diag))
+                result = self.page(*authors, orch=[wr(final, 300)])
+                self.assertEqual({c.path for c in result.cells.values()}, set(paths))
+                topic = result.debates[0]['topics'][0]
+                self.assertEqual({c['path'] for r in topic['rows'] for c in r['cells'] if c['state'] != 'waiting'}, set(paths[2:]) | {min(paths[:2])})
+                reports = [p for r in topic['rows'] for c in r['cells'] for p in c['reports']]
+                self.assertEqual({p['path'] for p in reports}, set(paths))
+                self.assertEqual({tuple(p['key']) for p in reports}, set(jd.cells))
+                self.assertEqual({p['path']: p['owner'] for p in reports}, {c.path: c.owner for c in jd.cells.values()})
+                self.assertEqual(topic['final']['why'], ['open_cell'])
+                self.assertFalse(topic['closable'])
+
     def collision(self, names, running=True):
         paths = [self.file('talk/' + name, mtime=200 + i * 10) for i, name in enumerate(names)]
         final = self.file('talk/summary.md', mtime=300)
