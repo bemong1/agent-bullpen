@@ -2,7 +2,7 @@
 // (<prefix>_codex_state.json: a Codex thread with two native sub-agents, an approval-review thread, two `claude -p` runs and a `codex exec` run, a small debate).
 // No browser, no npm: the fake page of state_checks.js. Expected words are read from the running page's own t('key').
 //  - the agent list: a card for each of the five, none for the approval review; the name tag of a sub-agent is the end of its path, the state pill of each
-//  - the conversation: the card of a sub-agent's spawn says the instruction is encrypted (from the dictionary, in the page's language) and shows nothing of the note beside the ciphertext;
+//  - the conversation: encrypted bodies have compact, keyboard-accessible notes that open an explanation, and show nothing of the note beside the ciphertext;
 //    its final report and the message in the middle of its work
 //  - the drawer of the `codex exec` run: the link line names `exec` and its time (the launcher is Codex), not `Bash`
 //  - the debate table: both seats of the folder the orchestrator's runs write in
@@ -122,10 +122,31 @@ async function run(lang) {
   check(L('the spawn of each sub-agent names the key of its body and carries no note of the record'), spawn.length === 2 && spawn.every(e => e.text_i18n && e.text_i18n.key === 'event.encrypted.text' && !/\/root\//.test(e.text)), spawn.map(e => [e.text, e.text_i18n]));
   P.run('renderFeed(); renderAtalk()');
   const talk = P.html('#feedItems') + P.html('#atalkItems') + P.html('#talkItems') + P.all().join('\n');
-  check(L('the card of a spawn says that the instruction is encrypted, in the page\'s language'), shows(talk, P.T('event.encrypted.text')), talk.slice(0, 200));
+  check(L('an encrypted spawn has a compact note in the page\'s language'), shows(talk, P.T('board.msg.encrypted')) && talk.includes('class="encrypted-note"'), talk.slice(0, 200));
   check(L('the old Korean text of that body is not shown when the page can word it from the key') + (ko ? ' (here it is the same sentence)' : ''), ko || !talk.includes('암호화'), '');
   const hand = feed.filter(e => e.kind === 'handback' && e.agent === (done || {}).id), mid = feed.filter(e => e.kind === 'agent_msg' && e.agent === (done || {}).id);
   check(L('a sub-agent\'s final report and its message in the middle of the work are in the conversation'), hand.length === 1 && mid.length === 1 && hand[0].ts > mid[0].ts && shows(talk, hand[0].text.slice(0, 30)) && shows(talk, mid[0].text.slice(0, 30)), [hand.length, mid.length]);
+
+  // The same placeholder can represent an assignment, a follow-up, or a report.
+  // A literal that happens to resemble ciphertext is still ordinary conversation.
+  const encrypted = ['spawn', 'orch_msg', 'handback', 'agent_msg'].map((kind, i) => ({
+    idx: 900 + i, ts: STATE.now - 10 + i, kind, from: i < 2 ? 'orch' : done.id, to: i < 2 ? done.id : 'orch', agent: done.id,
+    title: 'Synthetic message', text: 'gAAAAABsynthetic-hidden-body', full_len: 10000, text_i18n: { key: 'event.encrypted.text', params: {} }
+  }));
+  const literal = { ...encrypted[3], idx: 904, text: 'gAAAAAB is a synthetic literal <tag>', full_len: 42 };
+  delete literal.text_i18n;
+  P.ctx.encryptedCases = encrypted.concat(literal);
+  P.run('globalThis.savedEncryptedFeed = S.feed; globalThis.savedEncryptedTalk = ui.atalk; S.feed = encryptedCases; ui.atalk = encryptedCases; ui.feedFilter = "all"; renderFeed(); renderAtalk({ force: true })');
+  const encryptedFeed = P.html('#feedItems'), encryptedTalk = P.html('#atalkList');
+  const notes = h => (h.match(/class="encrypted-note"/g) || []).length;
+  check(L('all four encrypted event kinds retain a compact note in both lists'), notes(encryptedFeed) === 4 && notes(encryptedTalk) === 4, [notes(encryptedFeed), notes(encryptedTalk)]);
+  check(L('buttons are keyboard accessible and ciphertext is never rendered'), encryptedFeed.includes('type="button"') && encryptedTalk.includes('type="button"') && !encryptedFeed.includes(encrypted[0].text) && !encryptedTalk.includes(encrypted[0].text));
+  check(L('an encrypted body offers no full-text fetch even if its recorded length is large'), !encryptedFeed.includes('class="more"'));
+  check(L('a plain ciphertext-looking literal stays visible and escaped'), shows(encryptedFeed, literal.text) && shows(encryptedTalk, literal.text) && !encryptedFeed.includes('<tag>') && !encryptedTalk.includes('<tag>'));
+  check(L('opening the whole conversation keeps encrypted explanations folded'), notes(P.run('atalkHtml(encryptedCases, { full: true })')) === 4);
+  P.run('globalThis.encryptedButton = { dataset: { encryptedIdx: "902" } }; wireEncryptedNotes({ querySelectorAll: () => [encryptedButton] }, encryptedCases); globalThis.encryptedStopped = false; encryptedButton.onclick({ stopPropagation() { encryptedStopped = true; } })');
+  check(L('opening an encrypted report shows a message-body explanation without fetching ciphertext'), P.run('encryptedStopped') && shows(P.html('#mBody'), P.T('board.msg.encryptedDetail')) && !P.html('#mBody').includes(encrypted[0].text) && !P.fetched.some(u => u.includes('/api/event?idx=902')));
+  P.run('closeModal(); S.feed = savedEncryptedFeed; ui.atalk = savedEncryptedTalk; renderFeed(); renderAtalk({ force: true })');
 
   // ---------- the drawer of the `codex exec` run ----------
   await P.run(`openDrawer(${JSON.stringify(exec.id)})`);

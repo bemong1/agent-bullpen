@@ -411,6 +411,8 @@
     "board.file.error": "Can't open: {message}",
     "board.msg.older": "Load earlier",
     "board.msg.openTitle": "Click to see all",
+    "board.msg.encrypted": "Encrypted content",
+    "board.msg.encryptedDetail": "This message body is stored as ciphertext in the Codex record and cannot be shown.",
     "board.msg.moreHint": "earlier messages: \"{label}\" on the card",
     "board.msg.clickHint": "click a bubble to see it in full",
     "board.msg.loaded": "{count} loaded",

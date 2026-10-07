@@ -411,6 +411,8 @@
     "board.file.error": "열 수 없음: {message}",
     "board.msg.older": "이전 대화 더 보기",
     "board.msg.openTitle": "눌러서 전체 보기",
+    "board.msg.encrypted": "암호화된 내용",
+    "board.msg.encryptedDetail": "이 메시지의 본문은 Codex 기록에 암호문으로 저장되어 있어 표시할 수 없습니다.",
     "board.msg.moreHint": "더 이전 대화는 카드의 \"{label}\"",
     "board.msg.clickHint": "말풍선을 누르면 전체",
     "board.msg.loaded": "불러온 {count}개",

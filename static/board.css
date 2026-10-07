@@ -369,6 +369,8 @@ body { padding-bottom: var(--barh, 34px); }
 .ev .body { font-size: 13px; margin-top: 3px; white-space: pre-wrap; word-break: break-word; max-height: 4.5em; overflow: hidden; color: color-mix(in srgb, var(--text) 88%, var(--muted)); }
 .ev.open .body { max-height: none; }
 .ev .more { font-size: 11.5px; color: var(--blue); cursor: pointer; margin-top: 2px; }
+.encrypted-note { color: var(--muted); background: var(--panel2); border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px; font-size: 11.5px; cursor: pointer; }
+.encrypted-note:hover, .encrypted-note:focus-visible { color: var(--text); border-color: var(--line2); }
 .ev.k-notify .body, .ev.k-stop .body, .ev.k-xread .body { display: none; }
 /* system lines (a usage limit, an API error): the board's own news, dimmed, with no sender or receiver */
 .ev.k-sys .kind { color: var(--faint); }

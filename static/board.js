@@ -140,7 +140,16 @@ function askText(qs) {
   });
   return lines.join('\n').trim();
 }
-const evText = e => Array.isArray(e.questions) ? askText(e.questions) : e.text_i18n && I18N.has(e.text_i18n.key) ? t(e.text_i18n.key, i18nParams(e.text_i18n.params)) : e.text;       // a body the server wrote (not the agent) comes with its key
+const encryptedEvent = e => e.text_i18n && e.text_i18n.key === 'event.encrypted.text';
+const evText = e => encryptedEvent(e) ? t('board.msg.encryptedDetail') : Array.isArray(e.questions) ? askText(e.questions) : e.text_i18n && I18N.has(e.text_i18n.key) ? t(e.text_i18n.key, i18nParams(e.text_i18n.params)) : e.text;       // a body the server wrote (not the agent) comes with its key
+const encryptedNote = e => `<button type="button" class="encrypted-note" data-encrypted-idx="${esc(e.idx)}" title="${esc(evText(e))}">${esc(t('board.msg.encrypted'))}</button>`;
+function wireEncryptedNotes(root, items) {
+  root.querySelectorAll('.encrypted-note').forEach(b => b.onclick = ev => {
+    ev.stopPropagation();
+    const e = items.find(x => x.idx === +b.dataset.encryptedIdx);
+    if (e) openEventModal(e, evTitle(e) || kindLabel(e.kind));
+  });
+}
 const nameIds = s => String(s || '').replace(/\ba[0-9a-f]{16}\b/g, id => S && S.names[id] ? S.names[id] : id);
 async function api(path, opt) {
   const sep = path.includes('?') ? '&' : '?';
@@ -707,12 +716,13 @@ function renderFeed() {
     if (e.kind === 'sys') return `<div class="ev k-sys" data-idx="${e.idx}"><div class="t" title="${esc(I18N.date(e.ts, 'dateTime'))}">${hm(e.ts)}</div><div><div class="h"><span class="kind">${esc(kindLabel('sys'))} · ${esc(evTitle(e))}</span></div></div></div>`;   // the board's own news (a limit, an API error): no sender, no receiver, dimmed
     const open = ui.openEvents.has(e.idx);
     const title = e.kind === 'notify' ? `<span class="kind">${esc(evTitle(e))}</span>` : `<span class="kind">${esc(kindLabel(e.kind))}${e.title && titleAdds(e) && !['orch_say', 'user_say'].includes(e.kind) ? ' · ' + esc(evTitle(e)) : ''}</span>`;
-    const long = (e.full_len || 0) > 240;
+    const long = !encryptedEvent(e) && (e.full_len || 0) > 240;
     return `<div class="ev k-${e.kind} ${open ? 'open' : ''}" data-idx="${e.idx}"><div class="t" title="${esc(I18N.date(e.ts, 'dateTime'))}">${hm(e.ts)}</div><div>
       <div class="h">${e.kind === 'xread' ? `${whoBadge(e.to)}<span class="kind">${t('board.feed.xread', { author: esc(agentName(e.from)), title: esc(e.title) })}</span>` : `${whoBadge(e.from)}<span class="faint">→</span>${whoBadge(e.to)}${title}`}</div>
-      <div class="body">${esc(evText(e))}</div>${long ? `<div class="more">${open ? t('board.feed.less') : t('board.feed.more')}${e.full_len > 1500 ? ' · ' + t('board.feed.fullLen', { count: e.full_len }) : ''}</div>` : ''}</div></div>`;
+      <div class="body">${encryptedEvent(e) ? encryptedNote(e) : esc(evText(e))}</div>${long ? `<div class="more">${open ? t('board.feed.less') : t('board.feed.more')}${e.full_len > 1500 ? ' · ' + t('board.feed.fullLen', { count: e.full_len }) : ''}</div>` : ''}</div></div>`;
   }).join('') || `<div class="empty">${t('board.feed.empty')}</div>`;
   $('#feedItems').scrollTop = keepTop;
+  wireEncryptedNotes($('#feedItems'), items);
   $('#feedItems').querySelectorAll('.who-b.agent').forEach(b => b.onclick = ev => { ev.stopPropagation(); openDrawer(b.dataset.agent); });
   $('#feedItems').querySelectorAll('.more').forEach(m => m.onclick = async ev => {
     const el = m.closest('.ev'), idx = +el.dataset.idx;
@@ -1239,7 +1249,7 @@ function atalkHtml(items, o) {
     const text = evText(e) || (e.kind === 'spawn' ? evTitle(e) : '');
     html += `<div class="msg ${atalkSide(e)}" data-idx="${e.idx}" data-hl="${hl}" title="${t('board.msg.openTitle')}"><div class="mh">${who(from)}<span class="faint">→</span>${who(to)}` +
       `<span class="tagk">${esc(atalkKind(e.kind))}</span>${tm2}</div>` +
-      (o.full ? `<div class="mt full md">${md(text)}</div>` : text ? `<div class="mt">${esc(plain(text))}</div>` : '') + '</div>';
+      (encryptedEvent(e) ? `<div class="mt">${encryptedNote(e)}</div>` : o.full ? `<div class="mt full md">${md(text)}</div>` : text ? `<div class="mt">${esc(plain(text))}</div>` : '') + '</div>';
   });
   if (html && !items.length) html += `<div class="empty">${t('board.atalk.emptyFilter')}</div>`;
   return html || `<div class="empty">${ui.atalkErr ? t('board.atalk.error') : ui.atalkLoaded ? t('board.atalk.empty') : t('common.loading')}</div>`;
@@ -1248,6 +1258,7 @@ function atalkHtml(items, o) {
 const atalkHl = ids => { if (GAME && !GAME.demoOn) GAME.highlight(ids); };
 function wireAtalk(root) {
   root.querySelectorAll('.msg').forEach(m => m.onclick = () => openAtalkMsg(+m.dataset.idx));
+  wireEncryptedNotes(root, ui.atalk);
   root.querySelectorAll('[data-agent]').forEach(b => b.onclick = ev => { ev.stopPropagation(); if (ui.modalKind) closeModal(); openDrawer(b.dataset.agent); });
   const old = root.querySelector('[data-old]'); if (old) old.onclick = () => loadAtalk(true);
 }
