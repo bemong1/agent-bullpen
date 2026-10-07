@@ -72,6 +72,56 @@ class Names(unittest.TestCase):
         self.assertEqual([U.round_of(x) for x in ('r1x', 'r', 'round', 'R1', 'r_1', 'r1_run.log', 'result1')], [None] * 7)
 
 
+class FileRounds(Fixture):
+    def test_an_unmet_file_round_request_holds_the_final(self):
+        from judge_support import tag
+        x = self.file('talk/round1_x.md', mtime=200)
+        y = self.file('talk/round1_y.md', mtime=210)
+        final = self.file('talk/decision.md', mtime=300)
+        future = self.p('talk', 'round2_x.md')
+        b = agent('B', writes=[wr(y, 210)])
+        for source in ('planned', 'tag'):
+            with self.subTest(source=source):
+                a = agent('A', writes=[wr(x, 200)], run=2, run_start=250,
+                          planned=[plan(future, ts=250, run=2)] if source == 'planned' else (),
+                          tag=tag(self.p('talk'), 'round2_x.md', run=2) if source == 'tag' else None)
+                jd = self.assign(a, b, orch=[wr(final, 300)])
+                c = jd.cells[(self.p('talk'), 'round2', 'x')]
+                self.assertEqual((c.path, c.owner, c.agent, c.state, c.evidence), (future, None, 'A', 'missing', source))
+                self.assertFalse(jd.finals[self.p('talk')].confirmed)
+                self.assertEqual(jd.finals[self.p('talk')].why, ['open_cell'])
+
+    def test_qualification_does_not_leak_between_sessions_on_one_catalog(self):
+        x = self.file('talk/round1_x.md', mtime=200)
+        y = self.file('talk/round1_y.md', mtime=210)
+        cat = U.Catalog()
+        a, b = agent('A', writes=[wr(x, 200)]), agent('B', writes=[wr(y, 210)])
+        first = self.assign(a, b, catalog=cat)
+        self.assertEqual(set(first.listed), {self.p('talk')})
+        self.assertEqual(self.assign(a, catalog=cat).listed, {})
+
+    def test_a_masked_shell_write_must_pass_the_save_check_to_qualify(self):
+        x = self.file('talk/round1_x.md', mtime=200)
+        y = self.file('talk/r1_y.md', mtime=210)
+        a = agent('A', writes=[wr(x, 200)])
+        b = agent('B', writes=[wr(y, 210, evidence='shell', proof='window', span=(209, 211))])
+        self.assertEqual(set(self.assign(a, b).listed), {self.p('talk')})
+        self.file('talk/r1_y.md', mtime=250)
+        self.assertEqual(self.assign(a, b).listed, {})
+
+    def test_file_rounds_keep_owner_ties_and_current_round_states(self):
+        x = self.file('talk/round1_x.md', mtime=200)
+        y = self.file('talk/round1_y.md', mtime=210)
+        later = self.file('talk/round2_y.md', mtime=300)
+        a = agent('A', writes=[wr(x, 200)])
+        b = agent('B', writes=[wr(x, 200.5), wr(y, 210), wr(later, 300)], status='running')
+        jd = self.assign(a, b)
+        self.assertIsNone(jd.cells[(self.p('talk'), 'round1', 'x')].owner)
+        self.assertEqual(jd.cells[(self.p('talk'), 'round1', 'y')].state, 'done')
+        self.assertEqual(jd.cells[(self.p('talk'), 'round2', 'y')].state, 'draft')
+        self.assertIn('open_cell', jd.finals[self.p('talk')].why)
+
+
 class ReadUnit(Tree):
     """A debate folder is read from the disk: it has an exact round folder. Its guide is the brief next to it; nothing in a text of it counts."""
 

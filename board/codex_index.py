@@ -359,7 +359,8 @@ class CodexIndex:
                 if facts:
                     facts.begin_turn(ts)
                 if facts:
-                    self._turn(e, ts)
+                    p = json.loads(raw).get('payload') or {}
+                    self._turn(e, ts, p.get('turn_id'))
             elif pt in (b'task_complete', b'turn_aborted'):
                 e['open'] = False
                 if facts:
@@ -485,13 +486,16 @@ class CodexIndex:
             self._activity(e, raw, ts)
 
     @staticmethod
-    def _turn(e, ts):
+    def _turn(e, ts, turn_id=None):
         """A turn began: its span (start, end) is kept for every root and sub-agent (no text, except for the ones whose instruction is read: see _turn_text). A turn that never
         ended (the process was stopped) ends when the next one begins."""
         turns = e['turns']
         if turns and turns[-1]['end'] is None:
             turns[-1]['end'] = ts
-        turns.append({'start': ts, 'end': None, 'user': None})
+        turn = {'start': ts, 'end': None, 'user': None}
+        if isinstance(turn_id, str) and turn_id:
+            turn['id'] = turn_id
+        turns.append(turn)
         if len(turns) > CX_TURNS_KEEP:
             del turns[0]
 

@@ -363,6 +363,13 @@ class CopiedHistory(Rollouts):
 
 
 class TurnSpans(Rollouts):
+    def test_recorded_turn_ids_survive_the_retention_limit(self):
+        n = codex_index.CX_TURNS_KEEP + 1
+        steps = [(T0 + 2 * i, 'event_msg', {'type': 'task_started', 'turn_id': 'turn-%d' % i}) for i in range(n)]
+        self.put(ROOT, root_meta(source='cli', originator='codex-tui'), steps)
+        turns = self.entry(ROOT)['turns']
+        self.assertEqual([t['id'] for t in turns], ['turn-%d' % i for i in range(1, n)])
+
     """The turns of every root (TUI, desktop, exec) and sub-agent as spans, for the one who asks whether a time falls in a turn of the thread. No text for the ones that did not have it."""
 
     STEPS = [(T0 + 1, 'event_msg', {'type': 'task_started'}), (T0 + 1, 'response_item', user_message('A long instruction ' + 'x' * 500)), (T0 + 5, 'event_msg', {'type': 'task_complete'}),

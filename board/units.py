@@ -5,7 +5,7 @@ reads a session and nothing reads a word of a text: `debates.py` turns an agent 
 The judgment is a pure function of (the facts, the disk as `Catalog` answers it): the same input gives the same Judgement, and it reads no clock (an open window runs to the end of time).
 
 What the code below keeps:
-  - A folder is a debate when the disk says so: it has an exact round folder (r1, r01, round1). A `brief.md`, `README.md` or `index.md` is its guide only next to one. The folder
+  - A folder is a debate when it has an exact round folder (r1, r01, round1), or file rounds with two seat names and two session agents' confirmed tool/shell writes (O23). A `brief.md`, `README.md` or `index.md` is its guide next to those rounds. The folder
     that holds a guide and the topics below it is the root of a bundle.
   - A cell is a file `<unit>/<round folder>/<name>.md`. It exists when the file is on disk, a write that is sure made it, or a launch command or a room tag names it. No sentence makes one.
   - A write is sure (`J1`) when its result says it worked and the tool or the exit status of the whole command decides it; the others (a command whose later part can hide a failure,
@@ -38,6 +38,7 @@ from .util import FILE_MAX, HOME, Denied, open_safe
 
 GUIDE_NAMES = ('brief.md', 'README.md', 'index.md')
 ROUND_DIR_RE = re.compile(r'(?:r|round)(\d+)\Z')
+ROUND_FILE_RE = re.compile(r'(?:r|round)(\d+)_([^/]+)\.md\Z', re.I)
 _RN = r'(?:r|round)(\d+)'
 # a report path: <folder>/<r|round><N>/<name>.md. Left boundary: it does not start in the middle of a path ('.../t2_error/…', '…/x/…', 'a/b/…')
 REPORT_RE = re.compile(r'((?<![\w.~/…}-])(?:~|/)[^\s`\'"()<>|,*]*?)/' + _RN + r'/([A-Za-z0-9_.-]+?)\.md')
@@ -68,6 +69,12 @@ def round_of(name):
     """Round number of a round folder name (r1, r01, round1), or None."""
     m = ROUND_DIR_RE.match(name)
     return int(m.group(1)) if m else None
+
+
+def file_round_of(name):
+    """(round, seat) of round<N>_<seat>.md or r<N>_<seat>.md (O23), or None."""
+    m = ROUND_FILE_RE.fullmatch(name)
+    return (int(m.group(1)), m.group(2)) if m else None
 
 
 def final_sort_key(name, mtime):
@@ -275,7 +282,7 @@ class Catalog:
         return st is not None and st[0] == 'd'
 
     def unit_at(self, path):
-        """The Unit that is exactly this folder (it has an exact round folder), or None."""
+        """The Unit that is exactly this folder (round folders or qualified file rounds), or None."""
         path = os.path.normpath(path)
         if path in self._units:
             return self._units[path]
@@ -302,6 +309,29 @@ class Catalog:
     def md_stems(self, folder):
         """The names (without .md) of the markdown files directly in a folder."""
         return [n[:-3] for n, kind in (self.listdir(folder) or ()) if kind == 'f' and n.endswith('.md')]
+
+    def add_file_rounds(self, writes, sure):
+        """O23: recognise file rounds only with two seat names and two session agents' confirmed W1/W2 writes. Round folders take precedence."""
+        by_folder = collections.defaultdict(list)
+        for w in writes:
+            if w.agent != 'orch' and w.evidence in ('tool', 'shell') and file_round_of(os.path.basename(w.path)) and sure(w):
+                by_folder[os.path.dirname(w.path)].append(w)
+        for folder, ws in by_folder.items():
+            if too_broad(folder) or self.unit_at(folder) is not None:
+                continue
+            names = self.listdir(folder)
+            if names is None:
+                continue
+            files = sorted({n for n, k in names if k == 'f' and file_round_of(n)} | {os.path.basename(w.path) for w in ws})
+            if len({file_round_of(n)[1] for n in files}) < 2 or len({w.agent for w in ws}) < 2:
+                continue
+            rounds = {}
+            for n in files:
+                rounds.setdefault(file_round_of(n)[0], []).append(n)
+            guide = next((g for g in GUIDE_NAMES if (g, 'f') in names), None)
+            real = self.realpath(folder)
+            self._units[folder] = Unit(id=folder, path=folder, file_rounds=rounds,
+                                       brief=os.path.join(folder, guide) if guide else None, aliases=[real] if real != folder else [])
 
     def children(self, root, skip=('final',)):
         """The sub-folders of a grouping folder that are debate folders (the topics of a shared guide)."""
@@ -614,6 +644,7 @@ class _Judge:
             self.by_path[w.path].append(w)
             self.by_agent[w.agent].append(w)
             self.by_dir[os.path.dirname(w.path)].append(w)
+        self.cat.add_file_rounds(self.events, self.sure)
         self.demand = {a.id: self._demands(a) for a in self.agents}
         self.askers = collections.defaultdict(list)                      # path -> the agents that were asked to save it
         for a in self.agents:
@@ -633,7 +664,7 @@ class _Judge:
         out = []
         for owner, ws in [(a.id, a.writes) for a in self.agents] + [('orch', self.sf.orch_writes)]:
             for w in ws:
-                path = self.real(w.path) if w.path.endswith('.md') else self.cat.real_folder_of(w.path)
+                path = self.real(w.path) if w.path.lower().endswith('.md') else self.cat.real_folder_of(w.path)
                 if path != w.path or w.agent != owner:
                     w = dataclasses.replace(w, path=path, agent=owner)
                 out.append(w)
@@ -671,8 +702,9 @@ class _Judge:
             d[self.real(q.path)].append((q.ts, 'planned', q.run))
         t = a.tag
         if t and t.seat:
-            seat = t.seat[:-3] if t.seat.endswith('.md') else t.seat
-            if '/' in seat or self.cat.unit_at(t.room) is None:
+            seat = t.seat[:-3] if t.seat.lower().endswith('.md') else t.seat
+            unit = self.cat.unit_at(t.room)
+            if '/' in seat or (unit and unit.file_rounds and file_round_of(seat + '.md')) or unit is None:
                 d[self.real(os.path.join(t.room, seat + '.md'))].append((a.run_start, 'tag', t.run))
         return {p: sorted(v, key=lambda x: (x[0], x[1])) for p, v in d.items()}
 
@@ -752,6 +784,8 @@ class _Judge:
         return bool(runs) and all(r is not None and r < a.run for r in runs)
 
     def cell(self, unit, rdir, stem, path, room=False):
+        u = self.cat.unit_at(unit)
+        n = round_of(rdir.lower()) if u and u.file_rounds else round_of(rdir)
         owner, agent, editors, evidence, _diag_, _held, _taken = self.seat(path)
         st = self.cat.stat(path)
         exists = st is not None and st[0] == 'f'
@@ -766,14 +800,14 @@ class _Judge:
                 if room:
                     here = True
                 else:                                              # the round it works in now: the latest where it is the agent of a cell of this unit
-                    here = round_of(rdir) == self._current_round(unit).get(o.id)
+                    here = n == self._current_round(unit).get(o.id)
                 state = cell_state('done' if self._resumed_idle(o, path) else o.status, file_ok, here, True)
         elif agent:
             state = cell_state(self._met(self.by_id[agent], path)[1], False, True, True)
         else:
             state = 'previous' if exists else 'waiting'
         hint = self._hint(path) if owner is None and exists else None
-        return Cell(unit, None if room else round_of(rdir), rdir, stem, path, owner, agent, editors, evidence, hint, previous, state)
+        return Cell(unit, None if room else n, rdir, stem, path, owner, agent, editors, evidence, hint, previous, state)
 
     def _current_round(self, unit):
         """{agent id: the round it works in now}: the latest round of this unit in which it is the agent of a cell."""
@@ -783,7 +817,8 @@ class _Judge:
             for q in self.unit_cell_paths(unit):
                 aid = self.seat(q)[1]
                 if aid is not None:
-                    n = round_of(os.path.basename(os.path.dirname(q)))
+                    ck = self.cell_key(q)
+                    n = round_of(ck[1].lower())
                     got[aid] = max(got.get(aid, n), n)
             self._rounds[unit] = got
         return got
@@ -822,10 +857,14 @@ class _Judge:
 
     # ----- the cells of a unit -----
     def cell_key(self, path):
-        """(unit folder, round folder, name) of a path that is a file `<unit>/<round folder>/<name>.md` of a debate folder, else None."""
+        """(unit folder, round name, seat) of a round-folder cell or a qualified file-round cell, else None."""
+        d = os.path.dirname(path)
+        fr = file_round_of(os.path.basename(path))
+        u = self.cat.unit_at(d) if fr else None
+        if u is not None and u.file_rounds and fr:
+            return d, os.path.basename(path).split('_', 1)[0], fr[1]
         if not path.endswith('.md'):
             return None
-        d = os.path.dirname(path)
         rdir = os.path.basename(d)
         if round_of(rdir) is None:
             return None
@@ -841,7 +880,7 @@ class _Judge:
         named = collections.defaultdict(set)
         writers, askers = collections.defaultdict(set), collections.defaultdict(set)
         for w in self.events:
-            if w.path.endswith('.md'):
+            if w.path.lower().endswith('.md'):
                 ck = self.cell_key(w.path)
                 if ck and self.sure(w):
                     named[ck[0]].add(w.path)
@@ -863,6 +902,8 @@ class _Judge:
         self._index()
         u = self.cat.unit_at(unit)
         paths = set(self._named.get(unit, ()))
+        for files in (u.file_rounds.values() if u else ()):
+            paths.update(os.path.join(unit, n) for n in files)
         for dirs in (u.rounds.values() if u else ()):
             for d in dirs:
                 folder = os.path.join(unit, d)
@@ -1157,7 +1198,8 @@ class _Judge:
             return Final(key, scope, False, None, None, ['no_report'], [], None), live, estimated
         lc = max(w.ts for w in conf)
         rounds_of_scope = [os.path.join(u, d) for u in units for d in self._round_dirs(u)]
-        la = max([w.ts for p in paths for w in self.by_path.get(p, ())] + [w.ts for rd in rounds_of_scope for w in self.by_dir.get(rd, ()) if w.path.endswith('.md')]            # a try at a file of a round folder that is not there: it may have made it
+        file_attempts = [w.ts for u in units if self.cat.unit_at(u).file_rounds for w in self.by_dir.get(u, ()) if file_round_of(os.path.basename(w.path))]
+        la = max([w.ts for p in paths for w in self.by_path.get(p, ())] + file_attempts + [w.ts for rd in rounds_of_scope for w in self.by_dir.get(rd, ()) if w.path.endswith('.md')]            # a try at a file of a round folder that is not there: it may have made it
                  + [m for m in (self.mtime(p) for p in paths) if m is not None])
 
         mine = set()                                            # a room: the other files that its members made are theirs, no candidate of the room (a file somebody else wrote at too is)

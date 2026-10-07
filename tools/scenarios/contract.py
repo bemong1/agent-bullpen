@@ -24,6 +24,7 @@ COMMON_FOLDERS = ('docs', 'doc')
 STATE_DIRS = ('.claude/', '.codex/')                         # what the tools keep of themselves (units.py STATE_DIRS, below the synthetic root)
 SCRATCH_DIRS = ('tmp/', 'var/tmp/')
 ROUND_DIR_RE = re.compile(r'(?:r|round)(\d+)\Z')
+ROUND_FILE_RE = re.compile(r'(?:r|round)(\d+)_([^/]+)\.md\Z', re.I)
 ROUND_DOC_RE = re.compile(r'^(brief|round\d+.*|r\d+[_-].*)\.md$', re.I)
 CONCLUDE_RE = re.compile(r'ruling|final|verdict|decision|conclusion|summary|plan|(?<![a-z])clos(?:e|ing|ure)|결론|판정|합의|최종|정리|종결|마무리', re.I)
 WHY_ORDER = ('no_report', 'open_cell', 'none', 'several', 'empty_round', 'live_participant', 'estimated_room', 'history_lost')      # FINAL_WHY (J15)
@@ -89,6 +90,18 @@ class Judge:
         self.conf = [w for w in self.events if w['confirmed']]
         self.topics = sorted({parent(d) for d in self.dirs if ROUND_DIR_RE.fullmatch(name(d))})
         self.round_dirs_of = {u: sorted(d for d in self.dirs if parent(d) == u and ROUND_DIR_RE.fullmatch(name(d))) for u in self.topics}
+        self.file_topics = set()
+        # O23: only session agents' confirmed W1/W2 writes qualify a folder; physical round folders win.
+        folders = {parent(w['path']) for w in self.conf if w['agent'] != 'orch' and w['evidence'] in SHOWN and ROUND_FILE_RE.fullmatch(name(w['path']))}
+        for f in sorted(folders):
+            if self.too_broad(f) or f in self.topics or not self.exists_folder(f):
+                continue
+            ws = [w for w in self.conf if parent(w['path']) == f and w['agent'] != 'orch' and w['evidence'] in SHOWN and ROUND_FILE_RE.fullmatch(name(w['path']))]
+            ps = {p for p in self.files if parent(p) == f and ROUND_FILE_RE.fullmatch(name(p))} | {w['path'] for w in ws}
+            if len({ROUND_FILE_RE.fullmatch(name(p)).group(2) for p in ps}) >= 2 and len({w['agent'] for w in ws}) >= 2:
+                self.file_topics.add(f)
+                self.round_dirs_of[f] = []
+        self.topics = sorted(set(self.topics) | self.file_topics)
         self._seat = {}
         self.rooms, self.room_cells = self._rooms()
         self.cell_paths = self._cell_paths()
@@ -144,11 +157,14 @@ class Judge:
     def root_of(self, unit):
         """A bundle's root: the parent of a topic when it holds a `brief.md` and no round folder of its own, else the topic itself."""
         up = parent(unit)
-        if up != unit and up + '/brief.md' in self.files and not self.round_dirs_of.get(up):
+        if up != unit and up + '/brief.md' in self.files and up not in self.topics:
             return up
         return unit
 
     def rnum(self, p):
+        if parent(p) in self.file_topics:
+            m = ROUND_FILE_RE.fullmatch(name(p))
+            return int(m.group(1)) if m else None
         m = ROUND_DIR_RE.fullmatch(name(parent(p)))
         return int(m.group(1)) if m else None
 
@@ -177,11 +193,11 @@ class Judge:
         out = [(q['ts'], 'planned', q['run']) for q in a['planned'] if self.real(q['path']) == p]
         t = a['tag']
         if t and t['seat'] and self.valid_tag(t):
-            seat = t['seat'][:-3] if t['seat'].endswith('.md') else t['seat']
+            seat = t['seat'][:-3] if t['seat'].lower().endswith('.md') else t['seat']
             if '/' in seat:
                 if self.real(t['room'] + '/' + seat + '.md') == p:
                     out.append((a['run_start'], 'tag', t['run']))
-            elif not self.round_dirs_of.get(t['room']) and self.real(t['room'] + '/' + seat + '.md') == p:
+            elif (t['room'] not in self.topics or (t['room'] in self.file_topics and ROUND_FILE_RE.fullmatch(seat + '.md'))) and self.real(t['room'] + '/' + seat + '.md') == p:
                 out.append((a['run_start'], 'tag', t['run']))                 # a room's seat is its own file (J13)
         return sorted(out, key=lambda d: (d[0], d[1]))
 
@@ -255,6 +271,8 @@ class Judge:
     # -------------------------------------------------------------------------------------------------------------- cells
     def in_round(self, p, u):
         """Whether `p` is a `.md` directly in a round folder of topic `u`, whether or not the round folder is on disk (J2: a confirmed write, a launch output or a SEAT makes the cell)."""
+        if u in self.file_topics:
+            return parent(p) == u and bool(ROUND_FILE_RE.fullmatch(name(p)))
         return p.endswith('.md') and parent(parent(p)) == u and bool(ROUND_DIR_RE.fullmatch(name(parent(p))))
 
     def _cell_paths(self):
@@ -264,6 +282,8 @@ class Judge:
         for u in self.topics:
             rd = set(self.round_dirs_of[u])
             ps = {p for p in self.files if parent(p) in rd and p.endswith('.md')}
+            if u in self.file_topics:
+                ps |= {p for p in self.files if self.in_round(p, u)}
             ps |= {w['path'] for w in self.conf if self.in_round(w['path'], u)}
             for a in self.agents:
                 for q in a['planned']:
@@ -271,12 +291,15 @@ class Judge:
                     if self.in_round(q, u):
                         ps.add(q)
                 t = a['tag']
-                if t and t['seat'] and '/' in t['seat'] and t['room'] == u and self.valid_tag(t):
-                    q = u + '/' + (t['seat'][:-3] if t['seat'].endswith('.md') else t['seat']) + '.md'
+                if t and t['seat'] and ('/' in t['seat'] or u in self.file_topics) and t['room'] == u and self.valid_tag(t):
+                    q = u + '/' + (t['seat'][:-3] if t['seat'].lower().endswith('.md') else t['seat']) + '.md'
                     if self.in_round(q, u):
                         ps.add(q)
             for p in ps:
-                out[(u, name(parent(p)), name(p)[:-3])] = p
+                if u in self.file_topics:
+                    out[(u, name(p).split('_', 1)[0], ROUND_FILE_RE.fullmatch(name(p)).group(2))] = p
+                else:
+                    out[(u, name(parent(p)), name(p)[:-3])] = p
         for f, files in self.room_cells.items():
             for p in files:
                 out[(f, '-', name(p)[:-3])] = p
@@ -367,7 +390,7 @@ class Judge:
             if a['tag'] and self.valid_tag(a['tag']):
                 tagged[a['tag']['room']].append(a)
         for f, ms in sorted(tagged.items()):
-            if len(ms) >= 2 and not self.round_dirs_of.get(f) and not self.unit_below(f):       # choice: a bundle's root is no room
+            if len(ms) >= 2 and f not in self.topics and not self.unit_below(f):       # choice: a bundle's root is no room
                 files = {a['id']: next((p for p in self.own_files(a) if in_reach(p, f)), None) for a in ms}
                 seats = {a['id']: a['tag']['seat'] for a in ms if a['tag']['seat'] and '/' not in a['tag']['seat']}
                 paths = [p for p in files.values() if p] + [f + '/' + (s[:-3] if s.endswith('.md') else s) + '.md' for s in seats.values()]
@@ -387,7 +410,7 @@ class Judge:
             if len(first) >= 2 and len(folders) == 1:
                 (f,) = folders
                 mine = [a for a in ms if a['id'] in first]
-                if not (self.is_common(f) or self.round_dirs_of.get(f) or self.unit_below(f) or f in rooms):
+                if not (self.is_common(f) or f in self.topics or self.unit_below(f) or f in rooms):
                     if 2 * sum(1 for a in mine if self.outside_work(a, f)) > len(mine):
                         taken |= {a['id'] for a in mine}                           # choice: most of them work elsewhere, so none of them is a member of a room
                     else:
@@ -399,7 +422,7 @@ class Judge:
                 shared = set.intersection(*({self.real(r['path']) for r in a['reads'] if r['path'].endswith('.md')} for a in rest))
                 folders = sorted({parent(p) for p in shared})
                 for f in folders:
-                    if talk and not (self.is_common(f) or self.round_dirs_of.get(f) or self.is_round_dir(f) or self.unit_below(f) or f in rooms):
+                    if talk and not (self.is_common(f) or f in self.topics or self.is_round_dir(f) or self.unit_below(f) or f in rooms):
                         if 2 * sum(1 for a in rest if self.outside_work(a, f)) > len(rest):      # J14: the exclusions are those of every estimated room, most of them working elsewhere too
                             continue
                         rooms[f] = dict(kind='members', sure=False, why='launch', members=sorted(a['id'] for a in rest), files=[])
@@ -639,7 +662,9 @@ class Judge:
     def last_attempt(self, paths):
         """J15 La: the latest time a cell file may have changed: a write attempt on it, whatever it was and whatever came of it (a failed one may have emptied the file), or the file's
         present time (a change nobody's record shows). It can only withdraw a conclusion, never shorten the rivals."""
-        return max([w['ts'] for w in self.events if w['path'] in paths] + [self.files[p]['mtime'] for p in paths if p in self.files])
+        file_units = {parent(p) for p in paths if parent(p) in self.file_topics}
+        return max([w['ts'] for w in self.events if w['path'] in paths or (parent(w['path']) in file_units and ROUND_FILE_RE.fullmatch(name(w['path'])))]
+                   + [self.files[p]['mtime'] for p in paths if p in self.files])
 
     def room_mine(self, kind, scope):
         """O14: in a room, the files its members made with a confirmed write and nobody else tried to write: theirs, no candidate of the room (one somebody else wrote at too is a document of it)."""

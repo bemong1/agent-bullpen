@@ -751,7 +751,7 @@ def shell_writes(cmd, cwd, sure_only=False, places=False, md_only=True, skip_lau
     repository: `_is_no_work`). With `skip_launch` the redirects of a command that starts `claude -p` or `codex exec` are left out, and so is a `tee` in the same pipeline after one (`claude -p x |
     tee f`): what the shell writes of the output of a child is the child's report (its requirement and event, J7), not a write of the one that started it (O8, O8b); a redirect or a
     `tee` of another command of the same text (not in that pipeline) stays."""
-    if (md_only and '.md' not in cmd) or not may_write(cmd):
+    if (md_only and '.md' not in cmd.lower()) or not may_write(cmd):
         return []
     from . import link as L
     P = parse(cmd)
@@ -807,11 +807,11 @@ def shell_writes(cmd, cwd, sure_only=False, places=False, md_only=True, skip_lau
                 if path in seen:
                     continue
                 if md_only:
-                    if not path.endswith('.md'):
+                    if not path.lower().endswith('.md'):
                         continue
                 elif path.startswith('/dev/'):
                     continue
-                elif not path.endswith('.md') and _is_no_work(path):
+                elif not path.lower().endswith('.md') and _is_no_work(path):
                     continue
                 seen.add(path)
                 if places:
@@ -1221,7 +1221,7 @@ class EventLog(object):
     def add_write(self, ev):
         """Keeps one write event; returns it, or None when it was not kept (past MD_EVENTS_MAX)."""
         with self.lock:
-            if ev.path.endswith('.md'):
+            if ev.path.lower().endswith('.md'):
                 if len(self._md) >= MD_EVENTS_MAX:
                     self.widen_lost(ev.ts, INF)
                     return None

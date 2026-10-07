@@ -397,22 +397,49 @@ class NativeSubAgent(unittest.TestCase):
         server.Session.__init__(s, '/nonexistent/x.jsonl')
         return s
 
-    def test_one_call_one_group(self):
+    def test_an_unknown_turn_has_no_group(self):
         s = self.session()
         a, b = self.sub(), self.sub()
         b.id = 'S2'
         a.launch_src, b.launch_src = ('PARENT', 'call_1', T0), ('PARENT', 'call_2', T0)
         s.agents['S1'], s.agents['S2'] = a, b
         s.refresh_facts({})
-        self.assertEqual(a.launch, LaunchKey('codex', 'ROOT', 'PARENT', '-:call_1', 'call_1'))
-        self.assertNotEqual(a.launch.gkey(), b.launch.gkey())                                       # the same turn and the same parent: still each its own
+        self.assertIsNone(a.launch)
+        self.assertIsNone(b.launch)
+
+    def test_three_calls_in_one_parent_turn_share_one_group(self):
+        s = self.session()
+        fake = types.SimpleNamespace(get=lambda tid: {'turns': [{'id': 'turn-a', 'start': T0, 'end': T0 + 60}]})
+        with patched(CODEX=fake):
+            for i in range(3):
+                a = self.sub()
+                a.id = 'S%d' % i
+                a.launch_src = ('PARENT', 'call_%d' % i, T0 + 2 + i * 10)
+                s.agents[a.id] = a
+            s.refresh_facts({})
+        self.assertEqual(len({a.launch.gkey() for a in s.agents.values()}), 1)
+        self.assertEqual({a.launch.group for a in s.agents.values()}, {'PARENT:turn-a'})
+        self.assertEqual({a.launch.call for a in s.agents.values()}, {'call_0', 'call_1', 'call_2'})
+
+    def test_different_parent_turns_have_different_groups(self):
+        s = self.session()
+        a, b = self.sub(), self.sub()
+        b.id = 'S2'
+        a.launch_src, b.launch_src = ('PARENT', 'call_1', T0 + 2), ('PARENT', 'call_2', T0 + 70)
+        s.agents[a.id], s.agents[b.id] = a, b
+        fake = types.SimpleNamespace(get=lambda tid: {'turns': [{'id': 'turn-a', 'start': T0, 'end': T0 + 60}, {'id': 'turn-b', 'start': T0 + 65, 'end': None}]})
+        with patched(CODEX=fake):
+            s.refresh_facts({})
+        self.assertNotEqual(a.launch.gkey(), b.launch.gkey())
 
     def test_the_turn_of_the_parent_is_in_the_group(self):
-        fake = types.SimpleNamespace(get=lambda tid: {'turns': [{'start': 1.0, 'end': 50.0, 'user': None}, {'start': 60.0, 'end': None, 'user': None}]})
+        fake = types.SimpleNamespace(get=lambda tid: {'turns': [{'id': 'turn-a', 'start': 1.0, 'end': 50.0, 'user': None}, {'id': 'turn-b', 'start': 60.0, 'end': None, 'user': None}]})
         with patched(CODEX=fake):
-            self.assertEqual(SE.Session._turn_of('P', 30.0), '0')
-            self.assertEqual(SE.Session._turn_of('P', 70.0), '1')
-            self.assertEqual(SE.Session._turn_of('P', 55.0), '-')
+            self.assertEqual(SE.Session._turn_of('P', 30.0), 'turn-a')
+            self.assertEqual(SE.Session._turn_of('P', 70.0), 'turn-b')
+            self.assertIsNone(SE.Session._turn_of('P', 55.0))
+        with patched(CODEX=types.SimpleNamespace(get=lambda tid: {'turns': [{'start': 1.0, 'end': None}]})):
+            self.assertIsNone(SE.Session._turn_of('P', 30.0))
 
     def test_a_sub_agent_whose_spawn_is_not_known_has_none(self):
         s = self.session()

@@ -1,4 +1,4 @@
-"""The contract cases (CONTRACT 3.2): 86 synthetic cases, with the truth, run through the judgment.
+"""The contract cases (CONTRACT 3.2): synthetic cases, with the truth, run through the judgment.
 
 Each case is a plain description of what a session did (events, windows, launch keys, room tags) and of the disk (folders, files with their times and bytes, links, worktrees). The test builds the
 disk in a temporary folder, makes the SessionFacts of the description and compares units.assign with what the case says is true: the list of debates and the current one, the cells (owner, agent, editors,
@@ -186,7 +186,8 @@ class Shown:
 @contextlib.contextmanager
 def broad_root(root):
     """The world of a case: nothing in it is a scratch file."""
-    with mock.patch.object(U, 'SCRATCH_DIRS', ()):
+    broad = U.too_broad
+    with mock.patch.object(U, 'SCRATCH_DIRS', ()), mock.patch.object(U, 'too_broad', lambda p: broad(p) or p in (os.path.join(root, 'tmp'), os.path.join(root, 'var/tmp'))):
         yield
 
 
@@ -239,8 +240,8 @@ class Shape(unittest.TestCase):
     def test_the_file_has_the_cases_of_the_contract(self):
         blob = load_cases()
         self.assertEqual(blob['version'], 4)
-        self.assertEqual(len(blob['cases']), 99)
-        self.assertEqual(len({c['id'] for c in blob['cases']}), 99)
+        self.assertEqual(len(blob['cases']), 116)
+        self.assertEqual(len({c['id'] for c in blob['cases']}), 116)
 
 
 if __name__ == '__main__':

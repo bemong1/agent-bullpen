@@ -1639,18 +1639,19 @@ class Session:
             return LaunchKey(c.get('prov') or 'claude', link.get('sid'), link.get('node'), c['grp'], c['id'])
         if a.provider == 'codex' and a.origin == 'subagent' and a.launch_src and a.runtime:
             host, call, ts = a.launch_src
-            return LaunchKey('codex', a.runtime[0], host, '%s:%s' % (self._turn_of(host, ts), call), call)
+            turn = self._turn_of(host, ts)
+            return LaunchKey('codex', a.runtime[0], host, '%s:%s' % (host, turn), call) if turn else None
         return None
 
     @staticmethod
     def _turn_of(thread, ts):
-        """The number of the turn of a Codex thread that was open at `ts` (its place among the turns the index knows), '-' when none was."""
+        """The recorded id of the turn of a Codex thread open at `ts`, or None when it is not known (O22)."""
         e = CODEX.get(thread)
         for n in range((len(e['turns']) if e else 0) - 1, -1, -1):
             t = e['turns'][n]
             if t['start'] is not None and t['start'] <= ts and (t['end'] is None or ts <= t['end']):
-                return str(n)
-        return '-'
+                return t.get('id')
+        return None
 
     # ---- room tags (2.4) ----
     def _cmd_text(self, call):

@@ -152,6 +152,7 @@ class Unit:
     parent: Optional[str] = None
     declared_reports: List[str] = field(default_factory=list)
     rounds: Dict[int, List[str]] = field(default_factory=dict)       # round number -> the real folders that carry it (r1, r01, round1 ...)
+    file_rounds: Dict[int, List[str]] = field(default_factory=dict)  # round number -> filenames directly in the unit (O23)
     seat_aliases: Dict[str, str] = field(default_factory=dict)       # letter -> file stem
 
 

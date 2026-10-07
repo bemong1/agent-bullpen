@@ -578,7 +578,7 @@ def timeline(s, since, until=None, all_lanes=False):
 def allowed_file(s, path):
     """The real path (realpath) that was checked if the file may be opened, else None. The caller opens that path."""
     real = os.path.realpath(path)
-    if not re.search(r'\.(md|txt|ya?ml|json)$', real) or denied_file(real) or hidden_or_secret(real):
+    if not re.search(r'\.(md|txt|ya?ml|json)$', real, re.I) or denied_file(real) or hidden_or_secret(real):
         return None                                   # the same holds for files an agent wrote: configs such as ~/.docker, .config/gh, .mcp.json are not opened
     with s.lock:                                   # safe even while poll is adding agents
         if any(os.path.realpath(w['path']) == real for a in s.agents.values() for w in a.writes if write_made(w)):
@@ -589,7 +589,9 @@ def allowed_file(s, path):
         root = os.path.realpath(d['root'])
         if root == home or home.startswith(root + os.sep):
             continue                                  # HOME or an ancestor of it does not count as a root
-        if not (os.path.exists(os.path.join(root, 'brief.md')) or glob.glob(os.path.join(root, 'r[0-9]*')) or any(t.get('room') for t in d.get('topics') or ())):
+        cat = getattr(s, '_unit_catalog', None)
+        unit = cat.unit_at(root) if cat is not None else None
+        if not (os.path.exists(os.path.join(root, 'brief.md')) or glob.glob(os.path.join(root, 'r[0-9]*')) or (unit is not None and unit.file_rounds) or any(t.get('room') for t in d.get('topics') or ())):
             continue                                  # only real debate folders (excludes fake roots that appear only in text); a room is a folder with a guide the records name
         if real.startswith(root + os.sep):
             return real

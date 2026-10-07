@@ -344,7 +344,7 @@ TEXT = {                                                         # the words of 
 }
 
 
-def build_composite(root):
+def build_composite(root, file_rounds=False):
     """One session of an orchestrator that starts two sub-agents together (a role line each, an instruction that names a path, a report with the Write tool and one with a heredoc, a
     message from one to the other that names it by its role line), a `claude -p` run whose instruction has a quote and two blanks in it and whose last message is the file the launch
     writes, and a `codex exec` run whose `-o` is a variable nothing can expand and whose instruction names the folder of the debate. Built the way the scenario generator builds a scene."""
@@ -354,10 +354,10 @@ def build_composite(root):
     t = {k: v % {'top': top} if '%(top)s' in v else v for k, v in TEXT.items()}
     unit = os.path.join(W, UNIT)
     os.makedirs(os.path.join(W, '.git'), exist_ok=True)
-    os.makedirs(os.path.join(unit, 'r1'), exist_ok=True)
+    os.makedirs(unit if file_rounds else os.path.join(unit, 'r1'), exist_ok=True)
     sta = Sta(b, W=W)
     build.put(os.path.join(unit, 'brief.md'), t['brief'], b.T(-3100))
-    a_path, b_path, c_path, d_path = (os.path.join(unit, 'r1', n + '.md') for n in 'ABCD')
+    a_path, b_path, c_path, d_path = (os.path.join(unit, 'round1_' + n + '.md') if file_rounds else os.path.join(unit, 'r1', n + '.md') for n in 'ABCD')
 
     def tail_a(S, at):
         wid, mid = toolu(b, 'a-write'), toolu(b, 'a-say')
@@ -440,8 +440,8 @@ class Composite(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.root, ignore_errors=True)
 
-    def read(self, variant):
-        b = build_composite(os.path.join(self.root, 'c'))
+    def read(self, variant, file_rounds=False):
+        b = build_composite(os.path.join(self.root, 'c'), file_rounds=file_rounds)
         try:
             fix_clock(b)
             if variant != 'original':
@@ -461,6 +461,15 @@ class Composite(unittest.TestCase):
                 for place, one, other in differences(base[part], got[part]):
                     bad.setdefault((part, place), (str(one)[:60], str(other)[:60], []))[2].append(variant)
         self.assertEqual(bad, {}, '\n'.join('%s %s: %s -> %s (%s)' % (part, place, one, other, ' '.join(v)) for (part, place), (one, other, v) in sorted(bad.items())))
+
+    def test_file_rounds_read_the_same_whatever_the_session_texts_say(self):
+        base = self.read('original', file_rounds=True)
+        self.assertEqual(sorted(k.split('/')[-1] for k in json.loads(base['judged'])['cells']), ['talk|round1|' + a for a in 'ABCD'])
+        for variant in VARIANTS:
+            with self.subTest(variant=variant):
+                got = self.read(variant, file_rounds=True)
+                self.assertEqual(differences(base['facts'], got['facts']), [])
+                self.assertEqual(differences(base['judged'], got['judged']), [])
 
 
 class Sensitivity(unittest.TestCase):

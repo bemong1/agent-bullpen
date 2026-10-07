@@ -17117,6 +17117,2851 @@
    "then": [],
    "summary_in": "A가 둘째 파일 A_notes.md를 Write 300, 오케가 summary.md를 Write 400",
    "summary_out": "A_notes.md는 최종 앞에 끝난 보고라 후보도 경쟁도 아님 → summary.md가 확정 최종"
+  },
+  {
+   "id": "C100",
+   "group": "O",
+   "title": "O22: three calls in the same parent turn form one estimated room",
+   "rows": [
+    "O22",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O22",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/A.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/B.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/C.md": {
+      "mtime": 220,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-A"
+     },
+     "writes": [
+      {
+       "path": "talk/A.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-B"
+     },
+     "writes": [
+      {
+       "path": "talk/B.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-C"
+     },
+     "writes": [
+      {
+       "path": "talk/C.md",
+       "ts": 220,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": null,
+    "rooms": {
+     "talk": {
+      "kind": "cells",
+      "sure": false,
+      "why": "launch",
+      "members": [
+       "A",
+       "B",
+       "C"
+      ]
+     }
+    },
+    "cells": {
+     "talk|-|A": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|-|B": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|-|C": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    }
+   },
+   "then": [],
+   "summary_in": "O22: three calls in the same parent turn form one estimated room",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C101",
+   "group": "O",
+   "title": "O22: different turns do not form a launch group",
+   "rows": [
+    "O22",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O22",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/A.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/B.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/C.md": {
+      "mtime": 220,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-0",
+      "call": "spawn-A"
+     },
+     "writes": [
+      {
+       "path": "talk/A.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-1",
+      "call": "spawn-B"
+     },
+     "writes": [
+      {
+       "path": "talk/B.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-2",
+      "call": "spawn-C"
+     },
+     "writes": [
+      {
+       "path": "talk/C.md",
+       "ts": 220,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O22: different turns do not form a launch group",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C102",
+   "group": "O",
+   "title": "O22: unknown turns do not form a launch group",
+   "rows": [
+    "O22",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O22",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/A.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/B.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/C.md": {
+      "mtime": 220,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/A.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/B.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/C.md",
+       "ts": 220,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O22: unknown turns do not form a launch group",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C103",
+   "group": "O",
+   "title": "O23: three session writers own two file rounds; several finals stay unconfirmed",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_a.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round2_a.md": {
+      "mtime": 300,
+      "size": 10
+     },
+     "talk/final_a.md": {
+      "mtime": 400,
+      "size": 10
+     },
+     "talk/round1_b.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/round2_b.md": {
+      "mtime": 310,
+      "size": 10
+     },
+     "talk/final_b.md": {
+      "mtime": 410,
+      "size": 10
+     },
+     "talk/round1_c.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "talk/round2_c.md": {
+      "mtime": 320,
+      "size": 10
+     },
+     "talk/final_c.md": {
+      "mtime": 420,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-A"
+     },
+     "writes": [
+      {
+       "path": "talk/round1_a.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_a.md",
+       "ts": 300,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/final_a.md",
+       "ts": 400,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-B"
+     },
+     "writes": [
+      {
+       "path": "talk/round1_b.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_b.md",
+       "ts": 310,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/final_b.md",
+       "ts": 410,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-C"
+     },
+     "writes": [
+      {
+       "path": "talk/round1_c.md",
+       "ts": 220,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_c.md",
+       "ts": 320,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/final_c.md",
+       "ts": 420,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|a": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round2|a": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round1|b": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round2|b": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round1|c": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round2|c": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "several"
+      ],
+      "candidates": [
+       "talk/final_c.md",
+       "talk/final_b.md",
+       "talk/final_a.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: three session writers own two file rounds; several finals stay unconfirmed",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C104",
+   "group": "O",
+   "title": "O23: one writer of two seats is not a file-round debate",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.md": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round1_y.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: one writer of two seats is not a file-round debate",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C105",
+   "group": "O",
+   "title": "O23: one unrelated r2_notes.md is not a file-round debate",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/r2_notes.md": {
+      "mtime": 200,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/r2_notes.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: one unrelated r2_notes.md is not a file-round debate",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C106",
+   "group": "O",
+   "title": "O23: files without this session writers are not a debate",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.md": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: files without this session writers are not a debate",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C107",
+   "group": "O",
+   "title": "O23: round folders retain their rules when file rounds are beside them",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk",
+     "talk/r1"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.md": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_y.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: round folders retain their rules when file rounds are beside them",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C108",
+   "group": "O",
+   "title": "O23: writes directly in tmp are too broad for a debate",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "tmp"
+    ],
+    "files": {
+     "tmp/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "tmp/round1_y.md": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-A"
+     },
+     "writes": [
+      {
+       "path": "tmp/round1_x.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-B"
+     },
+     "writes": [
+      {
+       "path": "tmp/round1_y.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: writes directly in tmp are too broad for a debate",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C109",
+   "group": "O",
+   "title": "O23: round names without seats do not qualify",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round2.md": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round2.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: round names without seats do not qualify",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C110",
+   "group": "O",
+   "title": "O23: a second failed write does not qualify",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.md": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_y.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": false,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: a second failed write does not qualify",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C111",
+   "group": "O",
+   "title": "O23: a second unknown write does not qualify",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.md": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_y.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": null,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: a second unknown write does not qualify",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C112",
+   "group": "O",
+   "title": "O23: W4 does not count as the second W1/W2 writer",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.md": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_y.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "planned",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: W4 does not count as the second W1/W2 writer",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C113",
+   "group": "O",
+   "title": "O23: two writers with only one seat name do not qualify",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round2_x.md": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round2_x.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [],
+    "current": null,
+    "rooms": {},
+    "cells": {},
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: two writers with only one seat name do not qualify",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C114",
+   "group": "O",
+   "title": "O23: case-insensitive prefixes and Unicode seats keep their structural names",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/ROUND01_검토.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/R2_y.MD": {
+      "mtime": 210,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/ROUND01_검토.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/R2_y.MD",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|ROUND01|검토": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|R2|y": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "tool",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: case-insensitive prefixes and Unicode seats keep their structural names",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C115",
+   "group": "O",
+   "title": "O23: one later document confirms a file-round final",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_a.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round2_a.md": {
+      "mtime": 300,
+      "size": 10
+     },
+     "talk/round1_b.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/round2_b.md": {
+      "mtime": 310,
+      "size": 10
+     },
+     "talk/round1_c.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "talk/round2_c.md": {
+      "mtime": 320,
+      "size": 10
+     },
+     "talk/decision.md": {
+      "mtime": 450,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/decision.md",
+      "ts": 450,
+      "kind": "replace",
+      "evidence": "tool",
+      "ok": true,
+      "call": null,
+      "run": 1,
+      "proof": "tool",
+      "span": null,
+      "out": null
+     }
+    ],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-A"
+     },
+     "writes": [
+      {
+       "path": "talk/round1_a.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_a.md",
+       "ts": 300,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-B"
+     },
+     "writes": [
+      {
+       "path": "talk/round1_b.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_b.md",
+       "ts": 310,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-C"
+     },
+     "writes": [
+      {
+       "path": "talk/round1_c.md",
+       "ts": 220,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_c.md",
+       "ts": 320,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|a": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round2|a": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round1|b": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round2|b": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round1|c": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round2|c": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "finals": {
+     "talk": {
+      "confirmed": true,
+      "path": "talk/decision.md",
+      "by": "orch",
+      "why": [],
+      "candidates": [
+       "talk/decision.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": true
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: one later document confirms a file-round final",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C116",
+   "group": "O",
+   "title": "O23: a later failed file-round attempt only withdraws the final",
+   "rows": [
+    "O23",
+    "J1",
+    "J2",
+    "J3",
+    "J6",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_a.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round2_a.md": {
+      "mtime": 300,
+      "size": 10
+     },
+     "talk/round1_b.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/round2_b.md": {
+      "mtime": 310,
+      "size": 10
+     },
+     "talk/round1_c.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "talk/round2_c.md": {
+      "mtime": 320,
+      "size": 10
+     },
+     "talk/decision.md": {
+      "mtime": 450,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/decision.md",
+      "ts": 450,
+      "kind": "replace",
+      "evidence": "tool",
+      "ok": true,
+      "call": null,
+      "run": 1,
+      "proof": "tool",
+      "span": null,
+      "out": null
+     }
+    ],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-A"
+     },
+     "writes": [
+      {
+       "path": "talk/round1_a.md",
+       "ts": 200,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_a.md",
+       "ts": 300,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round3_new.md",
+       "ts": 500,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": false,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-B"
+     },
+     "writes": [
+      {
+       "path": "talk/round1_b.md",
+       "ts": 210,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_b.md",
+       "ts": 310,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": {
+      "provider": "codex",
+      "tree": "S",
+      "node": "P",
+      "group": "P:turn-one",
+      "call": "spawn-C"
+     },
+     "writes": [
+      {
+       "path": "talk/round1_c.md",
+       "ts": 220,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_c.md",
+       "ts": 320,
+       "kind": "replace",
+       "evidence": "shell",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "exit",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|a": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round2|a": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round1|b": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round2|b": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round1|c": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     },
+     "talk|round2|c": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "shell",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "none"
+      ],
+      "candidates": [
+       "talk/decision.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "O23: a later failed file-round attempt only withdraws the final",
+   "summary_out": "Structure only; see expect."
   }
  ]
 }

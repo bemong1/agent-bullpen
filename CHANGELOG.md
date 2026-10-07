@@ -12,6 +12,7 @@ The debate table, the rooms and the end of a topic are no longer judged from the
 - **"Previous file"**: grey, opens, never a submission. It is a file nobody owns, or one its owner was asked to save again and has not.
 - **Agents with no cell are placed by an estimate**: launched together with a participant, the launch made the folder, or the guide was read. The page lists them as "Working · estimated (reason)" and the office seats them in that room; the rest of a launched-together group stand together in "Other work". An estimate decides nothing and is not counted as a member of the debate.
 - **"Probably written by X"** on a file nobody owns, saved while exactly one command of one agent ran. A marked guess.
+- **Codex spawns in the same parent turn are launched together.** File rounds (`round<N>_<seat>.md` / `r<N>_<seat>.md`) also form a debate when two seat names and two session agents’ confirmed tool/shell writes qualify them; round folders take precedence.
 - **Rooms**: a room tag (two or more agents with the same `BULLPEN_ROOM`) is sure; agents launched together that each wrote a `.md` of their own in a folder make an *estimated room*, which is marked, never the current debate and never closes.
 - **Optional tags** on the launch command itself (`BULLPEN_ROOM=<folder>`, `BULLPEN_SEAT=<name>` or `<rN/name>`): only what the command passes to the run counts, and a value merely inherited or dropped by a resume does not.
 - **The end of a topic is confirmed or "Closing not confirmed".** One `.md` written by a tool or shell command after the last report, with every cell in and nobody tied to the topic working. Anything else shows the reasons and the documents that could be it; a topic of a confirmed bundle final reads "Closed by the bundle's final". The final the brief table names is shown and decides nothing. "Final ready", a room's "Done" and the closing of an office room go by the judgment alone.
@@ -20,7 +21,7 @@ The debate table, the rooms and the end of a topic are no longer judged from the
 **What is lost (on purpose: a miss is better than a false seat or a false end)**
 
 - A seat before anything is written: only `-o`, `claude -p … >` and a seat tag make a cell wait for its file.
-- The role line of a brief: a row is named for its file. A review with no round folder is no debate: give it an `r1/` folder, or start two or more agents with `BULLPEN_ROOM`.
+- The role line of a brief: a row is named for its file. A review without qualifying rounds is no debate: give it an `r1/` folder, or start two or more agents with `BULLPEN_ROOM`.
 - The conclusion found by its words, so more "Closing not confirmed". A final in `final/` that the brief table names does not close a topic.
 - Python, `cp` and `mv` writes (a guess may say who wrote the file).
 

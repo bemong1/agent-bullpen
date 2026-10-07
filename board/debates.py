@@ -341,7 +341,12 @@ def _debate(s, root, unit_list, jd, cells_of, readers_of, statuses):
                 if c is not None:
                     path = c.path
                 else:                                        # nobody holds this seat in this round and the file is not there: the seat waits
-                    path = os.path.join(unit, dirs[0] if dirs else 'r%d' % rnd, p + '.md')
+                    if un and un.file_rounds:
+                        files = un.file_rounds.get(rnd) or []
+                        prefix = files[0].split('_', 1)[0] if files else 'round%d' % rnd
+                        path = os.path.join(unit, prefix + '_' + p + '.md')
+                    else:
+                        path = os.path.join(unit, dirs[0] if dirs else 'r%d' % rnd, p + '.md')
                 info = _info(s, cat, path)
                 agent_id = c.agent if c else None
                 if agent_id and agent_id not in row_agents:
