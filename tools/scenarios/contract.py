@@ -112,6 +112,7 @@ class Judge:
         self.topics = sorted(set(self.topics) | self.file_topics)
         self._seat = {}
         self.rooms, self.room_cells = self._rooms()
+        self.cell_aliases = {}
         self.cell_paths = self._cell_paths()
         self.cells = {}
         for key, p in sorted(self.cell_paths.items()):
@@ -201,11 +202,11 @@ class Judge:
         out = [(q['ts'], 'planned', q['run']) for q in a['planned'] if self.real(q['path']) == p]
         t = a['tag']
         if t and t['seat'] and self.valid_tag(t):
-            seat = t['seat'][:-3] if t['seat'].lower().endswith('.md') else t['seat']
+            seat = t['seat'] if t['seat'].lower().endswith('.md') else t['seat'] + '.md'
             if '/' in seat:
-                if self.real(t['room'] + '/' + seat + '.md') == p:
+                if self.real(t['room'] + '/' + seat) == p:
                     out.append((a['run_start'], 'tag', t['run']))
-            elif (t['room'] not in self.topics or (t['room'] in self.file_topics and ROUND_FILE_RE.fullmatch(seat + '.md'))) and self.real(t['room'] + '/' + seat + '.md') == p:
+            elif (t['room'] not in self.topics or (t['room'] in self.file_topics and ROUND_FILE_RE.fullmatch(seat))) and self.real(t['room'] + '/' + seat) == p:
                 out.append((a['run_start'], 'tag', t['run']))                 # a room's seat is its own file (J13)
         return sorted(out, key=lambda d: (d[0], d[1]))
 
@@ -239,7 +240,8 @@ class Judge:
             if w['agent'] != 'orch' and w['kind'] in AUTHORING:
                 first.setdefault(w['agent'], w)
         authors = sorted(first.values(), key=lambda w: (w['ts'], w['agent']))
-        diag, owner, held = [], None, False
+        aliases = self.cell_aliases.get(p, ())
+        diag, owner, held = ([('alias_collision', None)] if aliases else []), None, bool(aliases)
         if authors:
             y = authors[0]
             tied = [w['agent'] for w in authors[1:] if w['ts'] - y['ts'] <= self.TIE]
@@ -281,7 +283,7 @@ class Judge:
         """Whether `p` is a `.md` directly in a round folder of topic `u`, whether or not the round folder is on disk (J2: a confirmed write, a launch output or a SEAT makes the cell)."""
         if u in self.file_topics:
             return parent(p) == u and bool(ROUND_FILE_RE.fullmatch(name(p)))
-        return p.endswith('.md') and parent(parent(p)) == u and bool(ROUND_DIR_RE.fullmatch(name(parent(p))))
+        return p.lower().endswith('.md') and parent(parent(p)) == u and bool(ROUND_DIR_RE.fullmatch(name(parent(p))))
 
     def _cell_paths(self):
         """J2: the cells of the judgment: {(unit, rdir, stem): path}. A cell is a `.md` directly in a round folder (on disk, written by a confirmed event, or asked for by a launch
@@ -289,7 +291,7 @@ class Judge:
         out = {}
         for u in self.topics:
             rd = set(self.round_dirs_of[u])
-            ps = {p for p in self.files if parent(p) in rd and p.endswith('.md')}
+            ps = {p for p in self.files if parent(p) in rd and p.lower().endswith('.md')}
             if u in self.file_topics:
                 ps |= {p for p in self.files if self.in_round(p, u)}
             ps |= {w['path'] for w in self.conf if self.in_round(w['path'], u)}
@@ -300,17 +302,36 @@ class Judge:
                         ps.add(q)
                 t = a['tag']
                 if t and t['seat'] and ('/' in t['seat'] or u in self.file_topics) and t['room'] == u and self.valid_tag(t):
-                    q = u + '/' + (t['seat'][:-3] if t['seat'].lower().endswith('.md') else t['seat']) + '.md'
+                    q = u + '/' + (t['seat'] if t['seat'].lower().endswith('.md') else t['seat'] + '.md')
                     if self.in_round(q, u):
                         ps.add(q)
-            for p in ps:
+            groups = collections.defaultdict(list)
+            for p in sorted(ps):
                 if u in self.file_topics:
-                    out[(u, name(p).split('_', 1)[0], ROUND_FILE_RE.fullmatch(name(p)).group(2).lower())] = p
+                    m = ROUND_FILE_RE.fullmatch(name(p))
+                    groups[(int(m.group(1)), m.group(2).lower())].append(p)
                 else:
-                    out[(u, name(parent(p)), name(p)[:-3])] = p
+                    groups[(name(parent(p)), name(p)[:-3])].append(p)
+            self.cell_aliases.update({p: tuple(ps) for ps in groups.values() if len(ps) > 1 for p in ps})
+            for p in sorted(ps):
+                if u in self.file_topics:
+                    seat = ROUND_FILE_RE.fullmatch(name(p)).group(2).lower()
+                    identity = seat + '/' + name(p) if p in self.cell_aliases else seat
+                    out[(u, name(p).split('_', 1)[0], identity)] = p
+                else:
+                    seat = name(p)[:-3]
+                    identity = seat + '/' + name(p) if p in self.cell_aliases else seat
+                    out[(u, name(parent(p)), identity)] = p
         for f, files in self.room_cells.items():
-            for p in files:
-                out[(f, '-', name(p)[:-3])] = p
+            taken = collections.Counter(name(p)[:-3] for p in files)
+            seats = {p: name(p)[:-3] if taken[name(p)[:-3]] == 1 else p[len(f) + 1:-3] for p in files}
+            groups = collections.defaultdict(list)
+            for p in sorted(files):
+                groups[seats[p]].append(p)
+            self.cell_aliases.update({p: tuple(ps) for ps in groups.values() if len(ps) > 1 for p in ps})
+            for p in sorted(files):
+                identity = seats[p] + '/' + name(p) if p in self.cell_aliases else seats[p]
+                out[(f, '-', identity)] = p
         return out
 
     def unit_paths(self, u):
@@ -378,7 +399,7 @@ class Judge:
         """The files that agent `a` made in its own right (J14): confirmed authoring events on a `.md` that no guide name, no round folder and no other agent's own event is."""
         mine = {}
         for w in self.conf:
-            if w['agent'] == a['id'] and w['kind'] in AUTHORING and w['evidence'] in SHOWN and w['path'].endswith('.md') and name(w['path']) not in GUIDE_NAMES \
+            if w['agent'] == a['id'] and w['kind'] in AUTHORING and w['evidence'] in SHOWN and w['path'].lower().endswith('.md') and name(w['path']) not in GUIDE_NAMES \
                     and not ROUND_DIR_RE.fullmatch(name(parent(w['path']))):
                 mine.setdefault(w['path'], w)
         return [p for p in mine if not any(w['path'] == p and w['agent'] not in (a['id'], 'orch') for w in self.conf if w['kind'] in AUTHORING)]
@@ -401,7 +422,7 @@ class Judge:
             if len(ms) >= 2 and f not in self.topics and not self.unit_below(f):       # choice: a bundle's root is no room
                 files = {a['id']: next((p for p in self.own_files(a) if in_reach(p, f)), None) for a in ms}
                 seats = {a['id']: a['tag']['seat'] for a in ms if a['tag']['seat'] and '/' not in a['tag']['seat']}
-                paths = [p for p in files.values() if p] + [f + '/' + (s[:-3] if s.endswith('.md') else s) + '.md' for s in seats.values()]
+                paths = [p for p in files.values() if p] + [f + '/' + (s if s.lower().endswith('.md') else s + '.md') for s in seats.values()]
                 rooms[f] = dict(kind='cells' if paths else 'members', sure=True, why='tag', members=sorted(a['id'] for a in ms), files=sorted(set(paths)))
                 taken |= {a['id'] for a in ms}
         groups = collections.defaultdict(list)
@@ -425,9 +446,9 @@ class Judge:
                         rooms[f] = dict(kind='cells', sure=False, why='launch', members=sorted(first), files=sorted(first.values()))
                         taken |= set(first)
             rest = [a for a in ms if a['id'] not in taken]
-            if len(rest) >= 2 and not any(w['agent'] in {a['id'] for a in rest} and w['kind'] in AUTHORING and w['path'].endswith('.md') for w in self.conf):
+            if len(rest) >= 2 and not any(w['agent'] in {a['id'] for a in rest} and w['kind'] in AUTHORING and w['path'].lower().endswith('.md') for w in self.conf):
                 talk = any(t in {a['id'] for a in rest} and t != a['id'] for a in rest for t in a['sent_to'])
-                shared = set.intersection(*({self.real(r['path']) for r in a['reads'] if r['path'].endswith('.md')} for a in rest))
+                shared = set.intersection(*({self.real(r['path']) for r in a['reads'] if r['path'].lower().endswith('.md')} for a in rest))
                 folders = sorted({parent(p) for p in shared})
                 for f in folders:
                     if talk and not (self.is_common(f) or f in self.topics or self.is_round_dir(f) or self.unit_below(f) or f in rooms):
@@ -487,7 +508,7 @@ class Judge:
                 if any(r['path'] and self.real(r['path']) in [u + '/' + n for n in GUIDE_NAMES] + [root + '/' + n for n in GUIDE_NAMES] for r in a['reads']):
                     reasons[u].add('guide_read')
             for u in list(reasons):                                               # J11 invalid: it wrote a `.md` of the work elsewhere, so the weak reasons for this debate go
-                if any(w['agent'] == a['id'] and w['kind'] in AUTHORING and w['evidence'] in SHOWN and w['path'].endswith('.md') and not under(w['path'], u)
+                if any(w['agent'] == a['id'] and w['kind'] in AUTHORING and w['evidence'] in SHOWN and w['path'].lower().endswith('.md') and not under(w['path'], u)
                        and self.work_file(w['path']) for w in self.conf):
                     reasons[u].discard('launch_call')
                     reasons[u].discard('launch_peer')
@@ -638,7 +659,7 @@ class Judge:
                          and self.files[w['path']]['mtime'] >= la - self.SAME})
         rivals = sorted(set(rivals) | self.member_rivals(kind, scope, paths, proven, la))
         dirs = {d for u in topics for d in self.round_dirs_of[u]}
-        empty = any(not any(parent(p) == d and p.endswith('.md') for p in self.files) for d in dirs)
+        empty = any(not any(parent(p) == d and p.lower().endswith('.md') for p in self.files) for d in dirs)
         lost = any(x.get('lost') and x['lost'][1] >= lc - self.SAME for x in self.agents + [self.orch])
         held = any(self.seat_of(p)['diag'] for p in paths)                           # a cell nobody could be told to own (J3 hold, J7 contention) is not submitted
         hollow = any(p in self.files and self.files[p]['size'] <= 0 for p in paths)  # an empty cell file is not a submission
@@ -685,7 +706,7 @@ class Judge:
         """The candidate places K: the documents directly in the scope (a bundle's folder and its `final/`), no guide, no round instruction, no cell file, and (a room) no file of a member of its own."""
         parents = {scope, scope + '/final'} if kind == 'bundle' else {scope}
         mine = set() if members_too else self.room_mine(kind, scope)
-        return lambda p: parent(p) in parents and p.endswith('.md') and name(p) not in GUIDE_NAMES and not ROUND_DOC_RE.match(name(p)) and p not in paths and p not in mine
+        return lambda p: parent(p) in parents and p.lower().endswith('.md') and name(p) not in GUIDE_NAMES and not ROUND_DOC_RE.match(name(p)) and p not in paths and p not in mine
 
     def member_rivals(self, kind, scope, paths, proven, la):
         """O14a: a room member's own file is no candidate but may be the later word, so it competes when it was written (or tried: principle U) not before the final was written less SAME_TIME, or when
@@ -724,7 +745,11 @@ class Judge:
             if key[0] not in self.shown_topics() and key[0] not in self.rooms:
                 continue
             for code, who in self.seat_of(p)['diag']:
-                out.append({'code': code, 'agent': who, 'unit': key[0], 'detail': '%s/%s' % (self.rnum(p) if key[1] != '-' else '-', key[2])})
+                seat = ROUND_FILE_RE.fullmatch(name(p)).group(2).lower() if key[0] in self.file_topics else name(p)[:-3] if p in self.cell_aliases else key[2]
+                detail = ','.join(name(q) for q in self.cell_aliases[p]) if code == 'alias_collision' else '%s/%s' % (self.rnum(p) if key[1] != '-' else '-', seat)
+                row = {'code': code, 'agent': who, 'unit': key[0], 'detail': detail}
+                if row not in out:
+                    out.append(row)
         return out
 
     def alias_diags(self):

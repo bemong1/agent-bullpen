@@ -195,6 +195,21 @@ class ContractCases(unittest.TestCase):
     def test_the_constants_are_the_tables(self):
         self.assertEqual(contract.CONSTS, self.table['consts'])
 
+    def test_file_round_collision_truth_is_identical_across_hash_seeds(self):
+        script = 'import json, sys; from tools.scenarios.contract import truth; print(json.dumps(truth(json.load(sys.stdin)), sort_keys=True))'
+        for cid in ('C128', 'C129', 'C130', 'C135', 'C137'):
+            c = next(c for c in self.table['cases'] if c['id'] == cid)
+            results = []
+            for seed in ('0', '1', '2', '7', '42'):
+                with self.subTest(case=cid, seed=seed):
+                    env = dict(os.environ, PYTHONHASHSEED=seed, PYTHONDONTWRITEBYTECODE='1')
+                    proc = subprocess.run([sys.executable, '-c', script], input=json.dumps(c), text=True, capture_output=True, cwd=REPO, env=env, check=True)
+                    got = json.loads(proc.stdout)
+                    results.append(proc.stdout)
+                    self.assertEqual(contract.compare(got, c['expect']), [])
+            with self.subTest(case=cid):
+                self.assertEqual(len(set(results)), 1)
+
     def test_file_rounds_exclude_macos_scratch_roots_and_aliases(self):
         source = next(c for c in self.table['cases'] if c['id'] == 'C103')
         for folder, scratch, alias in (('private/tmp', None, None),
@@ -315,7 +330,7 @@ class ContractCases(unittest.TestCase):
     def test_the_table_has_unique_ids_and_only_the_keys_of_the_format(self):
         ids = [c['id'] for c in self.table['cases']]
         self.assertEqual(len(ids), len(set(ids)))
-        known = {'listed', 'hinted', 'current', 'cells', 'placed', 'rooms', 'finals', 'closable', 'diag'}
+        known = {'listed', 'hinted', 'current', 'cells', 'paths', 'placed', 'rooms', 'finals', 'closable', 'diag'}
         for c in self.table['cases']:
             self.assertLessEqual(set(c['expect']), known, c['id'])
             for t in c['then']:

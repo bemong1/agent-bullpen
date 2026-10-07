@@ -336,7 +336,7 @@ def _debate(s, root, unit_list, jd, cells_of, readers_of, statuses):
             row_agents = []
             for rnd in sorted(rounds, key=lambda x: (x is None, x or 0)):
                 dirs = (un.rounds.get(rnd) or []) if un else []
-                here = sorted(by_round.get((rnd, p), ()), key=lambda x: x.rdir)               # a round with two spellings of its folder has two: the cell somebody holds, else the first
+                here = sorted(by_round.get((rnd, p), ()), key=lambda x: (x.rdir, x.path))     # a round with two spellings of its folder has two: the cell somebody holds, else the first
                 c = next((x for x in here if x.owner or x.agent), here[0] if here else None)
                 if c is not None:
                     path = c.path
@@ -368,7 +368,7 @@ def _debate(s, root, unit_list, jd, cells_of, readers_of, statuses):
                 rows.append({'p': (a.name_tag or aid[:6]) if a else aid[:6], 'role': '', 'agents': [aid], 'cells': []})
         docs = []
         for f, _kind in cat.listdir(unit) or ():
-            if f.endswith('.md') and cat.stat(os.path.join(unit, f)) is not None and stat_plain(os.path.join(unit, f)):          # a document that cannot be opened is not listed
+            if f.lower().endswith('.md') and cat.stat(os.path.join(unit, f)) is not None and stat_plain(os.path.join(unit, f)):          # a document that cannot be opened is not listed
                 docs.append({'name': f, 'path': os.path.join(unit, f)})
         final = jd.finals.get(unit)
         table_final = os.path.join(root, row['final']) if row.get('final') else None

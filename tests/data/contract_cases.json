@@ -21536,6 +21536,2182 @@
    "then": [],
    "summary_in": "O23: authoring writes qualify lowercase seat keys while preserving filenames",
    "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C128",
+   "group": "O",
+   "title": "O23a: seat case collisions preserve all paths and hold the seat",
+   "rows": [
+    "O23",
+    "O23a",
+    "J2",
+    "J3",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_A.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_a.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/round1_b.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "talk/summary.md": {
+      "mtime": 300,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/summary.md",
+      "ts": 300,
+      "kind": "create",
+      "evidence": "tool",
+      "ok": true,
+      "call": null,
+      "run": 1,
+      "proof": "tool",
+      "span": null,
+      "out": null
+     }
+    ],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "running",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_A.md",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_a.md",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_b.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|a/round1_A.md": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "A"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|round1|a/round1_a.md": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "B"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|round1|b": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|round1|a/round1_A.md": "talk/round1_A.md",
+     "talk|round1|a/round1_a.md": "talk/round1_a.md",
+     "talk|round1|b": "talk/round1_b.md"
+    },
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "diag": [
+     {
+      "code": "alias_collision",
+      "agent": null,
+      "unit": "talk",
+      "detail": "round1_A.md,round1_a.md"
+     }
+    ],
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "open_cell",
+       "live_participant"
+      ],
+      "candidates": [
+       "talk/summary.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    }
+   },
+   "then": [],
+   "summary_in": "O23a: seat case collisions preserve all paths and hold the seat",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C129",
+   "group": "O",
+   "title": "O23a: extension case collisions preserve all paths and hold the seat",
+   "rows": [
+    "O23",
+    "O23a",
+    "J2",
+    "J3",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_a.MD": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_a.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/round1_b.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "talk/summary.md": {
+      "mtime": 300,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/summary.md",
+      "ts": 300,
+      "kind": "create",
+      "evidence": "tool",
+      "ok": true,
+      "call": null,
+      "run": 1,
+      "proof": "tool",
+      "span": null,
+      "out": null
+     }
+    ],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "running",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_a.MD",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_a.md",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_b.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|a/round1_a.MD": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "A"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|round1|a/round1_a.md": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "B"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|round1|b": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|round1|a/round1_a.MD": "talk/round1_a.MD",
+     "talk|round1|a/round1_a.md": "talk/round1_a.md",
+     "talk|round1|b": "talk/round1_b.md"
+    },
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "diag": [
+     {
+      "code": "alias_collision",
+      "agent": null,
+      "unit": "talk",
+      "detail": "round1_a.MD,round1_a.md"
+     }
+    ],
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "open_cell",
+       "live_participant"
+      ],
+      "candidates": [
+       "talk/summary.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    }
+   },
+   "then": [],
+   "summary_in": "O23a: extension case collisions preserve all paths and hold the seat",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C130",
+   "group": "O",
+   "title": "O23a: prefix aliases hold the seat after all writers finish",
+   "rows": [
+    "O23",
+    "O23a",
+    "J2",
+    "J3",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/r1_a.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_a.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/round1_b.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "talk/summary.md": {
+      "mtime": 300,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/summary.md",
+      "ts": 300,
+      "kind": "create",
+      "evidence": "tool",
+      "ok": true,
+      "call": null,
+      "run": 1,
+      "proof": "tool",
+      "span": null,
+      "out": null
+     }
+    ],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/r1_a.md",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_a.md",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_b.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|r1|a/r1_a.md": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "A"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|round1|a/round1_a.md": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "B"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|round1|b": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|r1|a/r1_a.md": "talk/r1_a.md",
+     "talk|round1|a/round1_a.md": "talk/round1_a.md",
+     "talk|round1|b": "talk/round1_b.md"
+    },
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "diag": [
+     {
+      "code": "alias_collision",
+      "agent": null,
+      "unit": "talk",
+      "detail": "r1_a.md,round1_a.md"
+     }
+    ],
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "open_cell"
+      ],
+      "candidates": [
+       "talk/summary.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    }
+   },
+   "then": [],
+   "summary_in": "O23a: prefix aliases hold the seat after all writers finish",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C131",
+   "group": "O",
+   "title": "O23: two confirmed finals uses the same Markdown extension rules",
+   "rows": [
+    "O23",
+    "O23a",
+    "J2",
+    "J3",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.MD": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/final_A.MD": {
+      "mtime": 300,
+      "size": 10
+     },
+     "talk/final_B.md": {
+      "mtime": 310,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/final_A.MD",
+       "ts": 300,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_y.MD",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/final_B.md",
+       "ts": 310,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|x": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     },
+     "talk|round1|y": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|round1|x": "talk/round1_x.md",
+     "talk|round1|y": "talk/round1_y.MD"
+    },
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": [],
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "several"
+      ],
+      "candidates": [
+       "talk/final_B.md",
+       "talk/final_A.MD"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    }
+   },
+   "then": [],
+   "summary_in": "O23: two confirmed finals uses the same Markdown extension rules",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C132",
+   "group": "O",
+   "title": "O23: absent failed uppercase final uses the same Markdown extension rules",
+   "rows": [
+    "O23",
+    "O23a",
+    "J2",
+    "J3",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.MD": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/final_B.md": {
+      "mtime": 310,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/final_A.MD",
+       "ts": 300,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": false,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_y.MD",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/final_B.md",
+       "ts": 310,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|x": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     },
+     "talk|round1|y": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|round1|x": "talk/round1_x.md",
+     "talk|round1|y": "talk/round1_y.MD"
+    },
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": [],
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "several"
+      ],
+      "candidates": [
+       "talk/final_B.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    }
+   },
+   "then": [],
+   "summary_in": "O23: absent failed uppercase final uses the same Markdown extension rules",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C133",
+   "group": "O",
+   "title": "O23: disk-only uppercase final uses the same Markdown extension rules",
+   "rows": [
+    "O23",
+    "O23a",
+    "J2",
+    "J3",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.MD": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/final_A.MD": {
+      "mtime": 300,
+      "size": 10
+     },
+     "talk/final_B.md": {
+      "mtime": 310,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_y.MD",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/final_B.md",
+       "ts": 310,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|x": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     },
+     "talk|round1|y": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|round1|x": "talk/round1_x.md",
+     "talk|round1|y": "talk/round1_y.MD"
+    },
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": [],
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "several"
+      ],
+      "candidates": [
+       "talk/final_B.md",
+       "talk/final_A.MD"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    }
+   },
+   "then": [],
+   "summary_in": "O23: disk-only uppercase final uses the same Markdown extension rules",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C134",
+   "group": "O",
+   "title": "O23: single uppercase final uses the same Markdown extension rules",
+   "rows": [
+    "O23",
+    "O23a",
+    "J2",
+    "J3",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.MD": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/final_A.MD": {
+      "mtime": 300,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/final_A.MD",
+       "ts": 300,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_y.MD",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|x": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     },
+     "talk|round1|y": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|round1|x": "talk/round1_x.md",
+     "talk|round1|y": "talk/round1_y.MD"
+    },
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": [],
+    "finals": {
+     "talk": {
+      "confirmed": true,
+      "path": "talk/final_A.MD",
+      "by": "A",
+      "why": [],
+      "candidates": [
+       "talk/final_A.MD"
+      ]
+     }
+    },
+    "closable": {
+     "talk": true
+    }
+   },
+   "then": [],
+   "summary_in": "O23: single uppercase final uses the same Markdown extension rules",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C135",
+   "group": "O",
+   "title": "Markdown extension collisions in round folders preserve all paths",
+   "rows": [
+    "O23",
+    "O23a",
+    "J2",
+    "J3",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk",
+     "talk/r1"
+    ],
+    "files": {
+     "talk/r1/A.MD": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/r1/A.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/r1/B.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "talk/summary.md": {
+      "mtime": 300,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/summary.md",
+      "ts": 300,
+      "kind": "create",
+      "evidence": "tool",
+      "ok": true,
+      "call": null,
+      "run": 1,
+      "proof": "tool",
+      "span": null,
+      "out": null
+     }
+    ],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/r1/A.MD",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/r1/A.md",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/r1/B.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|r1|A/A.MD": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "A"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|r1|A/A.md": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "B"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|r1|B": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|r1|A/A.MD": "talk/r1/A.MD",
+     "talk|r1|A/A.md": "talk/r1/A.md",
+     "talk|r1|B": "talk/r1/B.md"
+    },
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "diag": [
+     {
+      "code": "alias_collision",
+      "agent": null,
+      "unit": "talk",
+      "detail": "A.MD,A.md"
+     }
+    ],
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "open_cell"
+      ],
+      "candidates": [
+       "talk/summary.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    }
+   },
+   "then": [],
+   "summary_in": "Markdown extension collisions in round folders preserve all paths",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C136",
+   "group": "O",
+   "title": "O23: an uppercase tagged report keeps its literal path",
+   "rows": [
+    "O23",
+    "O23a",
+    "J2",
+    "J3",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "O23",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/round1_x.md": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/round1_y.MD": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/summary.md": {
+      "mtime": 300,
+      "size": 10
+     },
+     "talk/round2_x.MD": {
+      "mtime": 220,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/summary.md",
+      "ts": 300,
+      "kind": "create",
+      "evidence": "tool",
+      "ok": true,
+      "call": null,
+      "run": 1,
+      "proof": "tool",
+      "span": null,
+      "out": null
+     }
+    ],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_x.md",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      },
+      {
+       "path": "talk/round2_x.MD",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": {
+      "room": "talk",
+      "seat": "round2_x.MD",
+      "source": "command",
+      "run": 1
+     },
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/round1_y.MD",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {},
+    "cells": {
+     "talk|round1|x": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     },
+     "talk|round1|y": {
+      "owner": "B",
+      "agent": "B",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     },
+     "talk|round2|x": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|round1|x": "talk/round1_x.md",
+     "talk|round1|y": "talk/round1_y.MD",
+     "talk|round2|x": "talk/round2_x.MD"
+    },
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": [],
+    "finals": {
+     "talk": {
+      "confirmed": true,
+      "path": "talk/summary.md",
+      "by": "orch",
+      "why": [],
+      "candidates": [
+       "talk/summary.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": true
+    }
+   },
+   "then": [],
+   "summary_in": "O23: an uppercase tagged report keeps its literal path",
+   "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C137",
+   "group": "J",
+   "title": "Markdown extension collisions in a tagged room preserve all paths",
+   "rows": [
+    "J2",
+    "J3",
+    "J13",
+    "J14",
+    "J15"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "J14",
+   "disk": {
+    "dirs": [
+     "talk"
+    ],
+    "files": {
+     "talk/A.MD": {
+      "mtime": 200,
+      "size": 10
+     },
+     "talk/A.md": {
+      "mtime": 210,
+      "size": 10
+     },
+     "talk/B.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "talk/summary.md": {
+      "mtime": 300,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/summary.md",
+      "ts": 300,
+      "kind": "create",
+      "evidence": "tool",
+      "ok": true,
+      "call": null,
+      "run": 1,
+      "proof": "tool",
+      "span": null,
+      "out": null
+     }
+    ],
+    "windows": [],
+    "hints": {},
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/A.MD",
+       "ts": 200,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": {
+      "room": "talk",
+      "seat": null,
+      "source": "environ",
+      "run": 1
+     },
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/A.md",
+       "ts": 210,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": {
+      "room": "talk",
+      "seat": null,
+      "source": "environ",
+      "run": 1
+     },
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "codex",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100.0,
+     "first": 100.0,
+     "last": 300.0,
+     "run": 1,
+     "run_start": 100.0,
+     "launch": null,
+     "writes": [
+      {
+       "path": "talk/B.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": {
+      "room": "talk",
+      "seat": null,
+      "source": "environ",
+      "run": 1
+     },
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "talk"
+    ],
+    "current": "talk",
+    "rooms": {
+     "talk": {
+      "kind": "cells",
+      "sure": true,
+      "why": "tag",
+      "members": [
+       "A",
+       "B",
+       "C"
+      ]
+     }
+    },
+    "cells": {
+     "talk|-|A/A.MD": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "A"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|-|A/A.md": {
+      "owner": null,
+      "agent": null,
+      "editors": [
+       "B"
+      ],
+      "evidence": null,
+      "hint": null,
+      "previous": true,
+      "state": "previous"
+     },
+     "talk|-|B": {
+      "owner": "C",
+      "agent": "C",
+      "editors": [],
+      "evidence": "tool",
+      "hint": null,
+      "previous": false,
+      "state": "done"
+     }
+    },
+    "paths": {
+     "talk|-|A/A.MD": "talk/A.MD",
+     "talk|-|A/A.md": "talk/A.md",
+     "talk|-|B": "talk/B.md"
+    },
+    "placed": {
+     "A": null,
+     "B": null,
+     "C": null
+    },
+    "diag": [
+     {
+      "code": "alias_collision",
+      "agent": null,
+      "unit": "talk",
+      "detail": "A.MD,A.md"
+     }
+    ],
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "open_cell"
+      ],
+      "candidates": [
+       "talk/summary.md"
+      ]
+     }
+    },
+    "closable": {
+     "talk": false
+    }
+   },
+   "then": [],
+   "summary_in": "Markdown extension collisions in a tagged room preserve all paths",
+   "summary_out": "Structure only; see expect."
   }
  ]
 }

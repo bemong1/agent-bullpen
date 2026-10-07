@@ -860,7 +860,7 @@ def shell_reads(cmd, cwd, md_only=True):
     `cd` before moves the folder, a variable counts only when the command itself gives it one value); a word that cannot be told is left out. `cwd` is the folder the call ran in. With `md_only` (the
     default) a command that does not say `.md` is not read: the judgment looks at the reads of markdown files only (the guides of a folder, a document two agents read, the file a window read), and a read
     of any other file would only take a place of the kept ones (READS_KEEP) and the time of a first picture."""
-    if (md_only and '.md' not in cmd) or not READERS_RE.search(outside_heredocs(cmd)):
+    if (md_only and '.md' not in cmd.lower()) or not READERS_RE.search(outside_heredocs(cmd)):
         return []
     from . import link as L
     P = parse(cmd)
@@ -914,7 +914,7 @@ def shell_reads(cmd, cwd, md_only=True):
             found = {os.path.normpath(p) for p in paths if p}
             if len(found) == 1 and found <= {p for p in found if os.path.isabs(p)}:
                 path = next(iter(found))
-                if path not in out and not path.startswith('/dev/') and (path.endswith('.md') or not md_only):
+                if path not in out and not path.startswith('/dev/') and (path.lower().endswith('.md') or not md_only):
                     out.append(path)
     return out
 
@@ -1747,7 +1747,7 @@ class Agent:
                         if self.relay is not None:
                             self.relay.bash(d, ts, b)
                         if made is not None:                                  # (the markdown files the command writes, as the events say: it was read for them already)
-                            paths = [e.path for e in made if e.path.endswith('.md')]
+                            paths = [e.path for e in made if e.path.lower().endswith('.md')]
                         else:
                             paths = shell_writes(inp['command'], d.get('cwd') if isinstance(d.get('cwd'), str) and d.get('cwd') else self.cwd)
                         if paths:

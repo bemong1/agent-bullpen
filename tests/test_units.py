@@ -217,6 +217,102 @@ class FileRounds(Fixture):
         self.assertIn('open_cell', jd.finals[self.p('talk')].why)
 
 
+class FileRoundCollisions(Fixture):
+    def collision(self, names, running=True):
+        paths = [self.file('talk/' + name, mtime=200 + i * 10) for i, name in enumerate(names)]
+        final = self.file('talk/summary.md', mtime=300)
+        authors = [agent(aid, writes=[wr(path, 200 + i * 10)], status='running' if running and i == 0 else 'done')
+                   for i, (aid, path) in enumerate(zip('ABC', paths))]
+        return paths, authors, final
+
+    def test_case_and_extension_collisions_preserve_all_paths_and_hold_the_seat(self):
+        for names in (('round1_A.md', 'round1_a.md', 'round1_b.md'),
+                      ('round1_a.MD', 'round1_a.md', 'round1_b.md')):
+            with self.subTest(names=names):
+                paths, authors, final = self.collision(names)
+                jd = self.assign(*authors, orch=[wr(final, 300)])
+                by_path = {c.path: c for c in jd.cells.values()}
+                self.assertEqual(set(by_path), set(paths))
+                for path in paths[:2]:
+                    self.assertEqual((by_path[path].stem, by_path[path].owner, by_path[path].agent), ('a', None, None))
+                self.assertEqual(by_path[paths[2]].owner, 'C')
+                self.assertTrue(any(d['code'] in ('alias_collision', 'seat_tie_held') for d in jd.diag))
+                self.assertEqual(jd.finals[self.p('talk')].why, ['open_cell', 'live_participant'])
+                self.assertFalse(jd.closable[self.p('talk')])
+                self.assertEqual(jd.worked, {a: {self.p('talk')} for a in 'ABC'})
+            for path in paths:
+                os.unlink(path)
+
+    def test_prefix_aliases_hold_the_seat_after_every_author_finishes(self):
+        paths, authors, final = self.collision(('r1_a.md', 'round1_a.md', 'round1_b.md'), running=False)
+        jd = self.assign(*authors, orch=[wr(final, 300)])
+        self.assertEqual({c.path for c in jd.cells.values()}, set(paths))
+        self.assertTrue(all(c.owner is None for c in jd.cells.values() if c.stem == 'a'))
+        self.assertEqual(jd.finals[self.p('talk')].why, ['open_cell'])
+        self.assertFalse(jd.closable[self.p('talk')])
+
+    def test_colliding_reports_do_not_crash_the_debate_table(self):
+        paths, authors, final = self.collision(('round1_A.md', 'round1_a.md', 'round1_b.md'))
+        result = self.page(*authors, orch=[wr(final, 300)])
+        topic = result.debates[0]['topics'][0]
+        row = next(r for r in topic['rows'] if r['p'] == 'a')
+        self.assertIsNone(row['cells'][0]['owner'])
+        self.assertIsNone(row['cells'][0]['agent'])
+        self.assertTrue(set(paths) <= {d['path'] for d in topic['docs']})
+        self.assertEqual(topic['final']['why'], ['open_cell', 'live_participant'])
+
+    def test_uppercase_final_competes_with_lowercase_and_can_close_alone(self):
+        x = self.file('talk/round1_x.md', mtime=200)
+        y = self.file('talk/round1_y.MD', mtime=210)
+        upper = self.file('talk/final_A.MD', mtime=300)
+        lower = self.file('talk/final_B.md', mtime=310)
+        a, b = agent('A', writes=[wr(x, 200), wr(upper, 300)]), agent('B', writes=[wr(y, 210), wr(lower, 310)])
+        jd = self.assign(a, b)
+        self.assertEqual(jd.finals[self.p('talk')].why, ['several'])
+        self.assertEqual(set(jd.finals[self.p('talk')].candidates), {upper, lower})
+        os.unlink(lower)
+        jd = self.assign(a, agent('B', writes=[wr(y, 210)]))
+        self.assertEqual((jd.finals[self.p('talk')].confirmed, jd.finals[self.p('talk')].path), (True, upper))
+
+    def test_an_uppercase_failed_attempt_still_competes_when_the_file_is_absent(self):
+        x = self.file('talk/round1_x.md', mtime=200)
+        y = self.file('talk/round1_y.md', mtime=210)
+        lower = self.file('talk/final_B.md', mtime=310)
+        jd = self.assign(agent('A', writes=[wr(x, 200), wr(self.p('talk/final_A.MD'), 300, ok=False)]),
+                         agent('B', writes=[wr(y, 210), wr(lower, 310)]))
+        self.assertEqual(jd.finals[self.p('talk')].why, ['several'])
+
+    def test_extension_collisions_in_round_folders_preserve_both_reports(self):
+        paths = [self.file('talk/r1/' + name, mtime=200 + i * 10) for i, name in enumerate(('A.MD', 'A.md', 'B.md'))]
+        final = self.file('talk/summary.md', mtime=300)
+        jd = self.assign(*(agent(a, writes=[wr(p, 200 + i * 10)]) for i, (a, p) in enumerate(zip('ABC', paths))), orch=[wr(final, 300)])
+        self.assertEqual({c.path for c in jd.cells.values()}, set(paths))
+        self.assertTrue(all(c.owner is None for c in jd.cells.values() if c.stem == 'A'))
+        self.assertEqual(jd.finals[self.p('talk')].why, ['open_cell'])
+
+    def test_uppercase_tagged_report_uses_the_named_file(self):
+        from judge_support import tag
+        x = self.file('talk/round1_x.md', mtime=200)
+        y = self.file('talk/round1_y.md', mtime=210)
+        later = self.file('talk/round2_x.MD', mtime=220)
+        final = self.file('talk/summary.md', mtime=300)
+        a = agent('A', writes=[wr(x, 200), wr(later, 220)], tag=tag(self.p('talk'), 'round2_x.MD', run=1))
+        jd = self.assign(a, agent('B', writes=[wr(y, 210)]), orch=[wr(final, 300)])
+        self.assertEqual({c.path for c in jd.cells.values()}, {x, y, later})
+        self.assertEqual(jd.cells[(self.p('talk'), 'round2', 'x')].owner, 'A')
+        self.assertTrue(jd.finals[self.p('talk')].confirmed)
+
+    def test_extension_collisions_in_a_tagged_room_preserve_both_reports(self):
+        from judge_support import tag
+        paths = [self.file('talk/' + name, mtime=200 + i * 10) for i, name in enumerate(('A.MD', 'A.md', 'B.md'))]
+        final = self.file('talk/summary.md', mtime=300)
+        jd = self.assign(*(agent(a, writes=[wr(p, 200 + i * 10)], tag=tag(self.p('talk')))
+                           for i, (a, p) in enumerate(zip('ABC', paths))), orch=[wr(final, 300)])
+        self.assertEqual({c.path for c in jd.cells.values()}, set(paths))
+        self.assertTrue(all(c.owner is None for c in jd.cells.values() if c.stem == 'A'))
+        self.assertEqual(jd.finals[self.p('talk')].why, ['open_cell'])
+
+
 class ReadUnit(Tree):
     """A debate folder is read from the disk: it has an exact round folder. Its guide is the brief next to it; nothing in a text of it counts."""
 

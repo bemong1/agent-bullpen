@@ -170,6 +170,8 @@ class Shown:
             check('current', self.rel(jd.current), expect['current'])
         if 'cells' in expect:
             check('cells', self.cells(), expect['cells'])
+        if 'paths' in expect:
+            check('paths', {'%s|%s|%s' % (self.rel(u), rd, st): self.rel(c.path) for (u, rd, st), c in jd.cells.items()}, expect['paths'])
         if 'placed' in expect:
             check('placed', self.placed(), expect['placed'])
         if 'rooms' in expect:
@@ -240,8 +242,8 @@ class Shape(unittest.TestCase):
     def test_the_file_has_the_cases_of_the_contract(self):
         blob = load_cases()
         self.assertEqual(blob['version'], 4)
-        self.assertEqual(len(blob['cases']), 127)
-        self.assertEqual(len({c['id'] for c in blob['cases']}), 127)
+        self.assertEqual(len(blob['cases']), 137)
+        self.assertEqual(len({c['id'] for c in blob['cases']}), 137)
 
 
 if __name__ == '__main__':
