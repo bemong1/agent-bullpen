@@ -26,6 +26,10 @@ const KEY = /\[(?:common|status|kind|time|unit|board|office|demo|diag|page|cli|a
 let fails = 0;
 const check = (name, ok, detail) => { if (!ok) fails++; console.log((ok ? 'PASS ' : 'FAIL ') + name + (ok ? '' : '  ' + (typeof detail === 'string' ? detail : JSON.stringify(detail)))); };
 const shows = (html, text) => !!text && (html.includes(text) || html.includes(esc(text)));
+const noEventRequest = (urls, idx) => !urls.some(u => {
+  const url = new URL(u, 'http://x/');
+  return url.pathname === '/api/event' && url.searchParams.get('idx') === String(idx);
+});
 const clone = o => JSON.parse(JSON.stringify(o));
 
 class FDate extends Date { constructor(...a) { a.length ? super(...a) : super(FIXED); } static now() { return FIXED; } }
@@ -44,11 +48,11 @@ function makePage(opts = {}) {
       querySelector: () => null, getBoundingClientRect: () => ({ top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 }),
       addEventListener(t, f) { (this.listeners = this.listeners || {})[t] = (this.listeners[t] || []).concat(f); }, insertAdjacentHTML(p, h) { this.innerHTML += h; },
       appendChild() {}, append() {}, remove() {}, closest: () => null, isConnected: true, getContext: () => null };
-    for (const prop of ['innerHTML', 'textContent', 'title']) { let v = ''; Object.defineProperty(e, prop, { get() { return v; }, set(x) { v = x; record(sel, prop, x); }, enumerable: true }); }
+    for (const prop of ['innerHTML', 'textContent', 'title']) { let v = ''; Object.defineProperty(e, prop, { get() { return v; }, set(x) { v = x; record(sel, prop, x); }, enumerable: true, configurable: true }); }
     els.set(sel, e); return e;
   }
   const S0 = opts.state || STATE;
-  const P = { els, el, log, fetched: [], timers: [], agent: null, talk: opts.talk || TALK };
+  const P = { els, el, log, fetched: [], timers: [], listeners: {}, agent: null, talk: opts.talk || TALK };
   const route = u => {
     const url = new URL('http://x/' + u.replace(/^\//, '')), q = url.searchParams, p = url.pathname.replace(/^\//, '');
     if (p === 'api/state') return S0;
@@ -57,13 +61,15 @@ function makePage(opts = {}) {
     if (p === 'api/talk') return P.talk;
     if (p === 'api/timeline') return { since: +q.get('since'), lanes: [], orch: [] };
     if (p === 'api/plans') return PLANS;
+    if (p === 'api/file') return { short: 'focus.md', text: 'Synthetic file.', mtime: S0.now };
+    if (p === 'api/diag') return { items: [], n: 0, warn: 0 };
     if (p === 'api/agent') return q.get('id') === AGENT.id ? AGENT : { id: q.get('id'), orch_msgs: [], handbacks: [], texts: [], writes: [], reads: [], tool_counts: [], activity: [], spawn_ts: S0.now, spawn_prompt: '', link: null, partial: null };
     return {};
   };
   const ctx = { console, Date: FDate, Math, JSON, URL, URLSearchParams, Promise, Set, Map, Object, Array, String, Number, Infinity, isNaN, encodeURIComponent, decodeURIComponent, AbortController, Error,
     innerWidth: 1200, innerHeight: 900, scrollY: 0, scrollX: 0, location: { search: '?session=' + S0.session.id, hash: '', host: 'localhost:8790', href: 'http://x/' },
     localStorage: { _m: {}, getItem(k) { return this._m[k] ?? null; }, setItem(k, v) { this._m[k] = String(v); } },
-    document: { querySelector: s => el(s), getElementById: s => el('#' + s), querySelectorAll: () => [], addEventListener() {}, createElement: t => el('new:' + t + ':' + els.size), head: el('head'), body: el('body'), hidden: false,
+    document: { querySelector: s => el(s), getElementById: s => el('#' + s), querySelectorAll: () => [], addEventListener(t, f) { (P.listeners[t] ||= []).push(f); }, createElement: t => el('new:' + t + ':' + els.size), head: el('head'), body: el('body'), hidden: false,
       get title() { return this._title || ''; }, set title(x) { this._title = x; record('document', 'title', x); }, documentElement: el('html'), fonts: null },
     fetch: (u) => new Promise(resolve => {
       u = String(u); P.fetched.push(u);
@@ -145,8 +151,13 @@ async function run(lang) {
   check(L('a plain ciphertext-looking literal stays visible and escaped'), shows(encryptedFeed, literal.text) && shows(encryptedTalk, literal.text) && !encryptedFeed.includes('<tag>') && !encryptedTalk.includes('<tag>'));
   check(L('opening the whole conversation keeps encrypted explanations folded'), notes(P.run('atalkHtml(encryptedCases, { full: true })')) === 4);
   P.run('globalThis.encryptedButton = { dataset: { encryptedIdx: "902" } }; wireEncryptedNotes({ querySelectorAll: () => [encryptedButton] }, encryptedCases); globalThis.encryptedStopped = false; encryptedButton.onclick({ stopPropagation() { encryptedStopped = true; } })');
-  check(L('opening an encrypted report shows a message-body explanation without fetching ciphertext'), P.run('encryptedStopped') && shows(P.html('#mBody'), P.T('board.msg.encryptedDetail')) && !P.html('#mBody').includes(encrypted[0].text) && !P.fetched.some(u => u.includes('/api/event?idx=902')));
+  check(L('opening an encrypted report shows a message-body explanation without fetching ciphertext'), P.run('encryptedStopped') && shows(P.html('#mBody'), P.T('board.msg.encryptedDetail')) && !P.html('#mBody').includes(encrypted[0].text) && noEventRequest(P.fetched, 902));
+  const controlStart = P.fetched.length;
+  await P.run('api("/api/event?idx=902")');
+  check(L('the same request guard rejects a real relative URL with its session parameter'), !noEventRequest(P.fetched.slice(controlStart), 902) && P.fetched.slice(controlStart).some(u => u.startsWith('api/event?idx=902&session=')), P.fetched.slice(controlStart));
+  check(L('the request guard also handles leading slashes and ignores other paths or indices'), !noEventRequest(['/api/event?session=synthetic&idx=902'], 902) && noEventRequest(['api/event?idx=9020', 'api/file?idx=902'], 902));
   P.run('closeModal(); S.feed = savedEncryptedFeed; ui.atalk = savedEncryptedTalk; renderFeed(); renderAtalk({ force: true })');
+  await require('./modal_focus_checks')(P, fs.readFileSync(path.join(dir, 'index.html'), 'utf8'), (name, ok, detail) => check(L(name), ok, detail));
 
   // ---------- the drawer of the `codex exec` run ----------
   await P.run(`openDrawer(${JSON.stringify(exec.id)})`);

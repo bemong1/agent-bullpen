@@ -18,7 +18,7 @@ const ui = {
   // Drawer, feed and agent list
   drawer: null, dTab: 'overview', openEvents: new Set(), oldOpen: false, unlinkedOpen: false, tlAll: false, tlSig: '', tlPicked: '', tlToShown: '',
   // Open modal: 'file' (document) | 'talk' (conversation: one message opened by its event number, or the whole conversation) | 'diag' (the diagnostics list) | null
-  modalKind: null,
+  modalKind: null, modalReturn: [],
   // User ↔ orchestrator conversation
   talk: [], talkMore: false, talkSig: '', talkLoaded: false, talkStick: true,
   // Agent talk (orchestrator ↔ agent, agent ↔ agent): atalkHtml = the list HTML as last drawn, atalkLast = the last visible event number, atalkErr = loading failed
@@ -147,7 +147,7 @@ function wireEncryptedNotes(root, items) {
   root.querySelectorAll('.encrypted-note').forEach(b => b.onclick = ev => {
     ev.stopPropagation();
     const e = items.find(x => x.idx === +b.dataset.encryptedIdx);
-    if (e) openEventModal(e, evTitle(e) || kindLabel(e.kind));
+    if (e) openEventModal(e, evTitle(e) || kindLabel(e.kind), b);
   });
 }
 const nameIds = s => String(s || '').replace(/\ba[0-9a-f]{16}\b/g, id => S && S.names[id] ? S.names[id] : id);
@@ -297,7 +297,7 @@ function renderTop() {
     (cnt.failed ? `<span class="chip" style="color:var(--red)"><span class="dot failed"></span>${t('board.top.failed')} <b>${cnt.failed}</b></span>` : '') +
     diagChipHtml();
   const chip = $('#alertChip'); if (chip) chip.onclick = () => { ui.alertsOpen = !ui.alertsOpen; renderAlerts(); };
-  const dchip = $('#diagChip'); if (dchip) dchip.onclick = openDiag;
+  const dchip = $('#diagChip'); if (dchip) dchip.onclick = () => openDiag(dchip);
   if (!sel.dataset.filled) fillSessions();
 }
 // Session selector: one representative session per project (working folder). The project's other sessions are in the menu of the orchestrator card.
@@ -469,13 +469,13 @@ function renderDebates() {
     (d.sure === false ? `<span class="guess" title="${esc(t('board.room.est.title.launch'))}">${t('board.room.est')}</span>` : '') +
     (d.finals.length ? d.finals.map(f => `<span class="chip fchip" data-path="${esc(f.path)}">${t('board.debate.final', { name: esc(f.name), lines: `<span class="faint">${t('unit.line', { count: f.lines })}</span>` })}</span>`).join('') : '') +
     (d.final && (finalOk(d.final) || (d.final.why || []).length && !d.final.why.includes('no_report')) ? `<span class="bundle-final">${t('board.debate.bundleFinal')} ${finalHtml(d.final)}</span>` : '');
-  $('#debateMeta').querySelectorAll('[data-path]').forEach(e => e.onclick = () => openFile(e.dataset.path));
+  $('#debateMeta').querySelectorAll('[data-path]').forEach(e => e.onclick = () => openFile(e.dataset.path, e));
   const rootPlaced = placedHtml(withoutWriters(d.placed, d, null));          // the agents thought to work in the bundle as a whole (no one topic): one line above its topics
   $('#topics').innerHTML = (rootPlaced ? `<div class="card topic root-placed">${rootPlaced}</div>` : '') + d.topics.map(tp => renderTopic(tp, d)).join('') + renderOther(d);
   bindTopics();
 }
 function bindTopics() {
-  $('#topics').querySelectorAll('[data-path]').forEach(e => e.onclick = ev => { ev.stopPropagation(); openFile(e.dataset.path); });
+  $('#topics').querySelectorAll('[data-path]').forEach(e => e.onclick = ev => { ev.stopPropagation(); openFile(e.dataset.path, e); });
   $('#topics').querySelectorAll('[data-agent]').forEach(e => e.onclick = ev => { ev.stopPropagation(); openDrawer(e.dataset.agent); });
 }
 // The agents of this debate that hold no cell but are thought to work in it (the lines under its topics and above them: `placed`), by id
@@ -1057,17 +1057,37 @@ function renderDrawer() {
   } else {
     body.innerHTML = [...D.texts].reverse().map(x => `<div class="box"><h4>${hm(x.ts)}</h4><div class="md">${md(x.text)}</div></div>`).join('') || `<div class="empty">${t('board.drawer.none')}</div>`;
   }
-  body.querySelectorAll('[data-path]').forEach(e => e.onclick = () => openFile(e.dataset.path));
+  body.querySelectorAll('[data-path]').forEach(e => e.onclick = () => openFile(e.dataset.path, e));
   body.scrollTop = keep;
 }
 
-// ---------- document view ----------
-async function openFile(path) {
+// ---------- shared modal and document view ----------
+const modalVisible = el => el && el.isConnected !== false && !el.disabled && !el.hidden && !el.closest?.('[hidden], [inert]') && (!el.getClientRects || el.getClientRects().length > 0);
+function modalReturnTargets(opener) {
+  const idx = opener?.dataset?.encryptedIdx;
+  if ($('#modalDialog').contains?.(opener)) {
+    // Opening one message replaces the whole-conversation body. Return to its
+    // equivalent button in the list, or the button that opened that conversation.
+    return /^\d+$/.test(idx) ? [() => $(`#atalkList [data-encrypted-idx="${idx}"]`), ...ui.modalReturn] : ui.modalReturn;
+  }
+  const area = opener?.closest?.('#feedItems, #atalkList, #talkList');
+  const eventIdx = idx || opener?.closest?.('[data-idx]')?.dataset.idx;
+  const same = area && /^\d+$/.test(eventIdx) ? `#${area.id} [${idx ? 'data-encrypted-idx' : 'data-idx'}="${eventIdx}"]` : null;
+  const fallback = { feedItems: '#feedFilter .on', atalkList: '#atalkBig', talkList: '#talkBig' }[area?.id];
+  return [() => opener, () => same && $(same), () => opener?.id && document.getElementById(opener.id), () => fallback && $(fallback), () => $('#sessionSel')];
+}
+function beginModal(kind, title, sub, html, opener = document.activeElement) {
   const g = nextGen('modal');
-  ui.modalKind = 'file';
+  ui.modalReturn = modalReturnTargets(opener);
+  ui.modalKind = kind;
   $('#modalBg').classList.add('open');
-  $('#mTitle').textContent = path.split('/').slice(-3).join('/');
-  $('#mSub').textContent = t('common.loading'); $('#mBody').innerHTML = '';
+  $('#mTitle').textContent = title; $('#mSub').textContent = sub; $('#mBody').innerHTML = html;
+  $('#mBody').scrollTop = 0;
+  $('#mClose').focus?.();
+  return g;
+}
+async function openFile(path, opener = document.activeElement) {
+  const g = beginModal('file', path.split('/').slice(-3).join('/'), t('common.loading'), '', opener);
   try {
     const f = await api('/api/file?path=' + encodeURIComponent(path));
     if (!isLatest('modal', g)) return;   // Meanwhile something else was opened, or this was closed
@@ -1076,10 +1096,32 @@ async function openFile(path) {
     $('#mBody').scrollTop = 0;
   } catch (e) { if (isLatest('modal', g)) $('#mSub').textContent = t('board.file.error', { message: e.message }); }
 }
-function closeModal() { nextGen('modal'); ui.modalKind = null; $('#modalBg').classList.remove('open'); }
+function closeModal() {
+  const wasOpen = $('#modalBg').classList.contains('open'), targets = ui.modalReturn;
+  nextGen('modal'); ui.modalKind = null; ui.modalReturn = []; $('#modalBg').classList.remove('open');
+  if (wasOpen) for (const get of targets) {
+    const el = get();
+    if (!modalVisible(el)) continue;
+    if (el.tabIndex < 0) el.setAttribute?.('tabindex', '-1');  // Clickable message/file rows can also be return targets.
+    el.focus?.();
+    if (document.activeElement === el) break;
+  }
+}
 $('#mClose').onclick = closeModal;
 $('#modalBg').onclick = e => { if (e.target.id === 'modalBg') closeModal(); };
-document.addEventListener('keydown', e => { if (e.key === 'Escape') { if ($('#modalBg').classList.contains('open')) closeModal(); else closeDrawer(); } });
+document.addEventListener('keydown', e => {
+  const open = $('#modalBg').classList.contains('open');
+  if (e.key === 'Escape') {
+    if (open) { e.preventDefault?.(); closeModal(); } else closeDrawer();
+  } else if (e.key === 'Tab' && open) {
+    const dialog = $('#modalDialog');
+    const items = [...dialog.querySelectorAll('a[href], button, input, select, textarea, [tabindex]')].filter(el => el.tabIndex >= 0 && modalVisible(el));
+    const first = items[0] || dialog, last = items[items.length - 1] || dialog;
+    if (!items.includes(document.activeElement) || document.activeElement === (e.shiftKey ? first : last)) {
+      e.preventDefault?.(); (e.shiftKey ? last : first).focus?.();
+    }
+  }
+});
 $('#themeBtn').onclick = () => {
   const cur = document.documentElement.dataset.theme || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
   document.documentElement.dataset.theme = cur === 'light' ? 'dark' : 'light'; store.set('theme', document.documentElement.dataset.theme);
@@ -1142,7 +1184,7 @@ function talkHtml(items, o) {
   return html || `<div class="empty">${t('board.talk.empty')}</div>`;
 }
 function wireTalk(root) {
-  root.querySelectorAll('.msg').forEach(m => m.onclick = () => openTalkMsg(+m.dataset.idx));
+  root.querySelectorAll('.msg').forEach(m => m.onclick = () => openTalkMsg(+m.dataset.idx, m));
   const old = root.querySelector('[data-old]'); if (old) old.onclick = () => loadTalk(true);
 }
 function renderTalk(opt = {}) {
@@ -1165,28 +1207,24 @@ function renderTalkTime() {
 }
 $('#talkNew').onclick = () => { ui.talkStick = true; talkToBottom(); $('#talkNew').hidden = true; };
 watchFollow($('#talkList'), $('#talkNew'), v => { ui.talkStick = v; });
-function showModal(title, sub, html) {         // For the conversation modal only (one message opened by event number, or the whole conversation)
-  nextGen('modal');
-  ui.modalKind = 'talk';
-  $('#modalBg').classList.add('open');
-  $('#mTitle').textContent = title; $('#mSub').textContent = sub; $('#mBody').innerHTML = html;
-  $('#mBody').scrollTop = 0;
+function showModal(title, sub, html, opener = document.activeElement) {         // One message or the whole conversation; the document and diagnosis views share the same focus lifecycle.
+  return beginModal('talk', title, sub, html, opener);
 }
-async function openEventModal(e, title) {       // The full text of one event in the modal (shared by the two conversation cards)
+async function openEventModal(e, title, opener = document.activeElement) {       // The full text of one event in the modal (shared by the two conversation cards)
   let text = evText(e);
-  showModal(title, I18N.date(e.ts, 'dateTime'), md(text));
+  showModal(title, I18N.date(e.ts, 'dateTime'), md(text), opener);
   const g = gens.modal;                             // The number showModal raised: if another modal opens or this one closes meanwhile, the response is dropped
   if (!Array.isArray(e.questions) && !e.text_i18n && (e.full_len || 0) > text.length) {            // A cut-off text is fetched in full and drawn again (a question comes as structure, never cut)
     try { text = (await api('/api/event?idx=' + e.idx)).text; if (isLatest('modal', g)) $('#mBody').innerHTML = md(text); } catch {}
   }
 }
-async function openTalkMsg(idx) {
+async function openTalkMsg(idx, opener = document.activeElement) {
   const e = ui.talk.find(x => x.idx === idx);
   if (!e) return;
-  return openEventModal(e, `${talkWho(e)} · ${talkKind(e)}`);
+  return openEventModal(e, `${talkWho(e)} · ${talkKind(e)}`, opener);
 }
 $('#talkBig').onclick = () => {
-  showModal(t('board.talk.bigTitle'), `${t('board.msg.loaded', { count: ui.talk.length })}${ui.talkMore ? ' · ' + t('board.msg.moreHint', { label: t('board.msg.older') }) : ''} · ${t('board.msg.clickHint')}`, '<div class="talk">' + talkHtml(ui.talk, { full: true }) + '</div>');
+  showModal(t('board.talk.bigTitle'), `${t('board.msg.loaded', { count: ui.talk.length })}${ui.talkMore ? ' · ' + t('board.msg.moreHint', { label: t('board.msg.older') }) : ''} · ${t('board.msg.clickHint')}`, '<div class="talk">' + talkHtml(ui.talk, { full: true }) + '</div>', $('#talkBig'));
   wireTalk($('#mBody'));
   $('#mBody').scrollTop = $('#mBody').scrollHeight;
 };
@@ -1257,7 +1295,7 @@ function atalkHtml(items, o) {
 // Office highlight: hovering a conversation item highlights its sender and receiver (not during a demo)
 const atalkHl = ids => { if (GAME && !GAME.demoOn) GAME.highlight(ids); };
 function wireAtalk(root) {
-  root.querySelectorAll('.msg').forEach(m => m.onclick = () => openAtalkMsg(+m.dataset.idx));
+  root.querySelectorAll('.msg').forEach(m => m.onclick = () => openAtalkMsg(+m.dataset.idx, m));
   wireEncryptedNotes(root, ui.atalk);
   root.querySelectorAll('[data-agent]').forEach(b => b.onclick = ev => { ev.stopPropagation(); if (ui.modalKind) closeModal(); openDrawer(b.dataset.agent); });
   const old = root.querySelector('[data-old]'); if (old) old.onclick = () => loadAtalk(true);
@@ -1286,15 +1324,15 @@ $('#atalkNew').onclick = () => { ui.atalkStick = true; pinBottom($('#atalkList')
 watchFollow($('#atalkList'), $('#atalkNew'), v => { ui.atalkStick = v; });
 $('#atalkList').addEventListener('mouseover', ev => { const m = ev.target.closest && ev.target.closest('[data-hl]'); atalkHl(m ? m.dataset.hl.split(',') : null); });
 $('#atalkList').addEventListener('mouseleave', () => atalkHl(null));
-function openAtalkMsg(idx) {
+function openAtalkMsg(idx, opener = document.activeElement) {
   let e = ui.atalk.find(x => x.idx === idx);
   if (!e || e.kind === 'xread') return;
   if (!e.text && e.kind === 'spawn') e = Object.assign({}, e, { text: evTitle(e) || '' });     // An assignment without a body (its instructions could not be read) shows at least its description
   const [from, to] = atalkEnds(e);
-  return openEventModal(e, `${atalkName(from)} → ${atalkName(to)} · ${atalkKind(e.kind)}`);
+  return openEventModal(e, `${atalkName(from)} → ${atalkName(to)} · ${atalkKind(e.kind)}`, opener);
 }
 $('#atalkBig').onclick = () => {
-  showModal(t('board.atalk.bigTitle'), `${t('board.msg.loaded', { count: ui.atalk.length })}${ui.atalkFilter === 'all' ? '' : ' · ' + t('board.atalk.only', { name: t('board.atalk.tab.' + ui.atalkFilter) })}${ui.atalkMore ? ' · ' + t('board.msg.moreHint', { label: t('board.msg.older') }) : ''} · ${t('board.msg.clickHint')}`, '<div class="talk atalk">' + atalkHtml(atalkShown(), { full: true }) + '</div>');
+  showModal(t('board.atalk.bigTitle'), `${t('board.msg.loaded', { count: ui.atalk.length })}${ui.atalkFilter === 'all' ? '' : ' · ' + t('board.atalk.only', { name: t('board.atalk.tab.' + ui.atalkFilter) })}${ui.atalkMore ? ' · ' + t('board.msg.moreHint', { label: t('board.msg.older') }) : ''} · ${t('board.msg.clickHint')}`, '<div class="talk atalk">' + atalkHtml(atalkShown(), { full: true }) + '</div>', $('#atalkBig'));
   wireAtalk($('#mBody'));
   $('#mBody').scrollTop = $('#mBody').scrollHeight;
 };
@@ -1346,11 +1384,8 @@ const diagSubject = x => x.agent ? `<span class="who-b agent" data-agent="${esc(
   : x.unit ? `<span class="mono">${esc(x.unit)}</span>` : x.scope === 'orch' ? `<span class="who-b orch">${t('common.orchestrator')}</span>` : `<span class="faint">${t('board.diag.subject.session')}</span>`;
 // The small values the server attached (counts, flags): kept for the tooltip of a row, not worded
 const diagParams = p => Object.entries(p || {}).filter(([, v]) => v !== null && v !== '' && !(Array.isArray(v) && !v.length)).map(([k, v]) => k + ' ' + (Array.isArray(v) ? v.join(',') : v)).join(' · ');
-async function openDiag() {
-  const g = nextGen('modal');
-  ui.modalKind = 'diag';
-  $('#modalBg').classList.add('open');
-  $('#mTitle').textContent = t('board.diag.title'); $('#mSub').textContent = t('common.loading'); $('#mBody').innerHTML = '';
+async function openDiag(opener = document.activeElement) {
+  const g = beginModal('diag', t('board.diag.title'), t('common.loading'), '', opener);
   try {
     const D = await api('/api/diag'), items = D.items || [];
     if (!isLatest('modal', g)) return;   // Meanwhile something else was opened, or this was closed
