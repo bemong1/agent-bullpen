@@ -32,7 +32,7 @@ def _num(x):
     return x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
 
 
-_PRIVATE = ('_facts', '_fork', '_nline', '_off', '_head', '_anchor', '_kdrift', '_turn_text')       # what the scan keeps in an entry for itself: never in a snapshot (the facts are read by `cmds` and `collab`)
+_PRIVATE = ('_facts', '_fork', '_nline', '_off', '_head', '_anchor', '_kdrift', '_turn_text', '_pending', '_readable')       # what the scan keeps in an entry for itself: never in a snapshot (the facts are read by `cmds` and `collab`)
 
 
 def _snapshot(e):
@@ -82,6 +82,7 @@ class CodexIndex:
                 changed = True
             for p in [p for p in self._bad if p not in seen]:
                 del self._bad[p]
+            changed |= self._resolve_subs()
             if changed:
                 self._keep_budget()
                 self.version += 1
@@ -105,11 +106,15 @@ class CodexIndex:
         try:
             st = os.stat(p)
         except OSError:
+            e = self.files.get(p)
+            if e and e['_readable']:
+                e['_readable'] = False
+                return True
             return False
         if not stat.S_ISREG(st.st_mode) or self._bad.get(p) == (st.st_size, st.st_mtime):
             return False
         e = self.files.get(p)
-        if e and e['size'] == st.st_size and e['mtime'] == st.st_mtime:
+        if e and e['_readable'] and e['size'] == st.st_size and e['mtime'] == st.st_mtime:
             return False
         had = e is not None
         if had and (st.st_size < e['size'] or not self._same_file(e)):
@@ -126,9 +131,45 @@ class CodexIndex:
             self._bad.pop(p, None)
         try:
             self._scan(e, st)
+            e['_readable'] = True
         except (OSError, ValueError) as ex:
+            e['_readable'] = False
             print('codex index', os.path.basename(p), type(ex).__name__, flush=True)
         return True
+
+    def _resolve_subs(self):
+        """A v2 child without a history boundary stays hidden until its parent pairs its started item with an explicit fork_turns: none spawn call.
+        Parents may be found after children; repeat for nested children. A parent that went away or was rewritten withdraws its proof too."""
+        changed = False
+        for _ in range(CX_DEPTH_MAX + 1):
+            moved = False
+            for e in list(self.files.values()):
+                if not e['_pending']:
+                    continue
+                parent = self.by_id.get(e['parent'])
+                facts = parent.get('_facts') if parent and parent['_readable'] else None
+                none = bool(facts and any(c['kind'] == 'started' and c['agent_thread_id'] == e['id'] and c.get('fork_none') for c in facts.collab))
+                if (e['kind'] == 'sub') == none:
+                    continue
+                new = self._new(e['path'], no_copy=none)
+                if new is None:
+                    self._forget(e)
+                    moved = True
+                    continue
+                try:
+                    self._scan(new, os.stat(new['path']))
+                    new['_readable'] = True
+                except (OSError, ValueError):
+                    if none:
+                        continue                             # no readable child: no facts from it are published
+                self._forget(e)
+                new['gen'] = self._gen[new['id']] = self._gen.get(new['id'], 0) + 1
+                self.files[new['path']] = self.by_id[new['id']] = new
+                moved = True
+            changed |= moved
+            if not moved:
+                break
+        return changed
 
     def _same_file(self, e):
         """False when the file is not the one that was read: its first line is another, or the last bytes that were read are not where they were. A file that only grew is the same."""
@@ -153,7 +194,7 @@ class CodexIndex:
         for k in [k for k in self._texts if k[0] == e['id']]:
             self._texts_size -= nbytes(self._texts.pop(k))
 
-    def _new(self, p):
+    def _new(self, p, no_copy=False):
         """The entry of a rollout from its first line, or None when that line is not a session_meta-like object (valid JSON of another shape is no rollout either)."""
         try:
             with open(p, 'rb') as f:
@@ -169,7 +210,8 @@ class CodexIndex:
             return None
         cwd, origin = m.get('cwd'), m.get('originator')
         stamp = m.get('timestamp') or d.get('timestamp')
-        k = classify(m)
+        k = classify(m, no_copy=no_copy)
+        pending = 'subagent_history_start_ordinal' not in m and classify(m, no_copy=True)['kind'] == 'sub'
         origin_exec = CX_ORIGIN.get(origin if isinstance(origin, str) else None, 'tui') == 'exec'
         return {'path': p, 'id': tid, 'size': 0, 'mtime': 0, 'pos': len(line),
                 'origin': CX_ORIGIN.get(origin if isinstance(origin, str) else None, 'tui'),
@@ -188,7 +230,8 @@ class CodexIndex:
                 '_off': 0,                         # where the line being read starts in the file
                 '_head': (len(line), zlib.crc32(line)),   # the first line as it was, and the last bytes read (set by the scan): to tell a file written over from one that grew
                 '_anchor': None,
-                '_kdrift': k['drift']}             # `drift` of the kind alone (drift also rises when a record of a kind we read cannot be read)
+                '_kdrift': k['drift'],             # `drift` of the kind alone (drift also rises when a record of a kind we read cannot be read)
+                '_pending': pending, '_readable': False}
 
     def _scan(self, e, st):
         if st.st_size >= CX_BIG:            # the beginning is not read
@@ -304,6 +347,10 @@ class CodexIndex:
             self._message(e, raw, ts)
         elif typ == b'response_item' and facts and pt in (b'custom_tool_call', b'custom_tool_call_output', b'function_call', b'function_call_output'):
             facts.note_call(pt, raw, ts or e['last_ts'])
+            if pt == b'function_call' and small and b'"spawn_agent"' in raw[:1024]:
+                p = json.loads(raw).get('payload')
+                if isinstance(p, dict):
+                    facts.note_spawn(p)
 
     @staticmethod
     def _copied(e, raw):

@@ -63,12 +63,13 @@ def _int(x):
 
 
 # ---------- the kind of a thread (its first line) ----------
-def classify(m):
+def classify(m, no_copy=False):
     """The kind of a thread from the payload of its first line (a dict).
     root      a thread somebody started: `source` is a plain string (or missing) and there is no parent
-    sub       a native sub-agent: source.subagent.thread_spawn, whose parent_thread_id is the top-level parent_thread_id; the line where the parent's copied history ends is known
+    sub       a native sub-agent: source.subagent.thread_spawn, whose parent_thread_id is the top-level parent_thread_id; the copied history ends at a known line, or the parent proved none was copied
     guardian  an approval review: source.subagent.other == "guardian" or thread_source == "guardian_review"
     internal  any other dict `source`, a parent where none is expected, parents that disagree, a sub-agent whose history end is unknown: hidden like a guardian, and `drift` says the shape is unknown
+    `no_copy` is the index's proof from the parent's matching spawn_agent call, never a guess from this meta.
     Returns {kind, parent, agent_path, nick, depth, prefix_ord, drift}. depth is 0 for a root, and a child is at least 1."""
     src, top = m.get('source'), m.get('parent_thread_id')
     parent = top if isinstance(top, str) and top else None
@@ -76,10 +77,16 @@ def classify(m):
     sub = sub if isinstance(sub, dict) else {}
     spawn = sub.get('thread_spawn') if isinstance(sub.get('thread_spawn'), dict) else None
     out = {'kind': 'internal', 'parent': parent, 'agent_path': None, 'nick': None, 'depth': 1, 'prefix_ord': 0, 'drift': True}
+    if (m.get('thread_source') not in (None, 'user', 'subagent', 'guardian_review') or
+            m.get('multi_agent_version') not in (None, 'disabled', 'v1', 'v2') or m.get('history_mode') not in (None, 'paginated')):
+        return out
     if sub.get('other') == 'guardian' or m.get('thread_source') == 'guardian_review':
         out.update(kind='guardian', drift=False)
     elif spawn is not None:
         start, sp = _int(m.get('subagent_history_start_ordinal')), spawn.get('parent_thread_id')
+        if (no_copy and 'subagent_history_start_ordinal' not in m and m.get('thread_source') == 'subagent' and
+                m.get('multi_agent_version') == 'v2' and m.get('history_mode') == 'paginated'):
+            start = 0
         if parent and sp == parent and start is not None and start >= 0:
             path = _str(spawn.get('agent_path')) or _str(m.get('agent_path'))
             depth = _int(spawn.get('depth'))
@@ -87,7 +94,7 @@ def classify(m):
                 depth = len(path.strip('/').split('/')) - 1 if path and path.startswith('/root/') else 1
             out.update(kind='sub', agent_path=path, nick=_str(spawn.get('agent_nickname')) or _str(m.get('agent_nickname')),
                        depth=max(1, depth), prefix_ord=start, drift=False)
-    elif not isinstance(src, dict) and not top:
+    elif not isinstance(src, dict) and not top and m.get('thread_source') in (None, 'user'):
         out.update(kind='root', depth=0, drift=False)
     return out
 
@@ -103,7 +110,7 @@ class ThreadFacts:
     Counts of what did not make it: skipped (lines of a kind we read that could not be read), drift (the same, counted for the diagnostics: the shape is not what is known),
     big (a command text over CX_CMD_MAX), evicted (commands pushed out by the count)."""
     __slots__ = ('cmds', 'texted', 'collab', 'ctexted', 'nbytes', 'skipped', 'drift', 'big', 'evicted', 'evict', 'strip', 'stripped', 'gaps', 'runs', 'execs', 'seen_pids', 'calls',
-                 'cells', 'turn_start', 'tail_ts')
+                 'cells', 'turn_start', 'tail_ts', 'spawns')
 
     def __init__(self):
         self.cmds, self.texted, self.collab, self.ctexted = deque(), deque(), deque(), deque()    # the texted ones are the same dicts as in cmds / collab, oldest first
@@ -119,6 +126,7 @@ class ThreadFacts:
         self.runs = {}                             # a command known to run whose record has not come: ('pty', process_id) or ('cell', cell id) -> when it started
         self.execs = {}                            # an exec call of the open turn whose output has not come (a command that runs now, in the foreground): call id -> when it was called
         self.seen_pids, self.calls, self.cells = {}, {}, {}
+        self.spawns = {}                                     # call id -> whether the spawn explicitly copied no parent history (no instruction text)
         self.turn_start = self.tail_ts = None
 
     # ---- commands and messages ----
@@ -147,6 +155,8 @@ class ThreadFacts:
         self.trim(CX_TEXT_THREAD)
 
     def add_collab(self, c):
+        if c['kind'] == 'started' and self.spawns.pop(c['call_id'], False):
+            c['fork_none'] = True
         if len(self.collab) >= CX_COLLAB_KEEP:
             old = self.collab.popleft()
             if old['text'] is not None and old['kind'] == 'message':
@@ -157,6 +167,19 @@ class ThreadFacts:
             self.ctexted.append(c)
             self.nbytes += nbytes(c['text'])
         self.trim(CX_TEXT_THREAD)
+
+    def note_spawn(self, p):
+        """Only the plain structural field fork_turns of a collaboration spawn_agent call: kept until its started item names the child."""
+        if p.get('name') != 'spawn_agent' or p.get('namespace') != 'collaboration' or not _str(p.get('call_id')):
+            return
+        try:
+            args = json.loads(p['arguments'])
+        except (KeyError, TypeError, ValueError, RecursionError):
+            return
+        none = isinstance(args, dict) and args.get('fork_turns') == 'none'
+        self.spawns[p['call_id']] = none
+        if len(self.spawns) > CX_CALLS_KEEP:
+            del self.spawns[next(iter(self.spawns))]
 
     def oldest(self):
         """The time of the oldest text held (a command's end, a message's time), or None when no text is held."""
