@@ -21,6 +21,7 @@ CX_DEPTH_MAX = 8           # parent steps root_of follows
 CX_GAPS_MAX = 256          # gaps of one thread kept apart; more are folded into one that covers them
 CX_REREAD = 512 << 10      # bytes read from the front of a record line to get a command text again
 CX_CALLS_KEEP = 256        # calls remembered while they wait for their output
+CX_SPAWNS_KEEP = 65536     # call identities kept for spawn proof, apart from the conversation cards; when full, new identities cannot prove anything
 
 CX_SHELLS = frozenset(('sh', 'bash', 'zsh', 'dash', 'ksh', 'fish'))
 
@@ -78,7 +79,7 @@ def classify(m, no_copy=False):
     spawn = sub.get('thread_spawn') if isinstance(sub.get('thread_spawn'), dict) else None
     out = {'kind': 'internal', 'parent': parent, 'agent_path': None, 'nick': None, 'depth': 1, 'prefix_ord': 0, 'drift': True}
     if (m.get('thread_source') not in (None, 'user', 'subagent', 'guardian_review') or
-            m.get('multi_agent_version') not in (None, 'disabled', 'v1', 'v2') or m.get('history_mode') not in (None, 'paginated')):
+            m.get('multi_agent_version') not in (None, 'disabled', 'v1', 'v2') or m.get('history_mode') not in (None, 'legacy', 'paginated')):
         return out
     if sub.get('other') == 'guardian' or m.get('thread_source') == 'guardian_review':
         out.update(kind='guardian', drift=False)
@@ -103,6 +104,60 @@ def classify(m, no_copy=False):
 INF = float('inf')
 
 
+class SpawnProofs:
+    """The small structural facts that prove a child copied no history, for one parent's file generation. No message text and no conversation-card limit.
+    One call at one file offset must be a readable collaboration spawn_agent with fork_turns none; a second call with its id or a conflicting started claim invalidates it.
+    Re-reading the same offset is no second call. When the separate count is full, existing facts stay and new identities are refused (never evicted and later trusted anew)."""
+
+    __slots__ = ('calls', 'children')
+
+    def __init__(self):
+        self.calls, self.children = {}, {}
+
+    def _entry(self, cid):
+        if not _str(cid):
+            return None
+        e = self.calls.get(cid)
+        if e is None and len(self.calls) < CX_SPAWNS_KEEP:
+            e = self.calls[cid] = {'off': None, 'none': False, 'started': None, 'bad': False}
+        return e
+
+    def note_call(self, cid, off, p=None):
+        e = self._entry(cid)
+        if e is None:
+            return
+        if e['off'] is not None:
+            if e['off'] != off:
+                e['bad'] = True
+            return
+        e['off'] = off
+        if (not isinstance(p, dict) or p.get('call_id') != cid or p.get('type') != 'function_call' or
+                p.get('name') != 'spawn_agent' or p.get('namespace') != 'collaboration'):
+            e['bad'] = True
+            return
+        try:
+            args = json.loads(p['arguments'])
+        except (KeyError, TypeError, ValueError, RecursionError):
+            e['bad'] = True
+            return
+        e['none'] = isinstance(args, dict) and args.get('fork_turns') == 'none'
+
+    def note_started(self, c):
+        e = self._entry(c['call_id'])
+        if e is None or e['bad']:
+            return
+        child = _str(c['agent_thread_id'])
+        claim = (child, c['agent_path'])
+        if child is None or (e['started'] is not None and e['started'] != claim):
+            e['bad'] = True
+        elif e['started'] is None:
+            e['started'] = claim
+            self.children.setdefault(child, set()).add(c['call_id'])
+
+    def has_none(self, child):
+        return any(self.calls[cid]['none'] and not self.calls[cid]['bad'] for cid in self.children.get(child, ()))
+
+
 class ThreadFacts:
     """The commands and the collaboration events of one thread, and what is known not to be there (the gaps).
     Bounded: the newest CX_CMDS_KEEP commands and CX_COLLAB_KEEP events; the texts of both (a command's `cmd`, a message's `text`) at most CX_TEXT_THREAD of them here and CX_TEXT_TOTAL
@@ -110,7 +165,7 @@ class ThreadFacts:
     Counts of what did not make it: skipped (lines of a kind we read that could not be read), drift (the same, counted for the diagnostics: the shape is not what is known),
     big (a command text over CX_CMD_MAX), evicted (commands pushed out by the count)."""
     __slots__ = ('cmds', 'texted', 'collab', 'ctexted', 'nbytes', 'skipped', 'drift', 'big', 'evicted', 'evict', 'strip', 'stripped', 'gaps', 'runs', 'execs', 'seen_pids', 'calls',
-                 'cells', 'turn_start', 'tail_ts', 'spawns')
+                 'cells', 'turn_start', 'tail_ts')
 
     def __init__(self):
         self.cmds, self.texted, self.collab, self.ctexted = deque(), deque(), deque(), deque()    # the texted ones are the same dicts as in cmds / collab, oldest first
@@ -126,7 +181,6 @@ class ThreadFacts:
         self.runs = {}                             # a command known to run whose record has not come: ('pty', process_id) or ('cell', cell id) -> when it started
         self.execs = {}                            # an exec call of the open turn whose output has not come (a command that runs now, in the foreground): call id -> when it was called
         self.seen_pids, self.calls, self.cells = {}, {}, {}
-        self.spawns = {}                                     # call id -> whether the spawn explicitly copied no parent history (no instruction text)
         self.turn_start = self.tail_ts = None
 
     # ---- commands and messages ----
@@ -155,8 +209,6 @@ class ThreadFacts:
         self.trim(CX_TEXT_THREAD)
 
     def add_collab(self, c):
-        if c['kind'] == 'started' and self.spawns.pop(c['call_id'], False):
-            c['fork_none'] = True
         if len(self.collab) >= CX_COLLAB_KEEP:
             old = self.collab.popleft()
             if old['text'] is not None and old['kind'] == 'message':
@@ -167,19 +219,6 @@ class ThreadFacts:
             self.ctexted.append(c)
             self.nbytes += nbytes(c['text'])
         self.trim(CX_TEXT_THREAD)
-
-    def note_spawn(self, p):
-        """Only the plain structural field fork_turns of a collaboration spawn_agent call: kept until its started item names the child."""
-        if p.get('name') != 'spawn_agent' or p.get('namespace') != 'collaboration' or not _str(p.get('call_id')):
-            return
-        try:
-            args = json.loads(p['arguments'])
-        except (KeyError, TypeError, ValueError, RecursionError):
-            return
-        none = isinstance(args, dict) and args.get('fork_turns') == 'none'
-        self.spawns[p['call_id']] = none
-        if len(self.spawns) > CX_CALLS_KEEP:
-            del self.spawns[next(iter(self.spawns))]
 
     def oldest(self):
         """The time of the oldest text held (a command's end, a message's time), or None when no text is held."""

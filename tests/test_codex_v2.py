@@ -9,7 +9,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat import cache_globals, patched, server  # noqa: E402
 from test_codex_facts import ROOT, SUB1, SUB2, T0, Rollouts, activity, line, message, root_meta, sub_meta, user_message  # noqa: E402
-from board import codex_facts as F, diag, views  # noqa: E402
+from board import codex_facts as F, codex_index, diag, views  # noqa: E402
 
 
 def v2_meta(tid=SUB1, **kw):
@@ -213,6 +213,115 @@ class V2History(Rollouts):
         for kw in ({'thread_source': 'future_source'}, {'multi_agent_version': 'v3'}, {'history_mode': 'future_history'}):
             with self.subTest(kw=kw):
                 self.assertEqual(F.classify(root_meta(**kw))['kind'], 'internal')
+
+    def test_legacy_root_and_v1_child_keep_their_existing_kinds(self):
+        self.put(ROOT, root_meta(thread_source='user', history_mode='legacy'))
+        self.child(sub_meta(SUB1, start=2, history_mode='legacy', multi_agent_version='v1'))
+        for tid, kind, prefix in ((ROOT, 'root', 0), (SUB1, 'sub', 2)):
+            with self.subTest(tid=tid):
+                e = self.entry(tid)
+                self.assertEqual((e['kind'], e['prefix_ord'], e['drift']), (kind, prefix, False))
+
+    def test_reused_call_ids_never_authorize_copied_child_history(self):
+        conflicts = [communication('followup_task', 'spawn-1'), communication('send_message', 'spawn-1'),
+                     spawn(arguments='{bad json'), spawn(), spawn('all'),
+                     {'type': 'custom_tool_call', 'call_id': 'spawn-1', 'name': 'exec', 'input': 'text(1)'}]
+        for second in conflicts:
+            for after_started in (False, True):
+                with self.subTest(second=second, after_started=after_started):
+                    rest = [(T0 + 2, 'response_item', spawn())]
+                    if after_started:
+                        rest.append((T0 + 3, 'event_msg', activity('started', 'spawn-1')))
+                    rest.append((T0 + 4, 'response_item', second))
+                    if not after_started:
+                        rest.append((T0 + 5, 'event_msg', activity('started', 'spawn-1')))
+                    self.put(ROOT, root_meta(), rest)
+                    self.put(SUB1, v2_meta(), [(T0 + 1, 'event_msg', {'type': 'task_started'}),
+                                             (T0 + 2, 'response_item', user_message('Synthetic copied parent instruction.')),
+                                             (T0 + 7, 'event_msg', {'type': 'task_started'})])
+                    self.assert_hidden()
+                    self.assertEqual(self.idx.get(SUB1)['turns'], [])
+                    self.assertIsNone(self.idx.get(SUB1)['first_user'])
+
+    def test_later_call_collision_withdraws_an_already_confirmed_child(self):
+        self.parent()
+        self.child()
+        self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        self.append(ROOT, [line(T0 + 8, 'response_item', communication('followup_task', 'spawn-1'))])
+        self.assert_hidden()
+
+    def test_a_prior_call_with_the_same_id_also_invalidates_a_spawn(self):
+        for prior in (communication('followup_task', 'spawn-1'), spawn(arguments='{bad json'), spawn('all')):
+            with self.subTest(prior=prior):
+                self.put(ROOT, root_meta(), [(T0 + 1, 'response_item', prior), (T0 + 2, 'response_item', spawn()),
+                                            (T0 + 3, 'event_msg', activity('started', 'spawn-1'))])
+                self.child()
+                self.assert_hidden()
+
+    def test_the_separate_proof_limit_retains_old_facts_and_refuses_untracked_ids(self):
+        with mock.patch.object(F, 'CX_SPAWNS_KEEP', 2):
+            self.parent()
+            self.child()
+            self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+            self.append(ROOT, [line(T0 + 8, 'response_item', communication('send_message', 'other-1')),
+                               line(T0 + 9, 'response_item', communication('followup_task', 'untracked'))])
+            self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+            self.append(ROOT, [line(T0 + 10, 'response_item', spawn(cid='untracked')),
+                               line(T0 + 11, 'event_msg', activity('started', 'untracked', agent=SUB2, path='/root/s2'))])
+            self.put(SUB2, v2_meta(SUB2, path='/root/s2'))
+            self.assertEqual(self.entry(SUB2)['kind'], 'internal')
+            self.assertEqual(self.idx.get(SUB1)['kind'], 'sub')
+            self.append(ROOT, [line(T0 + 12, 'response_item', spawn())])
+            self.assert_hidden()
+
+    def test_conflicting_started_items_withdraw_the_proof(self):
+        for claim in (activity('started', 'spawn-1', agent=SUB2, path='/root/s2'),
+                      activity('started', 'spawn-1', path='/root/other')):
+            with self.subTest(claim=claim):
+                self.parent()
+                self.child()
+                self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+                self.append(ROOT, [line(T0 + 8, 'event_msg', claim)])
+                self.assert_hidden()
+
+    def test_another_parents_call_id_neither_confirms_nor_invalidates_the_child(self):
+        self.parent()
+        self.child()
+        self.put(SUB2, root_meta(SUB2), [(T0 + 2, 'response_item', spawn('all')),
+                                       (T0 + 3, 'event_msg', activity('started', 'spawn-1'))])
+        self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        self.parent(spawn('all'))
+        self.put(SUB2, root_meta(SUB2), [(T0 + 2, 'response_item', spawn()),
+                                       (T0 + 3, 'event_msg', activity('started', 'spawn-1'))])
+        self.assert_hidden()
+
+    def test_confirmed_proof_outlives_the_conversation_card_limit(self):
+        self.parent()
+        self.child()
+        self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        generation = self.idx.get(ROOT)['gen']
+        self.append(ROOT, [line(T0 + 8 + i, 'response_item', message('/root', '/root/s1', 'Synthetic message.', mid='msg-%d' % i))
+                           for i in range(F.CX_COLLAB_KEEP + 1)])
+        e = self.entry(SUB1)
+        self.assertEqual((e['kind'], e['drift']), ('sub', False))
+        self.assertEqual(self.idx.get(ROOT)['gen'], generation)
+        self.assertEqual(len(self.idx.collab(ROOT)), F.CX_COLLAB_KEEP)
+        self.assertFalse(any(c['kind'] == 'started' for c in self.idx.collab(ROOT)))
+        self.append(ROOT, [line(T0 + 3000, 'response_item', spawn('all'))])
+        self.assert_hidden()
+
+    def test_tail_rereads_do_not_lose_or_duplicate_spawn_evidence(self):
+        self.parent()
+        self.child()
+        self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        with mock.patch.object(codex_index, 'CX_BIG', 512), mock.patch.object(codex_index, 'CX_TAIL', 4096):
+            for i in range(2):
+                self.append(ROOT, [line(T0 + 8 + i, 'response_item', message('/root', '/root/s1', 'Synthetic message.', mid='msg-%d' % i))])
+                self.assertEqual(self.entry(SUB1)['kind'], 'sub')
+        with mock.patch.object(codex_index, 'CX_BIG', 512), mock.patch.object(codex_index, 'CX_TAIL', 1024):
+            self.append(ROOT, [line(T0 + 10 + i, 'response_item', message('/root', '/root/s1', 'Synthetic message.', mid='tail-%d' % i))
+                               for i in range(20)])
+            self.assertEqual(self.entry(SUB1)['kind'], 'sub')
 
     def test_v2_name_status_tokens_and_conversation_cards(self):
         self.parent()

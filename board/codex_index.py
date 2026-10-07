@@ -14,7 +14,7 @@ from collections import OrderedDict
 from .util import CODEX_NAMES, CODEX_SESSIONS, line_error, parse_ts, trunc
 from .fingerprint import nbytes
 from .codex_parse import CX_BIG, CX_HEAD_RE, CX_LINE_MAX, CX_ORD_RE, codex_user_text
-from .codex_facts import (CX_DEPTH_MAX, CX_ITEM_HEAD, CX_ITEM_RE, CX_NAME_SCAN, CX_NAMES, CX_TEXT_TOTAL, INF, ThreadFacts, classify, parse_activity, parse_cmd_exec,
+from .codex_facts import (CX_ANY_CALL_RE, CX_DEPTH_MAX, CX_ITEM_HEAD, CX_ITEM_RE, CX_NAME_SCAN, CX_NAMES, CX_TEXT_TOTAL, INF, SpawnProofs, ThreadFacts, classify, parse_activity, parse_cmd_exec,
                           parse_message, read_cmd_text, run_window)
 
 
@@ -32,7 +32,7 @@ def _num(x):
     return x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
 
 
-_PRIVATE = ('_facts', '_fork', '_nline', '_off', '_head', '_anchor', '_kdrift', '_turn_text', '_pending', '_readable')       # what the scan keeps in an entry for itself: never in a snapshot (the facts are read by `cmds` and `collab`)
+_PRIVATE = ('_facts', '_fork', '_nline', '_off', '_head', '_anchor', '_kdrift', '_turn_text', '_pending', '_readable', '_spawns')       # what the scan keeps in an entry for itself: never in a snapshot (the facts are read by `cmds` and `collab`)
 
 
 def _snapshot(e):
@@ -147,8 +147,8 @@ class CodexIndex:
                 if not e['_pending']:
                     continue
                 parent = self.by_id.get(e['parent'])
-                facts = parent.get('_facts') if parent and parent['_readable'] else None
-                none = bool(facts and any(c['kind'] == 'started' and c['agent_thread_id'] == e['id'] and c.get('fork_none') for c in facts.collab))
+                proof = parent.get('_spawns') if parent and parent['_readable'] else None
+                none = bool(proof and proof.has_none(e['id']))
                 if (e['kind'] == 'sub') == none:
                     continue
                 new = self._new(e['path'], no_copy=none)
@@ -224,6 +224,7 @@ class CodexIndex:
                 'thread_total': None, 'limit': None, 'model': '', 'first_user': None,
                 'cmds_skipped': 0, 'cmds_drift': 0, 'cmds_big': 0, 'cmds_evicted': 0,
                 '_facts': ThreadFacts() if k['kind'] in ('root', 'sub') else None,   # commands and collaboration are read for the threads that can launch or be launched
+                '_spawns': SpawnProofs() if k['kind'] in ('root', 'sub') else None,   # proof belongs to this file generation, including when its tail and cards are read again
                 '_fork': k['kind'] == 'sub',       # still inside the history copied from the parent (the first lines of a sub-agent's rollout)
                 '_nline': 0,                       # the number of the line being read (the meta line is 0), while _fork: the ordinal when a line has none
                 '_turn_text': (origin_exec and k['kind'] == 'root') or k['kind'] == 'sub',   # the instruction text of a turn is kept (up to 20,000 characters): for these only; the others keep spans
@@ -334,7 +335,7 @@ class CodexIndex:
             e['thread_total'] = p.get('thread_token_usage') or e['thread_total']
         elif typ == b'turn_context' and small:
             e['model'] = (json.loads(raw).get('payload') or {}).get('model') or e['model']
-        elif typ == b'response_item' and pt == b'message' and small and b'"role":"user"' in raw[:400]:
+        elif typ == b'response_item' and pt == b'message' and small and facts and b'"role":"user"' in raw[:400]:
             need_turn = e['_turn_text'] and not e['partial'] and e['turns'] and e['turns'][-1]['user'] is None
             if e['first_user'] is None or need_turn:
                 t = codex_user_text(json.loads(raw).get('payload') or {})
@@ -347,10 +348,22 @@ class CodexIndex:
             self._message(e, raw, ts)
         elif typ == b'response_item' and facts and pt in (b'custom_tool_call', b'custom_tool_call_output', b'function_call', b'function_call_output'):
             facts.note_call(pt, raw, ts or e['last_ts'])
-            if pt == b'function_call' and small and b'"spawn_agent"' in raw[:1024]:
+            if pt in (b'function_call', b'custom_tool_call'):
+                self._spawn_call(e, raw, small)
+
+    @staticmethod
+    def _spawn_call(e, raw, small):
+        """Every call identity can invalidate a spawn, even another tool or unreadable arguments. Only a readable spawn can prove none; no instruction text is kept."""
+        cid = CX_ANY_CALL_RE.search(raw)
+        if cid is None:
+            return
+        p = None
+        if small and b'"spawn_agent"' in raw[:1024]:
+            try:
                 p = json.loads(raw).get('payload')
-                if isinstance(p, dict):
-                    facts.note_spawn(p)
+            except (ValueError, TypeError, AttributeError, RecursionError):
+                pass
+        e['_spawns'].note_call(cid.group(1).decode('utf-8', 'replace'), e['_off'], p)
 
     @staticmethod
     def _copied(e, raw):
@@ -389,6 +402,8 @@ class CodexIndex:
     def _activity(self, e, raw, ts):
         c = parse_activity(raw, e['id'], ts)
         if c:
+            if c['kind'] == 'started':
+                e['_spawns'].note_started(c)
             e['_facts'].add_collab(c)
 
     def _odd(self, e, raw, ts=None):
