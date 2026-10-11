@@ -541,6 +541,7 @@ class Placement:
     why: str                             # tag | launch_call | launch_peer | guide_read: the strongest of whys
     whys: List[str]
     sure: bool                           # only a room tag makes it sure
+    whys_by_unit: Dict[str, List[str]] = field(default_factory=dict)     # internal: the target topic or explicit bundle root of each reason (J10)
 
 
 @dataclass
@@ -1133,31 +1134,30 @@ class _Judge:
         for a in self.agents:
             if a.id in involved:
                 continue
-            reasons, topics = collections.defaultdict(set), collections.defaultdict(set)
+            reasons, topics, scoped = collections.defaultdict(set), collections.defaultdict(set), collections.defaultdict(set)
 
             def add(unit, why):
                 R = topic_root.get(unit, unit)
                 reasons[R].add(why)
                 topics[R].add(unit)
+                scoped[unit].add(why)
             tag_root = None
             f = self._tag_room(a)
             if f:
                 if f in jd.rooms:
                     tag_root = f
-                    reasons[f].add('tag')
+                    add(f, 'tag')
                 elif f in topic_root:
                     tag_root = topic_root[f]
                     add(f, 'tag')
                 elif f in roots:
                     tag_root = f
-                    reasons[f].add('tag')
-                    topics[f].add(f)
+                    add(f, 'tag')
             if a.launch is not None:
                 named = lambda h: h is not None and (a.launch.call in h.calls or a.launch.gkey() in h.groups)       # noqa: E731
                 for R in sorted(set(topic_root.values())):
                     if named(hints.get(R)):                    # what was done in the root points at the root: every topic of it waits (O14)
-                        reasons[R].add('launch_call')
-                        topics[R].add(R)
+                        add(R, 'launch_call')
                 for U, R in topic_root.items():
                     if U != R and named(hints.get(U)):
                         add(U, 'launch_call')
@@ -1172,8 +1172,7 @@ class _Judge:
                     if folder in topic_root:
                         add(folder, 'guide_read')
                     elif folder in roots and folder not in jd.rooms:
-                        reasons[folder].add('guide_read')
-                        topics[folder].add(folder)
+                        add(folder, 'guide_read')
             if reasons:
                 outside = self._outside_md(a)
                 for R in list(reasons):
@@ -1181,6 +1180,9 @@ class _Judge:
                     work = {t for t in (top, *self.tops_of(a.cwd)) if t} if top else ()
                     if any(not (p == R or p.startswith(R + os.sep)) and _work_file(p, work) for p in outside):
                         reasons[R] -= {'launch_call', 'launch_peer', 'guide_read'}
+                        for U in scoped:
+                            if topic_root.get(U, U) == R:
+                                scoped[U] -= {'launch_call', 'launch_peer', 'guide_read'}
                         if not reasons[R]:
                             del reasons[R]
             if tag_root is not None and tag_root in reasons:
@@ -1196,7 +1198,8 @@ class _Judge:
             whys = [w for w in _WHY_RANK if w in reasons[chosen]]
             ts = topics[chosen]
             topic = next(iter(ts)) if len(ts) == 1 and next(iter(ts)) != chosen else None
-            jd.placed[a.id] = Placement(a.id, chosen, topic, whys[0], whys, tag_root == chosen)
+            whys_by_unit = {U: [w for w in _WHY_RANK if w in rs] for U, rs in sorted(scoped.items()) if rs and topic_root.get(U, U) == chosen}
+            jd.placed[a.id] = Placement(a.id, chosen, topic, whys[0], whys, tag_root == chosen, whys_by_unit)
 
     # ----- J15 J16: the final of a debate -----
     def _final(self, scope, key, units, paths, parents, estimated):
@@ -1421,10 +1424,12 @@ class _Judge:
             jd.closable[U] = bool((jd.finals[U].confirmed or (fr is not None and fr.confirmed)) and not self._live[U])
         # J10: an orchestrator-made debate with an open guide reader or launch placement competes before its first report. This changes only the default selection.
         active = collections.defaultdict(list)
+        hinted_folders = {self.real(f) for f in self.sf.hints}
         for aid, p in jd.placed.items():
             a = self.by_id[aid]
-            if not p.sure and a.status in OPEN and {'guide_read', 'launch_call'} & set(p.whys) and \
-                    any('hint' in why.get(U, ()) and (p.topic is None or p.topic == U) for U in roots[p.unit]):
+            matched_topic = any('hint' in why.get(U, ()) and {'guide_read', 'launch_call'} & set(p.whys_by_unit.get(U, ())) for U in roots[p.unit])
+            root_read = p.unit not in roots[p.unit] and p.unit in hinted_folders and 'guide_read' in p.whys_by_unit.get(p.unit, ())
+            if not p.sure and a.status in OPEN and (matched_topic or root_read):
                 active[p.unit].append(a.start or 0)
         # the order of the list
         started = {}

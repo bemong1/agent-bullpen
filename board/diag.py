@@ -33,10 +33,11 @@ class _Items:
 
 
 class _Paths(_Items):
-    """Collision paths from the debate judgment, kept separately from the short display text."""
+    """Collision paths relative to the debate unit, kept separately from the short display text; absolute paths, escapes and controls are refused."""
 
     def __init__(self):
-        super().__init__(lambda v: isinstance(v, str) and len(v) <= 4096 and os.path.isabs(v) and re.fullmatch(r'[^\x00-\x1f\x7f]+', v) is not None)
+        super().__init__(lambda v: isinstance(v, str) and len(v) <= 4096 and not os.path.isabs(v) and '..' not in v.split('/')
+                         and re.fullmatch(r'[^\x00-\x1f\x7f-\x9f]+', v) is not None)
 
 
 def _count(v):
@@ -127,6 +128,8 @@ def _allowed(code, params):
 
 
 def _entry(code, scope, agent=None, unit=None, **params):
+    if unit and os.path.isabs(unit):
+        unit = os.path.basename(os.path.normpath(unit))       # a display subject, never an absolute workspace path
     clean = _clean(params)
     for k, spec in (PARAMS.get(code) or {}).items():
         if isinstance(spec, _Paths) and isinstance(params.get(k), (list, tuple)):
@@ -236,7 +239,7 @@ def collect(s, now, verdicts, groups):
             detail = detail[:VALUE_MAX - 1] + '…'
         params = {'detail': detail} if detail else {}
         if code == 'alias_collision' and 'paths' in d:
-            params['paths'] = d['paths']
+            params['paths'] = [os.path.relpath(p, unit) for p in d['paths'] if isinstance(p, str) and os.path.isabs(p)] if unit and os.path.isabs(unit) else []
         out.append(_entry(code, scope, agent, short_path(unit) if unit else None, **params))
     rank = {'warn': 0, 'info': 1}
     out.sort(key=lambda e: (rank[e['level']], e['code'], e['agent'] or '', e['unit'] or ''))        # a stable order, so a page that polls sees no flicker

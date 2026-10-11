@@ -2,12 +2,14 @@
 import json
 import os
 import sys
+import threading
 import types
 import unittest
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from judge_support import Fixture, agent, tag, wr  # noqa: E402
+from compat import server  # noqa: E402
 from board import diag  # noqa: E402
 
 
@@ -27,9 +29,40 @@ class JudgmentAPI(Fixture):
         (collision,) = [d for d in result.diag if d['code'] == 'alias_collision']
         self.assertGreater(len(collision['detail']), diag.VALUE_MAX)
         (entry,) = [d for d in self.collect(result.diag) if d['code'] == 'alias_collision']
-        self.assertEqual(entry['params'], {'detail': collision['detail'][:diag.VALUE_MAX - 1] + '…', 'paths': sorted(paths[:2])})
+        self.assertEqual(entry['params'], {'detail': collision['detail'][:diag.VALUE_MAX - 1] + '…', 'paths': sorted(names[:2])})
+        self.assertEqual(collision['paths'], sorted(paths[:2]))
         self.assertEqual(json.loads(json.dumps(entry)), entry)
         self.assertFalse(result.finals[self.p('talk')].confirmed)
+
+    def test_diag_endpoint_exposes_relative_collision_paths_and_no_absolute_path(self):
+        unit = '/Users/example/private-project/review'
+        paths = [unit + '/r1/A.md', unit + '/r1/A.MD', unit + '/../outside.md', unit + '/r1/bad\nname.md']
+        rows = [dict(code='alias_collision', agent=None, unit=unit, detail='r1/A.MD,r1/A.md', paths=paths)]
+        s = types.SimpleNamespace(id='11111111-2222-4333-8444-555555555555', lock=threading.RLock())
+        s.state = lambda: setattr(s, '_diag', self.collect(rows))
+        request = object.__new__(server.Handler)
+        request.path = '/api/diag?session=' + s.id
+        request._admit = lambda _url: True
+        response = []
+        request._send = lambda status, body, *_a, **_kw: response.append((status, json.loads(json.dumps(body))))
+        with mock.patch.object(server, 'REG', types.SimpleNamespace(get=lambda _sid: s)):
+            request.do_GET()
+        status, body = response[0]
+        self.assertEqual(status, 200)
+        self.assertEqual(body['items'][0]['params']['paths'], ['r1/A.md', 'r1/A.MD'])
+
+        def strings(value):
+            if isinstance(value, str):
+                yield value
+            elif isinstance(value, dict):
+                for v in value.values():
+                    yield from strings(v)
+            elif isinstance(value, list):
+                for v in value:
+                    yield from strings(v)
+        self.assertTrue(all(not os.path.isabs(v) for v in strings(body)))
+        self.assertNotIn('/Users/example', json.dumps(body))
+        self.assertEqual(rows[0]['paths'], paths)
 
     def test_report_keys_identify_each_physical_path_in_every_debate_shape(self):
         for kind in ('file', 'folder', 'room'):

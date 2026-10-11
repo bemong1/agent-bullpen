@@ -484,6 +484,7 @@ class Judge:
     def _placed(self):
         """J11: for an agent that sits in no cell, the debate it most likely belongs to, with the reasons; J12: the agents whose reasons point at two roots."""
         placed, split = {a['id']: None for a in self.agents}, {}
+        self.placement_whys = {}                   # agent -> {target topic or explicit bundle root: reasons}; the public placement keeps its old shape
         seated = set()
         for key, x in self.cells.items():
             seated |= {x['owner'], x['agent'], *x['editors']} - {None}
@@ -510,8 +511,10 @@ class Judge:
                 g = gkey(a['launch'])
                 if g and any(b is not a and gkey(b['launch']) == g and (u in self.bound(b) or root in self.bound(b)) for b in self.agents):
                     reasons[u].add('launch_peer')
-                if any(r['path'] and self.real(r['path']) in [u + '/' + n for n in GUIDE_NAMES] + [root + '/' + n for n in GUIDE_NAMES] for r in a['reads']):
+                if any(r['path'] and self.real(r['path']) in [u + '/' + n for n in GUIDE_NAMES] for r in a['reads']):
                     reasons[u].add('guide_read')
+                if root != u and any(r['path'] and self.real(r['path']) in [root + '/' + n for n in GUIDE_NAMES] for r in a['reads']):
+                    reasons[root].add('guide_read')
             for u in list(reasons):                                               # J11 invalid: it wrote a `.md` of the work elsewhere, so the weak reasons for this debate go
                 if any(w['agent'] == a['id'] and w['kind'] in AUTHORING and w['evidence'] in SHOWN and w['path'].lower().endswith('.md') and not under(w['path'], u)
                        and self.work_file(w['path']) for w in self.conf):
@@ -535,6 +538,7 @@ class Judge:
             whys = [w for w in REASON_ORDER if any(w in rs for rs in us.values())]
             topic = next(iter(us)) if len(us) == 1 and next(iter(us)) != root else None
             placed[a['id']] = dict(unit=root, topic=topic, why=whys[0], whys=whys, sure=whys[0] == 'tag')
+            self.placement_whys[a['id']] = {u: [w for w in REASON_ORDER if w in rs] for u, rs in sorted(us.items())}
         return placed, split
 
     # -------------------------------------------------------------------------------------------------------------- J9 J10
@@ -587,8 +591,16 @@ class Judge:
     def _active_starts(self, root):
         """J10: an open placement by guide read or launch call competes only in an orchestrator-made topic. A peer alone does not."""
         made = {u for u in self._topics_of(root) if u in self.orch['hints'] and self.written_debate(u)}
-        return [self.ids[aid]['start'] for aid, p in self.placed.items() if p and not p['sure'] and p['unit'] == root and self.ids[aid]['status'] in OPEN
-                and {'guide_read', 'launch_call'} & set(p['whys']) and (p['topic'] in made or p['topic'] is None and made)]
+        starts = []
+        for aid, p in self.placed.items():
+            if not p or p['sure'] or p['unit'] != root or self.ids[aid]['status'] not in OPEN:
+                continue
+            scoped = self.placement_whys.get(aid, {})
+            topic_match = any({'guide_read', 'launch_call'} & set(scoped.get(u, ())) for u in made)
+            root_read = root not in self.topics and root in self.orch['hints'] and 'guide_read' in scoped.get(root, ())
+            if topic_match or root_read:
+                starts.append(self.ids[aid]['start'])
+        return starts
 
     def _last_ts(self, root, active=()):
         ts = [a['start'] for a in self.agents if self.bound(a) & (set(self._topics_of(root)) | {root})]

@@ -6,7 +6,7 @@ Agent Bullpen is in **beta** (0.x): the formats it reads are the private on-disk
 
 - Codex v2 native sub-agents are shown when the parent's `spawn_agent` used `fork_turns: "none"`; other v2 children stay hidden with a diagnostic.
 - Encrypted Codex messages show a short notice.
-- An orchestrator-created debate with open agents placed by its guide or launch call can be the current debate before its first report; the latest agent start wins among these candidates.
+- An orchestrator-created debate with open agents placed by its guide or launch call can be the current debate before its first report when the hint and evidence name the same topic; an explicit bundle-guide read can match its root hint. The latest eligible agent start wins among these candidates.
 
 The debate table, the rooms and the end of a topic are no longer judged from the words of an instruction, a brief or a report. They are judged from what the agents wrote and where, which the board already reads from the records, so the same record gives the same table in any language. Only the first heading of a brief, its table and the list of documents are still read, and only to be shown. The rules are in the [screen guide](docs/guide.md#how-debates-are-recognized).
 
@@ -29,7 +29,7 @@ The debate table, the rooms and the end of a topic are no longer judged from the
 - The conclusion found by its words, so more "Closing not confirmed". A final in `final/` that the brief table names does not close a topic.
 - Python, `cp` and `mv` writes (a guess may say who wrote the file).
 
-**API.** `/api/state`: `agents[].placed`, `.launch`, `.room_tag` (`tag` stays the letter the page names the agent by), `.work_units`; `debates[].sure`, `.final`, `.placed`; `topics[].room_sure`, `.room_why`, `.placed`, `.closable`, `final {confirmed, path, rel, by, mtime, lines, why[], candidates[], scope, table_path}` (`final.exists` stays as an alias of `confirmed` and goes in 0.4.0); cells have `owner`, `editors`, `evidence`, `hint`, `previous`, `rdir` and the state `previous`; `rows[].role` is always empty. Report `key` values are lists of path components (unit folder, then the relative file path). Collision diagnostics carry a short `params.detail` and separate `params.paths`. `/api/agent`: `write_events` (every write with `ok`, `proof`, `sure`), `run`, `placed`, `launch`, `room_tag`.
+**API.** `/api/state`: `agents[].placed`, `.launch`, `.room_tag` (`tag` stays the letter the page names the agent by), `.work_units`; `debates[].sure`, `.final`, `.placed`; `topics[].room_sure`, `.room_why`, `.placed`, `.closable`, `final {confirmed, path, rel, by, mtime, lines, why[], candidates[], scope, table_path}` (`final.exists` stays as an alias of `confirmed` and goes in 0.4.0); cells have `owner`, `editors`, `evidence`, `hint`, `previous`, `rdir` and the state `previous`; `rows[].role` is always empty. Report `key` values are lists of path components (unit folder, then the relative file path). Collision diagnostics carry a short `params.detail` and separate `params.paths` relative to the debate folder; absolute paths and parent escapes are refused. `/api/agent`: `write_events` (every write with `ok`, `proof`, `sure`), `run`, `placed`, `launch`, `room_tag`.
 
 **Diagnostics.** Gone: `path_ambiguous`, `debate_in_misc`, `declaration_missing`. New: `launch_split`, `history_lost`. Kept: `seat_tie_held` (more than one agent could have been first to write a cell), `alias_collision` (`r01` and `r1` both there), `listing_capped`, and `path_unresolved` (a launch whose path could not be worked out).
 

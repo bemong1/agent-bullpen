@@ -170,11 +170,12 @@ class DiagParams(unittest.TestCase):
         self.assertEqual(self.params('silent_live', pids=2), {})
 
     def test_only_collision_diagnostics_carry_bounded_structured_paths(self):
-        paths = ['/SYNTH/' + 'long-folder/' * 10 + 'A.md', '/SYNTH/' + 'long-folder/' * 10 + 'A.MD']
+        paths = ['long-folder/' * 10 + 'A.md', 'long-folder/' * 10 + 'A.MD']
         self.assertEqual(self.params('alias_collision', paths=paths), {'paths': paths})
         self.assertEqual(self.params('seat_tie_held', paths=paths), {})
         self.assertEqual(self.params('made_up_code', paths=paths), {})
-        self.assertEqual(self.params('alias_collision', paths=paths + ['relative.md', '/bad\0path', '/bad\npath', 12, '/too/' + 'x' * 4096]), {'paths': paths})
+        self.assertEqual(self.params('alias_collision', paths=paths + ['/Users/example/private/review/A.md', '../outside.md', 'r1/../../outside.md',
+                                                                   'r1/../A.md', 'r1/bad\0path', 'r1/bad\npath', 'r1/bad\x85path', 12, 'too/' + 'x' * 4096]), {'paths': paths})
         self.assertEqual(self.params('alias_collision', paths=paths * 20), {'paths': (paths * 20)[:diag.LIST_MAX]})
 
     def test_a_text_that_does_not_have_the_shape_is_dropped(self):

@@ -101,6 +101,47 @@ class CurrentSelection(Fixture):
         self.assertEqual(jd.placed['B'].topic, self.p('bundle/read'))
         self.assertEqual(jd.current, self.p('old'))
 
+    def bundle(self):
+        self.file('bundle/brief.md', mtime=90)
+        for topic in ('made', 'read'):
+            self.file('bundle/%s/brief.md' % topic, mtime=90)
+            self.dirs('bundle/%s/r1' % topic)
+        return agent('C', writes=[wr(self.file('bundle/made/r1/C.md', mtime=120), 120)], start=100, last=150, launch=launch(call='author'))
+
+    def test_a_peer_in_a_hinted_topic_cannot_borrow_a_read_of_another_topic(self):
+        author = self.bundle()
+        reader = agent('B', reads=[rd(self.p('bundle/read/brief.md'), 310)], status='running', start=300, launch=launch(call='reader'))
+        hints, walked = {self.p('bundle/made'): hint(90)}, [self.p('bundle/read')]
+        plain = self.assign(self.old, author, hints=hints, walked=walked)
+        jd = self.assign(self.old, author, reader, hints=hints, walked=walked)
+        self.assertEqual(jd.placed['B'].whys, ['launch_peer', 'guide_read'])
+        self.assertIsNone(jd.placed['B'].topic)
+        self.assertEqual(jd.current, self.p('old'))
+        self.assertEqual(jd.placed['B'].whys_by_unit, {self.p('bundle/made'): ['launch_peer'], self.p('bundle/read'): ['guide_read']})
+        for field in ('cells', 'bound', 'agent_units', 'assignments', 'closable'):
+            self.assertEqual(getattr(jd, field), getattr(plain, field))
+        page = self.page(self.old, author, reader, hints=hints, walked=walked)
+        self.assertEqual([d['root'] for d in page.debates if d['current']], [self.p('old')])
+
+    def test_reads_match_the_hint_of_their_exact_topic_or_bundle_root(self):
+        author = self.bundle()
+        for read_scope, hint_scope, promote in (('bundle', 'bundle', True), ('bundle', 'bundle/made', False),
+                                               ('bundle/read', 'bundle/made', False), ('bundle/read', 'bundle', False),
+                                               ('bundle/made', 'bundle/made', True)):
+            with self.subTest(read_scope=read_scope, hint_scope=hint_scope):
+                reader = agent('B', reads=[rd(self.p(read_scope + '/brief.md'), 310)], status='running', start=300, launch=launch(call='reader'))
+                jd = self.assign(self.old, author, reader, hints={self.p(hint_scope): hint(90)}, walked=[self.p('bundle/read')])
+                self.assertEqual(jd.current, self.p('bundle' if promote else 'old'))
+                self.assertIn('guide_read', jd.placed['B'].whys_by_unit[self.p(read_scope)])
+
+    def test_a_launch_in_the_bundle_root_needs_an_explicit_root_guide_read(self):
+        author = self.bundle()
+        called = agent('B', launch=launch(call='reader'), status='running', start=300)
+        hints = {self.p('bundle'): hint(90, calls=('reader',))}
+        jd = self.assign(self.old, author, called, hints=hints, walked=[self.p('bundle/read')])
+        self.assertIn('launch_call', jd.placed['B'].whys)
+        self.assertEqual(jd.current, self.p('old'))
+
 
 if __name__ == '__main__':
     unittest.main()

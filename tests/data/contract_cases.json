@@ -26428,6 +26428,1061 @@
    "then": [],
    "summary_in": "An open reader of a hinted bundle topic promotes its bundle root",
    "summary_out": "Only the default selection changes; placements remain estimated and no new seat or final is confirmed."
+  },
+  {
+   "id": "C148",
+   "group": "D",
+   "title": "Review witness: a peer in one hinted topic cannot borrow a guide read of another topic",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "J10 review: match hint and evidence in the same scope",
+   "disk": {
+    "dirs": [
+     "other/r1",
+     "bundle/made/r1",
+     "bundle/read/r1"
+    ],
+    "files": {
+     "other/r1/A.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "bundle/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/made/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/read/brief.md": {
+      "mtime": 250,
+      "size": 10
+     },
+     "bundle/made/r1/C.md": {
+      "mtime": 120,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "hints": {
+     "bundle/made": {
+      "ts": 90,
+      "calls": [],
+      "groups": []
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 200,
+     "first": 200,
+     "last": 250,
+     "run": 1,
+     "run_start": 200,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 300,
+     "first": 300,
+     "last": 310,
+     "run": 1,
+     "run_start": 300,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "reader"
+     },
+     "writes": [],
+     "reads": [
+      {
+       "path": "bundle/read/brief.md",
+       "ts": 310,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100,
+     "first": 100,
+     "last": 150,
+     "run": 1,
+     "run_start": 100,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "author"
+     },
+     "writes": [
+      {
+       "path": "bundle/made/r1/C.md",
+       "ts": 120,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [
+    "bundle/read"
+   ],
+   "expect": {
+    "listed": [
+     "bundle",
+     "other"
+    ],
+    "current": "other",
+    "placed": {
+     "A": null,
+     "B": {
+      "unit": "bundle",
+      "topic": null,
+      "why": "launch_peer",
+      "whys": [
+       "launch_peer",
+       "guide_read"
+      ],
+      "sure": false
+     },
+     "C": null
+    },
+    "closable": {
+     "other": false,
+     "bundle/made": false,
+     "bundle/read": false
+    },
+    "diag": []
+   },
+   "then": [
+    {
+     "add": {
+      "set_agent": {
+       "B": {
+        "reads": [
+         {
+          "path": "bundle/made/brief.md",
+          "ts": 310,
+          "via": "tool"
+         }
+        ]
+       }
+      }
+     },
+     "expect": {
+      "current": "bundle",
+      "placed": {
+       "A": null,
+       "B": {
+        "unit": "bundle",
+        "topic": "bundle/made",
+        "why": "launch_peer",
+        "whys": [
+         "launch_peer",
+         "guide_read"
+        ],
+        "sure": false
+       },
+       "C": null
+      }
+     }
+    }
+   ],
+   "summary_in": "Review witness: a peer in one hinted topic cannot borrow a guide read of another topic",
+   "summary_out": "Current selection uses the same topic or an explicit root guide read. Confirmed judgments are unchanged."
+  },
+  {
+   "id": "C149",
+   "group": "D",
+   "title": "An explicit bundle guide read matches an orchestrator hint in the bundle root",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "J10 review: match hint and evidence in the same scope",
+   "disk": {
+    "dirs": [
+     "other/r1",
+     "bundle/made/r1",
+     "bundle/read/r1"
+    ],
+    "files": {
+     "other/r1/A.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "bundle/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/made/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/read/brief.md": {
+      "mtime": 250,
+      "size": 10
+     },
+     "bundle/made/r1/C.md": {
+      "mtime": 120,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "hints": {
+     "bundle": {
+      "ts": 90,
+      "calls": [],
+      "groups": []
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 200,
+     "first": 200,
+     "last": 250,
+     "run": 1,
+     "run_start": 200,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 300,
+     "first": 300,
+     "last": 310,
+     "run": 1,
+     "run_start": 300,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "reader"
+     },
+     "writes": [],
+     "reads": [
+      {
+       "path": "bundle/brief.md",
+       "ts": 310,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100,
+     "first": 100,
+     "last": 150,
+     "run": 1,
+     "run_start": 100,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "author"
+     },
+     "writes": [
+      {
+       "path": "bundle/made/r1/C.md",
+       "ts": 120,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [
+    "bundle/read"
+   ],
+   "expect": {
+    "listed": [
+     "bundle",
+     "other"
+    ],
+    "current": "bundle",
+    "placed": {
+     "A": null,
+     "B": {
+      "unit": "bundle",
+      "topic": null,
+      "why": "launch_peer",
+      "whys": [
+       "launch_peer",
+       "guide_read"
+      ],
+      "sure": false
+     },
+     "C": null
+    },
+    "closable": {
+     "other": false,
+     "bundle/made": false,
+     "bundle/read": false
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "An explicit bundle guide read matches an orchestrator hint in the bundle root",
+   "summary_out": "Current selection uses the same topic or an explicit root guide read. Confirmed judgments are unchanged."
+  },
+  {
+   "id": "C150",
+   "group": "D",
+   "title": "A bundle guide read cannot borrow an orchestrator hint in one topic",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "J10 review: match hint and evidence in the same scope",
+   "disk": {
+    "dirs": [
+     "other/r1",
+     "bundle/made/r1",
+     "bundle/read/r1"
+    ],
+    "files": {
+     "other/r1/A.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "bundle/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/made/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/read/brief.md": {
+      "mtime": 250,
+      "size": 10
+     },
+     "bundle/made/r1/C.md": {
+      "mtime": 120,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "hints": {
+     "bundle/made": {
+      "ts": 90,
+      "calls": [],
+      "groups": []
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 200,
+     "first": 200,
+     "last": 250,
+     "run": 1,
+     "run_start": 200,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 300,
+     "first": 300,
+     "last": 310,
+     "run": 1,
+     "run_start": 300,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "reader"
+     },
+     "writes": [],
+     "reads": [
+      {
+       "path": "bundle/brief.md",
+       "ts": 310,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100,
+     "first": 100,
+     "last": 150,
+     "run": 1,
+     "run_start": 100,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "author"
+     },
+     "writes": [
+      {
+       "path": "bundle/made/r1/C.md",
+       "ts": 120,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [
+    "bundle/read"
+   ],
+   "expect": {
+    "listed": [
+     "bundle",
+     "other"
+    ],
+    "current": "other",
+    "placed": {
+     "A": null,
+     "B": {
+      "unit": "bundle",
+      "topic": null,
+      "why": "launch_peer",
+      "whys": [
+       "launch_peer",
+       "guide_read"
+      ],
+      "sure": false
+     },
+     "C": null
+    },
+    "closable": {
+     "other": false,
+     "bundle/made": false,
+     "bundle/read": false
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "A bundle guide read cannot borrow an orchestrator hint in one topic",
+   "summary_out": "Current selection uses the same topic or an explicit root guide read. Confirmed judgments are unchanged."
+  },
+  {
+   "id": "C151",
+   "group": "D",
+   "title": "A bundle launch-call placement without an explicit root guide read does not promote the bundle",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "J10 review: match hint and evidence in the same scope",
+   "disk": {
+    "dirs": [
+     "other/r1",
+     "bundle/made/r1",
+     "bundle/read/r1"
+    ],
+    "files": {
+     "other/r1/A.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "bundle/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/made/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/read/brief.md": {
+      "mtime": 250,
+      "size": 10
+     },
+     "bundle/made/r1/C.md": {
+      "mtime": 120,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "hints": {
+     "bundle": {
+      "ts": 90,
+      "calls": [
+       "reader"
+      ],
+      "groups": []
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 200,
+     "first": 200,
+     "last": 250,
+     "run": 1,
+     "run_start": 200,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 300,
+     "first": 300,
+     "last": 310,
+     "run": 1,
+     "run_start": 300,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "reader"
+     },
+     "writes": [],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100,
+     "first": 100,
+     "last": 150,
+     "run": 1,
+     "run_start": 100,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "author"
+     },
+     "writes": [
+      {
+       "path": "bundle/made/r1/C.md",
+       "ts": 120,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [
+    "bundle/read"
+   ],
+   "expect": {
+    "listed": [
+     "bundle",
+     "other"
+    ],
+    "current": "other",
+    "placed": {
+     "A": null,
+     "B": {
+      "unit": "bundle",
+      "topic": null,
+      "why": "launch_call",
+      "whys": [
+       "launch_call",
+       "launch_peer"
+      ],
+      "sure": false
+     },
+     "C": null
+    },
+    "closable": {
+     "other": false,
+     "bundle/made": false,
+     "bundle/read": false
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "A bundle launch-call placement without an explicit root guide read does not promote the bundle",
+   "summary_out": "Current selection uses the same topic or an explicit root guide read. Confirmed judgments are unchanged."
+  },
+  {
+   "id": "C152",
+   "group": "D",
+   "title": "The latest start belongs to an agent with evidence in the hinted scope",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "J10 review: match hint and evidence in the same scope",
+   "disk": {
+    "dirs": [
+     "other/r1",
+     "bundle/made/r1",
+     "bundle/read/r1"
+    ],
+    "files": {
+     "other/r1/A.md": {
+      "mtime": 220,
+      "size": 10
+     },
+     "bundle/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/made/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/read/brief.md": {
+      "mtime": 250,
+      "size": 10
+     },
+     "bundle/made/r1/C.md": {
+      "mtime": 120,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [],
+    "hints": {
+     "bundle/made": {
+      "ts": 90,
+      "calls": [],
+      "groups": []
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 280,
+     "first": 280,
+     "last": 290,
+     "run": 1,
+     "run_start": 280,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 220,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 300,
+     "first": 300,
+     "last": 310,
+     "run": 1,
+     "run_start": 300,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "reader"
+     },
+     "writes": [],
+     "reads": [
+      {
+       "path": "bundle/read/brief.md",
+       "ts": 310,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 100,
+     "first": 100,
+     "last": 150,
+     "run": 1,
+     "run_start": 100,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "m1",
+      "call": "author"
+     },
+     "writes": [
+      {
+       "path": "bundle/made/r1/C.md",
+       "ts": 120,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "D",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 250,
+     "first": 250,
+     "last": 260,
+     "run": 1,
+     "run_start": 250,
+     "launch": null,
+     "writes": [],
+     "reads": [
+      {
+       "path": "bundle/made/brief.md",
+       "ts": 260,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [
+    "bundle/read"
+   ],
+   "expect": {
+    "listed": [
+     "bundle",
+     "other"
+    ],
+    "current": "other",
+    "placed": {
+     "A": null,
+     "B": {
+      "unit": "bundle",
+      "topic": null,
+      "why": "launch_peer",
+      "whys": [
+       "launch_peer",
+       "guide_read"
+      ],
+      "sure": false
+     },
+     "C": null,
+     "D": {
+      "unit": "bundle",
+      "topic": "bundle/made",
+      "why": "guide_read",
+      "whys": [
+       "guide_read"
+      ],
+      "sure": false
+     }
+    },
+    "closable": {
+     "other": false,
+     "bundle/made": false,
+     "bundle/read": false
+    },
+    "diag": []
+   },
+   "then": [],
+   "summary_in": "The latest start belongs to an agent with evidence in the hinted scope",
+   "summary_out": "Current selection uses the same topic or an explicit root guide read. Confirmed judgments are unchanged."
   }
  ]
 }
