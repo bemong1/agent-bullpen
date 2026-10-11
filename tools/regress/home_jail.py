@@ -117,8 +117,8 @@ class Jail:
     def __init__(self, entries, cap, mode='replay', passthrough=(), writable=(), record_roots=()):
         assert mode in ('replay', 'trace')
         self.entries, self.cap, self.mode = entries, cap, mode
-        self.passthrough = tuple(os.path.normpath(p) for p in passthrough if p)
-        self.writable = tuple(os.path.normpath(p) for p in writable if p)
+        self.passthrough = self.spellings(passthrough)
+        self.writable = self.spellings(writable)
         self.record_roots = tuple(os.path.normpath(p) for p in record_roots if p)
         self.misses = {}                        # (kind, path, func) -> count
         self.touched = {}                       # trace mode: original absolute path -> {'funcs': set, 'read': bool, 'listed': bool}
@@ -128,6 +128,22 @@ class Jail:
         self.dirfds = {}                        # fd of a folder opened through the jail -> its ORIGINAL path (a name given with dir_fd=fd is taken from there)
         self.installed = False
         self.cwd = os.getcwd()
+        self.real_roots = ()
+        roots = []
+        for p in set(self.passthrough + self.writable):
+            status, final, _entry = self.walk(p)
+            roots.append((p, final if status == 'ok' else os.path.realpath(p)))
+        self.real_roots = tuple(sorted(roots, key=lambda pair: -len(pair[0])))
+
+    @staticmethod
+    def spellings(paths):
+        """Remember both names before installing the jail: /var and /private/var may be one folder."""
+        out = []
+        for p in paths:
+            if p:
+                n = os.path.abspath(p)
+                out.extend((n, os.path.realpath(p)))
+        return tuple(dict.fromkeys(out))
 
     # ---------- notes ----------
     def miss(self, kind, path, func):
@@ -172,11 +188,23 @@ class Jail:
     def is_pass(self, p):
         """Whether a path is the real disk: under a pass-through folder, and not a path the capture holds (what the capture has is its answer even below a folder that is let through)."""
         n = posixpath.normpath(p)
-        return n not in self.entries and any(under(n, r) for r in self.passthrough + self.writable)
+        return n not in self.entries and self.allowed_path(n) not in self.entries and any(under(n, r) for r in self.passthrough + self.writable)
+
+    def allowed_path(self, p):
+        """Replace only known root aliases, without consulting the live disk after installation."""
+        for root, real in self.real_roots:
+            if under(p, root):
+                return posixpath.join(real, p[len(root):].lstrip('/')) if p != root else real
+        return p
 
     def is_writable(self, p):
         n = posixpath.normpath(p)
         return any(under(n, r) for r in self.writable)
+
+    def is_way_to_output(self, p):
+        """Allow existence checks on uncaptured output ancestors, as makedirs needs; no reads or writes."""
+        n = posixpath.normpath(p)
+        return n not in self.entries and any(r != n and under(r, n) for r in self.writable)
 
     def in_records(self, p):
         return any(under(p, r) for r in self.record_roots)
@@ -184,7 +212,9 @@ class Jail:
     def walk(self, path, follow=True):
         """(status, final path, entry): status 'ok' (the entry is that of `final`), 'err' (`entry` is the errno to raise), 'miss' (the capture does not say; `final` is the path as far as it was resolved plus the rest),
         'live' (trace mode: a place the live disk answers). Components are taken in the original path space: `..` goes up from where the links led, a link is read from its entry."""
-        comps = self.absolute(path).split('/')
+        absolute = self.absolute(path)
+        # An explicitly captured link must still answer lstat as a link, even at an allowed root.
+        comps = (absolute if absolute in self.entries else self.allowed_path(absolute)).split('/')
         stack, i, hops = [], 0, 0
         while i < len(comps):
             c = comps[i]
@@ -261,7 +291,11 @@ class Jail:
         path = self.rooted(path, dir_fd)
         if path is None:
             return self.real['stat'](orig, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
-        if self.is_pass(self.absolute(path)):
+        a = self.absolute(path)
+        # A caller's uncaptured root alias keeps its own link metadata, while its contents use the capture.
+        if not follow_symlinks and a not in self.entries and a in self.passthrough + self.writable and self.allowed_path(a) != a:
+            return self.real['stat'](path, follow_symlinks=False)
+        if self.is_pass(self.absolute(path)) or self.is_way_to_output(self.absolute(path)):
             return self.real['stat'](path, follow_symlinks=follow_symlinks)
         final, e = self.resolve(path, 'stat' if follow_symlinks else 'lstat', follow_symlinks)
         if final is None:
@@ -350,7 +384,7 @@ class Jail:
         if path is None:
             return self.real['access'](orig, mode, dir_fd=dir_fd, effective_ids=effective_ids, follow_symlinks=follow_symlinks)
         a = self.absolute(path)
-        if self.is_pass(a):
+        if self.is_pass(a) or self.is_way_to_output(a):
             return self.real['access'](path, mode, effective_ids=effective_ids, follow_symlinks=follow_symlinks)
         try:
             final, e = self.resolve(a, 'access', follow_symlinks)

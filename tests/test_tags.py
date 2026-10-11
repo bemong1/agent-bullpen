@@ -14,6 +14,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from compat import server  # noqa: E402
@@ -26,16 +27,10 @@ NAMES = (b'BULLPEN_ROOM', b'BULLPEN_SEAT')
 
 
 def wait_for_exec(p):
-    """Until the child is the program it was started as (before that it still has the environment of the process that made it)."""
-    deadline = time.time() + 10
-    while time.time() < deadline and procs.has_proc():
-        try:
-            with open('/proc/%d/cmdline' % p.pid, 'rb') as f:
-                if f.read().startswith(sys.executable.encode()):
-                    return
-        except OSError:
-            pass
-        time.sleep(0.02)
+    """The child signals after exec on every OS; ps must not cache its pre-exec command."""
+    if p.stdout.readline() != b'ready\n':
+        raise AssertionError('the tag process did not start')
+    procs.reset()
 
 
 class Names(unittest.TestCase):
@@ -51,7 +46,8 @@ class EnvironOfAProcess(unittest.TestCase):
     def spawn(self, **env):
         base = {k: v for k, v in os.environ.items() if not k.startswith('BULLPEN_')}
         base.update(env)
-        p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], env=base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        p = subprocess.Popen([sys.executable, '-c', "import time; print('ready', flush=True); time.sleep(60)"], env=base, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.addCleanup(p.stdout.close)
         self.addCleanup(lambda: (p.terminate(), p.wait()))
         wait_for_exec(p)
         return p
@@ -147,7 +143,8 @@ class TagBase(unittest.TestCase):
     def spawn(self, **env):
         base = {k: v for k, v in os.environ.items() if not k.startswith('BULLPEN_')}
         base.update(env)
-        p = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], env=base, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        p = subprocess.Popen([sys.executable, '-c', "import time; print('ready', flush=True); time.sleep(60)"], env=base, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        self.addCleanup(p.stdout.close)
         self.addCleanup(lambda: (p.terminate(), p.wait()))
         wait_for_exec(p)
         return p
@@ -508,6 +505,29 @@ class InheritedFromTheLauncher(TagBase):
         self.s._cli_procs[a.id] = RS.Proc(False)
         self.s.spawn_cmds.pop('tc1')                                                                # (the text of the command is gone: only what the environment said is left)
         self.assertEqual(self.tag(a, 'done'), Tag(self.talk, None, 'environ', None))
+
+
+class InheritedFromTheLauncherWithoutProc(InheritedFromTheLauncher):
+    """Run the same inheritance judgments with macOS ps tables and no host processes."""
+
+    def setUp(self):
+        super().setUp()
+        from tools.scenarios.observe import ps_stub
+        self.process_specs = []
+        patches = (mock.patch.object(procs, 'PROC', os.path.join(self.root, 'no-proc')),
+                   mock.patch.object(procs, 'subprocess', ps_stub(self.process_specs)))
+        for patch in patches:
+            patch.start()
+            self.addCleanup(patch.stop)
+        procs.reset()
+        self.addCleanup(procs.reset)
+
+    def spawn(self, **env):
+        import types
+        pid = 1000 + len(self.process_specs)
+        self.process_specs.append(dict(pid=pid, ppid=1, argv=['python', 'tag-sleeper'], env=env))
+        procs.reset()
+        return types.SimpleNamespace(pid=pid)
 
 
 class CodexExecPieces(TagBase):

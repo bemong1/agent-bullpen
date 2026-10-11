@@ -851,6 +851,8 @@ class BuilderMatchesPlan(unittest.TestCase):
         for c in run.select():
             if c.bundle not in ('deb', 'cpl') or int(axes.digest(c.id, n=4), 16) % 4:
                 continue
+            if build.needs_two_names_by_case(c) and build.folds_case(self.root):
+                continue                                     # use the same filesystem capability rule as run_case
             b = build.build_case(c, os.path.join(self.root, axes.digest(c.id, n=10)))
             v = dict(c.v) if c.bundle == 'deb' else dict(c.v, kind='cli', role='writer', nstyle='plain', structure='single', rdir='r1', homonym='none', decl='yes')
             status = oracle.life_state(v['kind'], v['life'], 'just_ended', v['os'] == 'mac_nops')[0]
@@ -2014,6 +2016,13 @@ class CaseFoldingFileSystem(unittest.TestCase):
         doc = {'cells': {'deb:gone': {'seat.cell': ['miss', 'done', 'missing', 'D-DEBATE']}}}
         self.assertEqual(run.compare_xfail([], doc, skipped={'deb:gone'}), [])
         self.assertEqual(len(run.compare_xfail([], doc)), 1)
+
+    def test_the_builder_plan_check_uses_the_same_filesystem_capability(self):
+        test = BuilderMatchesPlan('test_the_debate_scenes')
+        result = unittest.TestResult()
+        with mock.patch.object(build, 'folds_case', return_value=True):
+            unittest.TestSuite([test]).run(result)
+        self.assertEqual((result.errors, result.failures), ([], []))
 
     def test_the_probe(self):
         with tempfile.TemporaryDirectory(prefix='scen-probe-') as d:
@@ -4176,6 +4185,20 @@ class StrictXfail(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='scen-a-') as ra, tempfile.TemporaryDirectory(prefix='scen-b-') as rb:
             a, ea = run.run_all(cases, ra)
             b, eb = run.run_all(cases, rb)
+        self.assertEqual((ea, eb), ([], []))
+        key = lambda cells: sorted((c.case, c.role, c.field, c.result, repr(c.ws), repr(c.gs)) for c in cells)
+        self.assertEqual(key(a), key(b))
+
+    def test_alias_roots_leave_the_scenario_answers_unchanged(self):
+        with tempfile.TemporaryDirectory(prefix='scen-alias-') as root:
+            real = os.path.join(os.path.realpath(root), 'private', 'var')
+            os.makedirs(real)
+            alias = os.path.join(root, 'var')
+            os.symlink('private/var', alias)
+            # Include the debate, orchestrator-write and coupling bundles that failed on macOS.
+            cases = [c for c in run.select() if c.bundle in ('deb', 'owr', 'cpl')][::11]
+            a, ea = run.run_all(cases, real)
+            b, eb = run.run_all(cases, alias)
         self.assertEqual((ea, eb), ([], []))
         key = lambda cells: sorted((c.case, c.role, c.field, c.result, repr(c.ws), repr(c.gs)) for c in cells)
         self.assertEqual(key(a), key(b))

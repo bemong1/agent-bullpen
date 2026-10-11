@@ -325,7 +325,7 @@ class Registry:
         try:
             views.state(s)
         except Exception as e:   # noqa: BLE001 — a warm-up must never matter
-            print('warm-up error', s.id, type(e).__name__, e, flush=True)
+            print('warm-up error', getattr(s, 'id', 'unknown'), type(e).__name__, e, flush=True)
         finally:
             LATER.open()                      # the first picture is out (or will cost what it costs): what waited for it may start
 

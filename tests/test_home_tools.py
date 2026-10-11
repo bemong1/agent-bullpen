@@ -160,9 +160,23 @@ class CaptureBuilder(unittest.TestCase):
     def test_the_root_and_a_listing_of_it_do_not_break_the_walk(self):
         cap = home_freeze.Capture(self.out)
         self.assertEqual(cap.ensure('/'), '/')
-        self.assertEqual(cap.ensure('/tmp/..'), '/')
+        os.makedirs(os.path.join(self.live, 'sub'))
+        self.assertEqual(cap.ensure(os.path.join(self.live, 'sub', '..')), self.live)
         cap.listing('/', with_children=False)                                                          # a trace may have listed it
         self.assertIsNotNone(cap.entries['/']['names'])
+
+    def test_dot_dot_after_a_link_uses_the_targets_parent(self):
+        world = os.path.join(self.live, 'world')
+        os.makedirs(os.path.join(world, 'private', 'tmp', 'x'))
+        os.symlink('private/tmp', os.path.join(world, 'tmp'))
+        cap = home_freeze.Capture(self.out)
+        self.assertEqual(cap.ensure(world + '/tmp/..'), world + '/private')
+        self.assertEqual(cap.ensure(world + '/tmp/x'), world + '/private/tmp/x')
+        self.assertEqual(cap.entries[world + '/tmp']['t'], 'link')
+        cap.write_disk(())
+        res = home_diff.Resolver(self.out)
+        self.assertEqual(res.folder(world + '/tmp/x'), world + '/private/tmp/x')
+        self.assertEqual(res.folder(world + '/tmp/..'), world + '/private')
 
     def test_the_account_files_are_never_looked_at(self):
         for rel in ('.claude/.credentials.json', '.codex/auth.json', '.codex/state.sqlite', '.claude.json'):
@@ -279,12 +293,18 @@ class Projection(unittest.TestCase):
 class FreezeAndReplay(unittest.TestCase):
     """A board on a synthetic HOME, frozen over HTTP (GET only), replayed twice with the code of this repository."""
 
+    LINKED = False
+
     @classmethod
     def setUpClass(cls):
         cls.py = newer_python()
         if cls.py is None:
             raise unittest.SkipTest('the replay needs Python 3.11 or later (set HOME_TOOLS_PYTHON)')
         cls.tmp = tempfile.mkdtemp(prefix='home-e2e-')
+        if cls.LINKED:
+            cls.real_tmp = cls.tmp
+            cls.tmp += '-alias'
+            os.symlink(cls.real_tmp, cls.tmp)
         cls.home = os.path.join(cls.tmp, 'home')
         cls.info = synth_home.build(cls.home)
         cls.live_before = tree_hash(cls.info['home'])
@@ -322,7 +342,9 @@ class FreezeAndReplay(unittest.TestCase):
                 proc.wait()
         if getattr(cls, 'log', None) is not None:
             cls.log.close()
-        shutil.rmtree(getattr(cls, 'tmp', ''), ignore_errors=True)
+        if cls.LINKED and os.path.islink(getattr(cls, 'tmp', '')):
+            os.unlink(cls.tmp)
+        shutil.rmtree(getattr(cls, 'real_tmp', getattr(cls, 'tmp', '')), ignore_errors=True)
 
     def replay(self, name):
         out = os.path.join(self.tmp, name)
@@ -428,6 +450,14 @@ def events(*paths, ts=100, evidence='tool', ok=True, sure=True):
 
 
 KEY = 'R|T|r1|X'
+
+
+class FreezeAndReplayThroughALink(FreezeAndReplay):
+    """Replay the same capture when its input and output folders are spelled through a link."""
+    LINKED = True
+
+    def test_the_temporary_folder_has_two_spellings(self):
+        self.assertNotEqual(self.tmp, os.path.realpath(self.tmp))
 
 
 class ToolWrites(unittest.TestCase):

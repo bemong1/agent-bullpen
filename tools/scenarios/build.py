@@ -201,6 +201,8 @@ class Built:
     """What the builder hands to the oracle-free observer: paths, ids, phases."""
 
     def __init__(self, case, root):
+        # The board records real paths; fixture metadata must name the same folders on macOS too.
+        root = os.path.realpath(root)
         self.case, self.root = case, root
         self.home = os.path.join(root, 'home')
         self.claude = os.path.join(self.home, '.claude')

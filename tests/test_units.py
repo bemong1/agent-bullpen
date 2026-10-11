@@ -218,6 +218,32 @@ class FileRounds(Fixture):
 
 
 class FileRoundCollisions(Fixture):
+    def setUp(self):
+        super().setUp()
+        self.report_names = set()
+        probe = U._probe
+
+        def case_sensitive_listing(op, arg, prefix=None):
+            answer = probe(op, arg, prefix)
+            if op == 'list' and answer is not None:
+                # Model distinct directory entries even when APFS cannot create both case variants.
+                names = {(os.path.basename(p), 'f') for p in self.report_names if os.path.dirname(p) == arg}
+                return tuple(sorted(set(answer) | names))
+            return answer
+        patch = mock.patch.object(U, '_probe', case_sensitive_listing)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def file(self, *args, **kwargs):
+        path = super().file(*args, **kwargs)
+        self.report_names.add(path)
+        return path
+
+    def remove_report(self, path):
+        self.report_names.discard(path)
+        if os.path.exists(path):
+            os.unlink(path)
+
     def test_collision_diagnostics_keep_each_nested_group_and_its_paths(self):
         from judge_support import tag
         names = ('X/A.MD', 'X/A.md', 'Y/A.MD', 'Y/A.md')
@@ -282,7 +308,7 @@ class FileRoundCollisions(Fixture):
                 self.assertFalse(jd.closable[self.p('talk')])
                 self.assertEqual(jd.worked, {a: {self.p('talk')} for a in 'ABC'})
             for path in paths:
-                os.unlink(path)
+                self.remove_report(path)
 
     def test_prefix_aliases_hold_the_seat_after_every_author_finishes(self):
         paths, authors, final = self.collision(('r1_a.md', 'round1_a.md', 'round1_b.md'), running=False)
@@ -311,7 +337,7 @@ class FileRoundCollisions(Fixture):
         jd = self.assign(a, b)
         self.assertEqual(jd.finals[self.p('talk')].why, ['several'])
         self.assertEqual(set(jd.finals[self.p('talk')].candidates), {upper, lower})
-        os.unlink(lower)
+        self.remove_report(lower)
         jd = self.assign(a, agent('B', writes=[wr(y, 210)]))
         self.assertEqual((jd.finals[self.p('talk')].confirmed, jd.finals[self.p('talk')].path), (True, upper))
 

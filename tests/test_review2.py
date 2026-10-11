@@ -357,15 +357,18 @@ class F07RegistryFailure(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         record = os.path.join(tmp.name, '%s.jsonl' % self.SID)           # a record that is there: only a regular file is opened as a session
         open(record, 'w').close()
-        with patched(Session=Flaky), mock.patch.object(server.LINKS, 'ready', ready), \
+        warmed = threading.Event()
+        with patched(Session=Flaky), mock.patch.object(reg, '_warm', side_effect=lambda s: warmed.set()), mock.patch.object(server.LINKS, 'ready', ready), \
                 mock.patch('glob.glob', lambda pat: [record]):
             with self.assertRaises(OSError):
                 reg.get(self.SID)
             self.assertEqual(reg.sessions, {})
             self.assertEqual(reg.loading, {})
+            self.assertFalse(warmed.is_set())
             s = reg.get(self.SID)                                  # the next request opens it anew
             self.assertIs(reg.sessions[self.SID], s)
             self.assertIs(reg.get(self.SID), s)
+            self.assertTrue(warmed.wait(5))                      # the owned thread finishes before its test doubles are removed
         self.assertEqual(len(tries), 2)
 
 

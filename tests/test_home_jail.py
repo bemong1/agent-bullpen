@@ -380,6 +380,22 @@ class PassThroughData(unittest.TestCase):
         self.assertEqual((r['live_only'], r['never']), ('refused', 'refused'))
         self.assertEqual({os.path.basename(m['path']) for m in out['misses'] if m['kind'] == 'lookup'}, set())       # the listing of the capture says they are not there: an answer, not a miss
 
+    def test_capture_entries_override_an_alias_passthrough_root(self):
+        alias = os.path.join(self.fx.work, 'code-alias')
+        os.symlink(self.code, alias)
+        for captured_root in (False, True):
+            with self.subTest(captured_root=captured_root):
+                if captured_root:
+                    self.fx.freeze(alias, content=False)
+                    os.unlink(alias)
+                    os.symlink(self.fx.out, alias)             # a captured link keeps its original target
+                body = '''
+                    result = [open(%(alias)r + '/docs/review/x.md').read(), os.listdir(%(alias)r + '/docs/review'), os.path.islink(%(alias)r)]
+                ''' % {'alias': alias}
+                out = self.fx.run(body, **{'pass': [alias]})
+                self.assertEqual(out['result'], ['captured document', ['x.md'], True])
+                self.assertEqual(out['total'], 0)
+
     def test_a_path_the_capture_has_no_word_on_is_a_miss_even_below_the_code_folder(self):
         fx = self.fx
         other = os.path.join(self.code, 'docs', 'unlisted')
@@ -424,6 +440,29 @@ class WriteBoundary(unittest.TestCase):
         out = self.fx.run(body)
         self.assertEqual(out['result'], ['{"v": "new"}', True])
         self.assertEqual(out['total'], 0)
+
+    def test_output_aliases_allow_makedirs_without_opening_the_parent(self):
+        fx = self.fx
+        alias = os.path.join(fx.work, 'var')
+        os.symlink(fx.out, alias)
+        output = os.path.join(alias, 'new-output')
+        body = '''
+            os.makedirs(%(output)r + '/nested', exist_ok=True)
+            with open(%(output)r + '/nested/result', 'w') as f:
+                f.write('ok')
+            r = [open(%(real)r + '/nested/result').read()]
+            for action in (lambda: os.listdir(%(alias)r), lambda: open(%(alias)r + '/outside', 'w')):
+                try:
+                    action()
+                    r.append('allowed')
+                except (FileNotFoundError, PermissionError):
+                    r.append('refused')
+            result = r
+        ''' % {'output': output, 'real': os.path.join(fx.out, 'new-output'), 'alias': alias}
+        out = fx.run(body, writable=[output])
+        self.assertEqual(out['result'], ['ok', 'refused', 'refused'])
+        self.assertEqual({m['kind'] for m in out['misses']}, {'lookup', 'write'})
+
 
     def test_writes_anywhere_else_are_refused(self):
         mirror = os.path.join(self.fx.cap, 'root', self.live_file.lstrip('/'))

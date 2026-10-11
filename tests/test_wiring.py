@@ -894,6 +894,13 @@ class LaterGate(DebateFixture):
             catalog.Registry._warm(mock.Mock(id='x'))
         self.assertTrue(later.is_open())
 
+    def test_the_registry_warm_up_error_handler_needs_no_session_attributes(self):
+        later, fake = self.gate()
+        with mock.patch.object(catalog, 'LATER', later), mock.patch.object(catalog.views, 'state', side_effect=RuntimeError('boom')), mock.patch('builtins.print') as report:
+            catalog.Registry._warm(object())
+        self.assertTrue(later.is_open())
+        report.assert_called_once_with('warm-up error', 'unknown', 'RuntimeError', mock.ANY, flush=True)
+
     def test_the_walk_waits_for_the_gate(self):
         a = os.path.join(self.rev, 'r1', 'A.md')
         self.agent(1, 'A writer', 'Write your round 1 report to `%s`.' % a, [('write', a)])

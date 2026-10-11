@@ -16,6 +16,7 @@ def fixture(root, missing=False, uppercase=False):
     scene = Cxo(b)
     top = scene.root('top', 'codex-tui', b.T(0), 'Review the options.')
     unit = os.path.join(scene.W, 'file-rounds')
+    command_unit = os.path.join(root, os.path.relpath(unit, b.root))
     for i, seat in enumerate('abc'):
         sub = scene.sub(seat, top, b.T(10 + i * 5), 'review_' + seat, 'Reviewer', 1, 'Review the options.', b.T(0))
         turn = scene.turn_of(sub.tid)
@@ -24,11 +25,12 @@ def fixture(root, missing=False, uppercase=False):
                 continue
             path = os.path.join(unit, ('ROUND%d_%s.MD' if uppercase else 'round%d_%s.md') % (n, seat))
             at = b.T(30 + n * 10 + i)
-            sub.shell(at, "printf report > '%s'" % path, scene.W, 'write-%s-%d' % (seat, n), turn, end=at + 0.5, out_at=at + 0.6)
+            command_path = os.path.join(command_unit, os.path.basename(path))
+            sub.shell(at, "printf report > '%s'" % command_path, scene.W, 'write-%s-%d' % (seat, n), turn, end=at + 0.5, out_at=at + 0.6)
             build.put(path, 'report', at + 0.2)
         path = os.path.join(unit, ('final_%s.MD' if uppercase and seat == 'a' else 'final_%s.md') % seat)
         at = b.T(70 + i)
-        sub.shell(at, "printf final > '%s'" % path, scene.W, 'final-' + seat, turn, end=at + 0.5, out_at=at + 0.6)
+        sub.shell(at, "printf final > '%s'" % os.path.join(command_unit, os.path.basename(path)), scene.W, 'final-' + seat, turn, end=at + 0.5, out_at=at + 0.6)
         build.put(path, 'final', at + 0.2)
         sub.complete(b.T(80 + i), turn, 'Finished.')
     top.complete(b.T(90), scene.turn_of(top.tid), 'Finished.')
@@ -54,6 +56,24 @@ def snapshot(b):
 
 
 class RecordedFileRounds(unittest.TestCase):
+    def test_an_alias_root_and_aliased_commands_keep_the_same_seats(self):
+        with tempfile.TemporaryDirectory() as root:
+            real = os.path.join(os.path.realpath(root), 'private', 'var')
+            os.makedirs(real)
+            alias = os.path.join(root, 'var')
+            os.symlink('private/var', alias)
+            for uppercase, missing in ((False, False), (True, False), (False, True)):
+                with self.subTest(uppercase=uppercase, missing=missing):
+                    folder = os.path.join(alias, '%s-%s' % (uppercase, missing))
+                    b = fixture(folder, uppercase=uppercase, missing=missing)
+                    self.assertEqual(b.root, os.path.realpath(folder))
+                    got = snapshot(b)
+                    tp = got['state']['debates'][0]['topics'][0]
+                    cells = [c for r in tp['rows'] for c in r['cells']]
+                    self.assertEqual(sum(c['state'] == 'done' for c in cells), 5 if missing else 6)
+                    self.assertTrue(all(p == real for p, real in got['allowed'].items()))
+                    self.assertTrue(all(c['owner'] == b.ids[r['p']] for r in tp['rows'] for c in r['cells'] if c['state'] == 'done'))
+
     def test_uppercase_file_rounds_are_collected_and_keep_their_write_history(self):
         with tempfile.TemporaryDirectory() as root:
             b = fixture(root, uppercase=True)

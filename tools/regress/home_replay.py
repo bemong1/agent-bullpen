@@ -171,7 +171,7 @@ def fresh_cache(src, dst):
 def run(code, cap, out_json, mode='replay', touched_out=None, raw=True, walk_budget=30.0, only=None, details_mode='all', debug=False):
     if sys.version_info < (3, 11):
         raise SystemExit('home_replay needs Python 3.11 or later (3.12 is what the contract names): pathlib reaches the disk through os.* only from 3.11 on')
-    code, cap, out_json = (os.path.abspath(p) for p in (code, cap, out_json))
+    code, cap, out_json = (os.path.realpath(p) for p in (code, cap, out_json))
     manifest, proc = load_json(os.path.join(cap, 'manifest.json')), load_json(os.path.join(cap, 'proc.json'))
     T = float(manifest['T'])
     run_dir = out_json + '.run'

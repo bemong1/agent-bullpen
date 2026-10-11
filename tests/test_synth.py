@@ -109,12 +109,26 @@ def host_free_env(home, **extra):
     return env
 
 
+NO_PROC = r'''
+import os, runpy, sys
+root = sys.argv[1]
+sys.path.insert(0, root)
+from board import procs
+procs.PROC = '/nonexistent-proc'
+sys.argv = [os.path.join(root, 'server.py')] + sys.argv[2:]
+runpy.run_path(sys.argv[0], run_name='__main__')
+'''
+
+
 class Board:
     """server.py started on a synthetic HOME. With guard=(log path, files that must not be opened) it runs under GUARD. On close it stops only this process."""
 
-    def __init__(self, home, orch, guard=None, args=(), timeout=60):
+    def __init__(self, home, orch, guard=None, args=(), timeout=60, no_proc=False):
         env = host_free_env(home, AGENT_BULLPEN_LANG='ko')      # the ready line below and the start output the tests read are Korean, whatever LANG the runner has
         cmd = [sys.executable, SERVER] if not guard else [sys.executable, '-c', GUARD, ROOT, guard[0], os.pathsep.join(guard[1])]
+        if no_proc:
+            assert not guard
+            cmd = [sys.executable, '-c', NO_PROC, ROOT]
         self.out = tempfile.TemporaryFile('w+')
         self.p = subprocess.Popen(cmd + ['--port', '0'] + list(args), stdout=self.out, stderr=subprocess.STDOUT, env=env, cwd=ROOT, stdin=subprocess.DEVNULL)
         self.orch, self.port = orch, None
@@ -912,6 +926,12 @@ class BusyLive(unittest.TestCase):
                               stderr=subprocess.STDOUT, env=dict(os.environ, PYTHONDONTWRITEBYTECODE='1'), timeout=60, universal_newlines=True)
 
     def test_working_and_stop_ends_every_fake_process(self):
+        self.check_working_and_stop()
+
+    def test_working_and_stop_without_proc(self):
+        self.check_working_and_stop(no_proc=True)
+
+    def check_working_and_stop(self, no_proc=False):
         r = self.cli('--busy', '--live')
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn('`codex`', r.stdout)
@@ -921,19 +941,20 @@ class BusyLive(unittest.TestCase):
                                                     for f in os.listdir(os.path.join(self.home, '.claude', 'sessions'))]
         self.assertEqual((len(live['procs']), len(pids)), (2, 4))
         self.assertEqual(sorted(synth_home.fake_cmdline(p) for p in pids), ['claude %d' % synth_home.LIVE_SECONDS] * 2 + ['codex %d' % synth_home.LIVE_SECONDS] * 2)
-        board = Board(self.home, synth_home.BUSY_ORCH)
+        board = Board(self.home, synth_home.BUSY_ORCH, no_proc=no_proc)
         self.addCleanup(board.close)
         st = board.get('/api/state')[1]
         self.assertEqual((st['session']['alive'], st['orch']['state']), (True, 'working'))
         ag = st['agents']
-        unknown = synth_home_codex_unknown(self.home)                    # no /proc (macOS): ps cannot say which rollout the fake codex process holds open
+        unknown = 1 if no_proc else synth_home_codex_unknown(self.home)   # ps cannot say which rollout the fake codex process holds open
         self.assertEqual(sum(a['status'] == 'running' for a in ag), 14 - 2 * unknown)
         self.assertEqual(sum(a['status'] == 'done' for a in ag), 19)
         self.assertEqual(sum(a['status'] in ('stalled', 'ended', 'failed', 'killed') for a in ag), 0)
         self.assertEqual({a['status'] for a in ag if a['provider'] == 'codex'}, {'unknown' if unknown else 'running'})     # an open turn + a process that has the rollout open (/proc)
         self.assertEqual(sum(a['status'] == 'running' for a in ag if not a['units'] and not a['placed']), 9 - unknown)         # 9 agents in the "Other work" room, one of them Codex
         states = [c['state'] for t in st['debates'][0]['topics'] for r in t['rows'] for c in r['cells']]
-        self.assertEqual((states.count('writing'), states.count('draft')), (1 - unknown, 2))                 # T3 round 2: a draft each for A and B, and the cell planned with -o for the Codex C. T5 round 1: A and B have no file, so no cell
+        # An unknown process may still be writing its planned output, just like a running one.
+        self.assertEqual((states.count('writing'), states.count('draft')), (1, 2))
         self.assertEqual(sorted(a['tag'] for a in ag if a['placed'] and a['status'] == 'running'), ['T5-A', 'T5-B'])     # they are thought to work in the bundle (the debate's own line)
         self.assertEqual([a['level'] for a in st['alerts']], ['check'])
         r = self.cli('--stop')

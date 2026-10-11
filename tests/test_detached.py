@@ -58,7 +58,9 @@ class EnvPrimitives(unittest.TestCase):
     def test_unreadable_is_unknown(self):
         for bad in (None, -1, 0, True, 'x', 10 ** 9):
             self.assertIsNone(procs.env_values(bad, (b'A',)))
-        self.assertIsNone(procs.env_values(1, (b'A',)))                          # init's environ cannot be read (another user)
+        # Permission depends on the host/container; simulate an unreadable process instead.
+        with mock.patch.object(procs, 'has_proc', return_value=True), mock.patch('builtins.open', side_effect=PermissionError):
+            self.assertIsNone(procs.env_values(1, (b'A',)))
 
     def test_pick_env_anchoring(self):
         self.assertEqual(procs._pick_env(b'A=1\0CLAUDE_PID=7\0XCLAUDE_PID=8\0', (b'CLAUDE_PID',), True), {'CLAUDE_PID': '7'})

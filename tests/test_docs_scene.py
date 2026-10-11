@@ -20,6 +20,8 @@ from test_synth import Board, reap, start_live, synth_home_codex_unknown, tree_d
 
 
 class DocsScene(unittest.TestCase):
+    NO_PROC = False
+
     @classmethod
     def setUpClass(cls):
         # Every resource gets its cleanup as soon as it exists: a setUpClass that fails half way is not followed by tearDownClass, and the server and the fake processes would stay.
@@ -29,7 +31,7 @@ class DocsScene(unittest.TestCase):
         cls.home = cls.info['home']
         cls.pids, cls.procs = start_live(cls.info)
         cls.addClassCleanup(lambda: (synth_home.stop_live(cls.home, quiet=True), reap(cls.procs)))
-        cls.board = Board(cls.home, cls.info['orch'])
+        cls.board = Board(cls.home, cls.info['orch'], no_proc=cls.NO_PROC)
         cls.addClassCleanup(cls.board.close)
         end = time.time() + 30                                  # the first seconds after the start show the `claude -p` runs a live process or an environment places, without the call that started them (the sub-agents' records are read after the first screen): wait for it
         cls.state, why = None, 'no answer'
@@ -50,7 +52,7 @@ class DocsScene(unittest.TestCase):
             time.sleep(0.5)
         if cls.state is None:
             raise AssertionError('/api/state gave no state in 30 s (%s); the server printed:\n%s' % (why, cls.board.text()))
-        cls.unknown = synth_home_codex_unknown(cls.home)         # no /proc (macOS): the Codex seat of T3 cannot be told from a fake process
+        cls.unknown = 1 if cls.NO_PROC else synth_home_codex_unknown(cls.home)
 
     def topics(self):
         return {t['dir'].rsplit('/', 1)[1][:2].upper(): t for t in self.state['debates'][0]['topics']}
@@ -73,7 +75,8 @@ class DocsScene(unittest.TestCase):
         self.assertTrue(4 <= len(resting) <= 6, resting)
         self.assertEqual(sorted(by_id[i]['status'] for i in resting), ['done'] * 4 + ['interrupted'] * 2)
         cells = {k: [c['state'] for r in t[k]['rows'] for c in r['cells']] for k in t}
-        self.assertEqual((cells['T3'].count('draft'), cells['T3'].count('writing')), (2, 1 if not self.unknown else 0))      # round 2: A and B have a draft on disk, the Codex seat is asked to save with -o
+        # The Codex seat is asked to save with -o; unknown is still potentially working.
+        self.assertEqual((cells['T3'].count('draft'), cells['T3'].count('writing')), (2, 1))
         self.assertEqual(cells['T6'], ['draft'])
         self.assertEqual(cells['T7'], ['draft'])
         self.assertEqual(cells['T5'].count('draft'), 2)
@@ -110,6 +113,15 @@ class DocsScene(unittest.TestCase):
                 self.assertNotIn(real.encode(), data, name)
             if len(user) > 3 and '/%s/' % user not in home:
                 self.assertNotIn(('/%s/' % user).encode(), data, name)
+
+
+class DocsSceneWithoutProc(DocsScene):
+    """Read the same scene through ps, as on macOS, including the unknown Codex seat."""
+    NO_PROC = True
+
+    def test_the_codex_seat_has_unknown_process_status(self):
+        codex = [a for a in self.state['agents'] if a['provider'] == 'codex']
+        self.assertEqual([a['status'] for a in codex], ['unknown'])
 
 
 if __name__ == '__main__':
