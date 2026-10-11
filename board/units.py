@@ -584,7 +584,7 @@ class Judgement:
     assignments: List[Assignment] = field(default_factory=list)
     diag: List[dict] = field(default_factory=list)
     folded: Dict[str, List[str]] = field(default_factory=dict)                      # a folder -> the copies of it that are not shown
-    unit_ts: Dict[str, float] = field(default_factory=dict)                         # a unit or room -> the latest start of an agent tied to it for sure and the time of a hint (the last activity)
+    unit_ts: Dict[str, float] = field(default_factory=dict)                         # root -> the latest sure or J10-eligible agent start and hint time (the last activity)
     bound: Dict[str, Set[str]] = field(default_factory=dict)                        # a unit or room -> the agents tied to it for sure
 
 
@@ -1419,10 +1419,21 @@ class _Judge:
             R = self.root_of(U)
             fr = jd.finals.get(R) if R != U and R in roots else None
             jd.closable[U] = bool((jd.finals[U].confirmed or (fr is not None and fr.confirmed)) and not self._live[U])
+        # J10: an orchestrator-made debate with an open guide reader or launch placement competes before its first report. This changes only the default selection.
+        active = collections.defaultdict(list)
+        for aid, p in jd.placed.items():
+            a = self.by_id[aid]
+            if not p.sure and a.status in OPEN and {'guide_read', 'launch_call'} & set(p.whys) and \
+                    any('hint' in why.get(U, ()) and (p.topic is None or p.topic == U) for U in roots[p.unit]):
+                active[p.unit].append(a.start or 0)
         # the order of the list
+        started = {}
         for R, us in roots.items():
-            jd.unit_ts[R] = max([self.by_id[i].start or 0 for U in us for i in bound.get(U, ())] + [self.hint_ts(U) for U in (*us, R)] + [0])
-        jd.order = sorted(roots, key=lambda R: (not any(bound.get(U) for U in (*roots[R], R)), R in jd.hinted, R in rooms and not rooms[R].sure, -jd.unit_ts[R], R))
+            starts = [self.by_id[i].start or 0 for U in (*us, R) for i in bound.get(U, ())] + active[R]
+            jd.unit_ts[R] = max(starts + [self.hint_ts(U) for U in (*us, R)] + [0])
+            started[R] = max(starts + [0]) if active[R] else jd.unit_ts[R]
+        jd.order = sorted(roots, key=lambda R: (not (any(bound.get(U) for U in (*roots[R], R)) or active[R]), R in jd.hinted and not active[R],
+                                               R in rooms and not rooms[R].sure, -started[R], R))
         jd.current = next((R for R in jd.order if not (R in rooms and not rooms[R].sure)), None)
         self._diagnostics(roots, topics)
         return jd

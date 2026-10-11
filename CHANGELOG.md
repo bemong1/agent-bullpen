@@ -4,6 +4,10 @@ Agent Bullpen is in **beta** (0.x): the formats it reads are the private on-disk
 
 ## 0.3.0 — debates from folders and real writes, not from sentences
 
+- Codex v2 native sub-agents are shown when the parent's `spawn_agent` used `fork_turns: "none"`; other v2 children stay hidden with a diagnostic.
+- Encrypted Codex messages show a short notice.
+- An orchestrator-created debate with open agents placed by its guide or launch call can be the current debate before its first report; the latest agent start wins among these candidates.
+
 The debate table, the rooms and the end of a topic are no longer judged from the words of an instruction, a brief or a report. They are judged from what the agents wrote and where, which the board already reads from the records, so the same record gives the same table in any language. Only the first heading of a brief, its table and the list of documents are still read, and only to be shown. The rules are in the [screen guide](docs/guide.md#how-debates-are-recognized).
 
 **What the judgment says now**
@@ -25,7 +29,7 @@ The debate table, the rooms and the end of a topic are no longer judged from the
 - The conclusion found by its words, so more "Closing not confirmed". A final in `final/` that the brief table names does not close a topic.
 - Python, `cp` and `mv` writes (a guess may say who wrote the file).
 
-**API.** `/api/state`: `agents[].placed`, `.launch`, `.room_tag` (`tag` stays the letter the page names the agent by), `.work_units`; `debates[].sure`, `.final`, `.placed`; `topics[].room_sure`, `.room_why`, `.placed`, `.closable`, `final {confirmed, path, rel, by, mtime, lines, why[], candidates[], scope, table_path}` (`final.exists` stays as an alias of `confirmed` and goes in 0.4.0); cells have `owner`, `editors`, `evidence`, `hint`, `previous`, `rdir` and the state `previous`; `rows[].role` is always empty. `/api/agent`: `write_events` (every write with `ok`, `proof`, `sure`), `run`, `placed`, `launch`, `room_tag`.
+**API.** `/api/state`: `agents[].placed`, `.launch`, `.room_tag` (`tag` stays the letter the page names the agent by), `.work_units`; `debates[].sure`, `.final`, `.placed`; `topics[].room_sure`, `.room_why`, `.placed`, `.closable`, `final {confirmed, path, rel, by, mtime, lines, why[], candidates[], scope, table_path}` (`final.exists` stays as an alias of `confirmed` and goes in 0.4.0); cells have `owner`, `editors`, `evidence`, `hint`, `previous`, `rdir` and the state `previous`; `rows[].role` is always empty. Report `key` values are lists of path components (unit folder, then the relative file path). Collision diagnostics carry a short `params.detail` and separate `params.paths`. `/api/agent`: `write_events` (every write with `ok`, `proof`, `sure`), `run`, `placed`, `launch`, `room_tag`.
 
 **Diagnostics.** Gone: `path_ambiguous`, `debate_in_misc`, `declaration_missing`. New: `launch_split`, `history_lost`. Kept: `seat_tie_held` (more than one agent could have been first to write a cell), `alias_collision` (`r01` and `r1` both there), `listing_capped`, and `path_unresolved` (a launch whose path could not be worked out).
 
@@ -74,7 +78,7 @@ The debate table, the rooms and the end of a topic are no longer judged from the
 - The instruction of a native sub-agent is encrypted in the transcript: its card names it by its path and says the instruction cannot be shown; nothing is matched on it.
 - A foreground `codex exec` that the orchestrator's shell started and that is still running has no command record yet (it is written when the command ends): it is linked by its environment or process, but it takes its seat in a debate table once its command has ended. Since 0.2.1 one whose report path is an absolute `-o` takes its seat while it runs on Linux; see 0.2.1 above.
 - A debate is found from the transcripts of the agents and from the repository the agents work in; the orchestrator's own writes to a folder (a `talk/brief.md` it makes before it starts anyone) do not find one by themselves. This is no longer so since 0.2.1: see 0.2.1 above for the folders an orchestrator's own writes list.
-- A Codex thread that is a sub-agent but whose transcript does not say where the history copied from its parent ends is not shown (`format_drift`).
+- A Codex thread that is a sub-agent but whose transcript does not say where the history copied from its parent ends is not shown (`format_drift`); partially resolved since 0.3.0.
 
 ## 0.1.0 — first public release
 

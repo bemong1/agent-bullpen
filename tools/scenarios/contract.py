@@ -568,7 +568,9 @@ class Judge:
             del roots[r]
         listed = sorted(roots)
         hinted = sorted(r for r, why in roots.items() if why == {'hint'})
-        order = sorted(roots, key=lambda r: (not self._bound_root(r), r in hinted, r in self.rooms and not self.rooms[r]['sure'], -self._last_ts(r), r))
+        active = {r: self._active_starts(r) for r in roots}
+        order = sorted(roots, key=lambda r: (not (self._bound_root(r) or active[r]), r in hinted and not active[r], r in self.rooms and not self.rooms[r]['sure'],
+                                            -self._last_ts(r, active[r]), r))
         return listed, hinted, order
 
     def written_debate(self, u):
@@ -582,9 +584,15 @@ class Judge:
     def _bound_root(self, root):
         return any(self.bound(a) & (set(self._topics_of(root)) | {root}) for a in self.agents)
 
-    def _last_ts(self, root):
+    def _active_starts(self, root):
+        """J10: an open placement by guide read or launch call competes only in an orchestrator-made topic. A peer alone does not."""
+        made = {u for u in self._topics_of(root) if u in self.orch['hints'] and self.written_debate(u)}
+        return [self.ids[aid]['start'] for aid, p in self.placed.items() if p and not p['sure'] and p['unit'] == root and self.ids[aid]['status'] in OPEN
+                and {'guide_read', 'launch_call'} & set(p['whys']) and (p['topic'] in made or p['topic'] is None and made)]
+
+    def _last_ts(self, root, active=()):
         ts = [a['start'] for a in self.agents if self.bound(a) & (set(self._topics_of(root)) | {root})]
-        ts += [h['ts'] for f, h in self.orch['hints'].items() if f == root or self.root_of(f) == root]
+        ts += list(active) if active else [h['ts'] for f, h in self.orch['hints'].items() if f == root or self.root_of(f) == root]
         return max(ts) if ts else 0
 
     def _hidden_copies(self, roots):

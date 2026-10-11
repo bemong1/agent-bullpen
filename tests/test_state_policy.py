@@ -169,6 +169,14 @@ class DiagParams(unittest.TestCase):
         self.assertEqual(self.params('proc_unknown', env='CLAUDE_CODE_SESSION_ID=' + self.SID), {})
         self.assertEqual(self.params('silent_live', pids=2), {})
 
+    def test_only_collision_diagnostics_carry_bounded_structured_paths(self):
+        paths = ['/SYNTH/' + 'long-folder/' * 10 + 'A.md', '/SYNTH/' + 'long-folder/' * 10 + 'A.MD']
+        self.assertEqual(self.params('alias_collision', paths=paths), {'paths': paths})
+        self.assertEqual(self.params('seat_tie_held', paths=paths), {})
+        self.assertEqual(self.params('made_up_code', paths=paths), {})
+        self.assertEqual(self.params('alias_collision', paths=paths + ['relative.md', '/bad\0path', '/bad\npath', 12, '/too/' + 'x' * 4096]), {'paths': paths})
+        self.assertEqual(self.params('alias_collision', paths=paths * 20), {'paths': (paths * 20)[:diag.LIST_MAX]})
+
     def test_a_text_that_does_not_have_the_shape_is_dropped(self):
         leak = '2.1.290 /SYNTH/private_note'
         self.assertEqual(self.params('format_drift', version=leak, what=['out_of_range:' + leak, 'marker_missing:cost-state']), {'what': ['marker_missing:cost-state']})

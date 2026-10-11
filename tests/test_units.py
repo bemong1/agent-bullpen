@@ -280,7 +280,8 @@ class FileRoundCollisions(Fixture):
                 self.assertEqual({c['path'] for r in topic['rows'] for c in r['cells'] if c['state'] != 'waiting'}, set(paths[2:]) | {min(paths[:2])})
                 reports = [p for r in topic['rows'] for c in r['cells'] for p in c['reports']]
                 self.assertEqual({p['path'] for p in reports}, set(paths))
-                self.assertEqual({tuple(p['key']) for p in reports}, set(jd.cells))
+                self.assertEqual({tuple(p['key']) for p in reports}, {(c.unit, *os.path.relpath(c.path, c.unit).split(os.sep)) for c in jd.cells.values()})
+                self.assertTrue(all('\0' not in part for p in reports for part in p['key']))
                 self.assertEqual({p['path']: p['owner'] for p in reports}, {c.path: c.owner for c in jd.cells.values()})
                 self.assertEqual(topic['final']['why'], ['open_cell'])
                 self.assertFalse(topic['closable'])

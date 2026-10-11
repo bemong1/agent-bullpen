@@ -1,7 +1,7 @@
 """Diagnostics: what the judgments noticed and could not settle, in one list per session. The affiliation judgment (board/affil.py through LINKS.diags), the
 state judgment (board/runstate.py: per agent, and the limit groups), the debate judgment (board/debates.py) and the board's own reading (torn lines, lines that
 raised an error, a link cache it cannot trust, a live process with no record) all say their codes here. An entry has a code, a level, who it is about and a few
-small values: never the text of a record, an instruction, a path inside a record or a value of an environment. At most MAX_PER_SESSION entries are kept."""
+small values: never the text of a record, an instruction or a value of an environment. Cell collisions also carry their judged file paths. At most MAX_PER_SESSION entries are kept."""
 
 import math
 import os
@@ -32,6 +32,13 @@ class _Items:
         self.ok = ok
 
 
+class _Paths(_Items):
+    """Collision paths from the debate judgment, kept separately from the short display text."""
+
+    def __init__(self):
+        super().__init__(lambda v: isinstance(v, str) and len(v) <= 4096 and os.path.isabs(v) and re.fullmatch(r'[^\x00-\x1f\x7f]+', v) is not None)
+
+
 def _count(v):
     return type(v) is int and 0 <= v <= COUNT_MAX
 
@@ -60,6 +67,7 @@ _TREE = lambda v: isinstance(v, str) and (SID_RE.fullmatch(v) is not None or NOD
 
 # What each code carries, by name and by shape. A diagnostic is for the page and /api/diag: it gets only what its code is known to give, and a text only in the shape that
 # code gives it, so nothing a record said (a version, an instruction, a path, a message) can get through by being put in a parameter. A code that is not here carries none.
+# Only alias_collision accepts the judgment's file paths, with separate bounds from its display text.
 PARAMS = {
     'limit_group': {'resets_at': _when, 'members': _count},
     'not_resumed': {'reason': _one_of('limit', 'api_error')},
@@ -81,7 +89,7 @@ PARAMS = {
     'orphan_launch': {'n': _count, 'ambiguous': _flag},
     'fingerprint_incomplete': {},
     'path_unresolved': {'n': _count},
-    'alias_collision': {'detail': _shaped(_TEXT + '{1,%d}' % VALUE_MAX)},
+    'alias_collision': {'detail': _shaped(_TEXT + '{1,%d}' % VALUE_MAX), 'paths': _Paths()},
     'seat_tie_held': {'detail': _shaped(r'(?:-|[0-9]{1,4})/' + _STEM + '{1,60}')},
     'launch_split': {'detail': _shaped(_TEXT + '{1,%d}' % VALUE_MAX)},
     'history_lost': {'detail': _shaped(r'(?:-|[0-9]{1,4})/' + _STEM + '{1,60}')},
@@ -119,7 +127,11 @@ def _allowed(code, params):
 
 
 def _entry(code, scope, agent=None, unit=None, **params):
-    return {'code': code, 'level': LEVEL.get(code, 'warn'), 'scope': scope, 'agent': agent, 'unit': unit, 'params': _allowed(code, _clean(params))}
+    clean = _clean(params)
+    for k, spec in (PARAMS.get(code) or {}).items():
+        if isinstance(spec, _Paths) and isinstance(params.get(k), (list, tuple)):
+            clean[k] = [p for p in params[k] if spec.ok(p)][:LIST_MAX]
+    return {'code': code, 'level': LEVEL.get(code, 'warn'), 'scope': scope, 'agent': agent, 'unit': unit, 'params': _allowed(code, clean)}
 
 
 INVISIBLE_EVERY = 3.0            # seconds: the process table is read at most this often per session page
@@ -220,7 +232,12 @@ def collect(s, now, verdicts, groups):
     for d in getattr(s, 'debate_diag', None) or ():
         code, agent, unit, detail = d.get('code'), d.get('agent'), d.get('unit'), d.get('detail')
         scope = 'agent' if agent else ('session' if code == 'listing_capped' else 'unit')
-        out.append(_entry(code, scope, agent, short_path(unit) if unit else None, **({'detail': detail} if detail else {})))
+        if code == 'alias_collision' and isinstance(detail, str) and len(detail) > VALUE_MAX:
+            detail = detail[:VALUE_MAX - 1] + '…'
+        params = {'detail': detail} if detail else {}
+        if code == 'alias_collision' and 'paths' in d:
+            params['paths'] = d['paths']
+        out.append(_entry(code, scope, agent, short_path(unit) if unit else None, **params))
     rank = {'warn': 0, 'info': 1}
     out.sort(key=lambda e: (rank[e['level']], e['code'], e['agent'] or '', e['unit'] or ''))        # a stable order, so a page that polls sees no flicker
     return out[:MAX_PER_SESSION]

@@ -243,8 +243,8 @@ class Shape(unittest.TestCase):
     def test_the_file_has_the_cases_of_the_contract(self):
         blob = load_cases()
         self.assertEqual(blob['version'], 4)
-        self.assertEqual(len(blob['cases']), 141)
-        self.assertEqual(len({c['id'] for c in blob['cases']}), 141)
+        self.assertEqual(len(blob['cases']), 147)
+        self.assertEqual(len({c['id'] for c in blob['cases']}), 147)
 
 
 if __name__ == '__main__':

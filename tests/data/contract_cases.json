@@ -25252,6 +25252,1182 @@
    "then": [],
    "summary_in": "Random differential counterexample: round collision evidence retains full paths",
    "summary_out": "Structure only; see expect."
+  },
+  {
+   "id": "C142",
+   "group": "D",
+   "title": "An open guide reader makes an orchestrator-created empty debate current",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "User-approved J10 current selection (resume brief)",
+   "disk": {
+    "dirs": [
+     "talk/r1",
+     "talk/r2",
+     "other/r1"
+    ],
+    "files": {
+     "talk/brief.md": {
+      "mtime": 100,
+      "size": 10
+     },
+     "other/r1/A.md": {
+      "mtime": 50,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/brief.md",
+      "ts": 100,
+      "kind": "replace",
+      "evidence": "shell",
+      "ok": true,
+      "call": "t0",
+      "run": 1,
+      "proof": "exit",
+      "span": null,
+      "out": null
+     }
+    ],
+    "hints": {
+     "talk": {
+      "ts": 100.0,
+      "calls": [
+       "t0"
+      ],
+      "groups": [
+       "m0"
+      ]
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 10,
+     "first": 10,
+     "last": 210,
+     "run": 1,
+     "run_start": 10,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 50,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 150,
+     "first": 150,
+     "last": 170,
+     "run": 1,
+     "run_start": 150,
+     "launch": null,
+     "writes": [],
+     "reads": [
+      {
+       "path": "talk/brief.md",
+       "ts": 151,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "other",
+     "talk"
+    ],
+    "hinted": [
+     "talk"
+    ],
+    "current": "talk",
+    "cells": {
+     "other|r1|A": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "no_report"
+      ],
+      "candidates": []
+     },
+     "other": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "none"
+      ],
+      "candidates": []
+     }
+    },
+    "closable": {
+     "talk": false,
+     "other": false
+    },
+    "placed": {
+     "A": null,
+     "B": {
+      "unit": "talk",
+      "topic": null,
+      "why": "guide_read",
+      "whys": [
+       "guide_read"
+      ],
+      "sure": false
+     }
+    }
+   },
+   "then": [
+    {
+     "add": {
+      "set_agent": {
+       "B": {
+        "status": "done"
+       }
+      }
+     },
+     "expect": {
+      "current": "other",
+      "closable": {
+       "talk": false,
+       "other": false
+      },
+      "cells": {
+       "other|r1|A": {
+        "owner": "A",
+        "agent": "A",
+        "editors": [],
+        "evidence": "tool",
+        "state": "done",
+        "previous": false,
+        "hint": null
+       }
+      }
+     }
+    }
+   ],
+   "summary_in": "An open guide reader makes an orchestrator-created empty debate current",
+   "summary_out": "Only the default selection changes; placements remain estimated and no new seat or final is confirmed."
+  },
+  {
+   "id": "C143",
+   "group": "D",
+   "title": "An open launch-call placement competes before any cell is written",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "User-approved J10 current selection (resume brief)",
+   "disk": {
+    "dirs": [
+     "talk/r1",
+     "talk/r2",
+     "other/r1"
+    ],
+    "files": {
+     "talk/brief.md": {
+      "mtime": 100,
+      "size": 10
+     },
+     "other/r1/A.md": {
+      "mtime": 50,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/brief.md",
+      "ts": 100,
+      "kind": "replace",
+      "evidence": "shell",
+      "ok": true,
+      "call": "t0",
+      "run": 1,
+      "proof": "exit",
+      "span": null,
+      "out": null
+     }
+    ],
+    "hints": {
+     "talk": {
+      "ts": 100.0,
+      "calls": [
+       "t0"
+      ],
+      "groups": [
+       "m0"
+      ]
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 10,
+     "first": 10,
+     "last": 210,
+     "run": 1,
+     "run_start": 10,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 50,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "unknown",
+     "start": 150,
+     "first": 150,
+     "last": 170,
+     "run": 1,
+     "run_start": 150,
+     "launch": {
+      "provider": "claude",
+      "tree": "S",
+      "node": null,
+      "group": "new-group",
+      "call": "t0"
+     },
+     "writes": [],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "other",
+     "talk"
+    ],
+    "hinted": [
+     "talk"
+    ],
+    "current": "talk",
+    "cells": {
+     "other|r1|A": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "no_report"
+      ],
+      "candidates": []
+     },
+     "other": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "none"
+      ],
+      "candidates": []
+     }
+    },
+    "closable": {
+     "talk": false,
+     "other": false
+    },
+    "placed": {
+     "A": null,
+     "B": {
+      "unit": "talk",
+      "topic": null,
+      "why": "launch_call",
+      "whys": [
+       "launch_call"
+      ],
+      "sure": false
+     }
+    }
+   },
+   "then": [
+    {
+     "add": {
+      "set_agent": {
+       "B": {
+        "status": "interrupted"
+       }
+      }
+     },
+     "expect": {
+      "current": "other"
+     }
+    }
+   ],
+   "summary_in": "An open launch-call placement competes before any cell is written",
+   "summary_out": "Only the default selection changes; placements remain estimated and no new seat or final is confirmed."
+  },
+  {
+   "id": "C144",
+   "group": "D",
+   "title": "Multiple eligible debates use the latest agent start, even with reversed hint times",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "User-approved J10 current selection (resume brief)",
+   "disk": {
+    "dirs": [
+     "talk/r1",
+     "talk/r2",
+     "other/r1",
+     "new/r1"
+    ],
+    "files": {
+     "talk/brief.md": {
+      "mtime": 100,
+      "size": 10
+     },
+     "other/r1/A.md": {
+      "mtime": 50,
+      "size": 10
+     },
+     "new/brief.md": {
+      "mtime": 90,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/brief.md",
+      "ts": 100,
+      "kind": "replace",
+      "evidence": "shell",
+      "ok": true,
+      "call": "t0",
+      "run": 1,
+      "proof": "exit",
+      "span": null,
+      "out": null
+     }
+    ],
+    "hints": {
+     "talk": {
+      "ts": 900,
+      "calls": [
+       "t0"
+      ],
+      "groups": [
+       "m0"
+      ]
+     },
+     "new": {
+      "ts": 90,
+      "calls": [],
+      "groups": []
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 10,
+     "first": 10,
+     "last": 210,
+     "run": 1,
+     "run_start": 10,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 50,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 150,
+     "first": 150,
+     "last": 170,
+     "run": 1,
+     "run_start": 150,
+     "launch": null,
+     "writes": [],
+     "reads": [
+      {
+       "path": "talk/brief.md",
+       "ts": 151,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "C",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "stalled",
+     "start": 200,
+     "first": 200,
+     "last": 220,
+     "run": 1,
+     "run_start": 200,
+     "launch": null,
+     "writes": [],
+     "reads": [
+      {
+       "path": "new/brief.md",
+       "ts": 201,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "new",
+     "other",
+     "talk"
+    ],
+    "hinted": [
+     "new",
+     "talk"
+    ],
+    "current": "new",
+    "cells": {
+     "other|r1|A": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "no_report"
+      ],
+      "candidates": []
+     },
+     "other": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "none"
+      ],
+      "candidates": []
+     },
+     "new": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "no_report"
+      ],
+      "candidates": []
+     }
+    },
+    "closable": {
+     "talk": false,
+     "new": false,
+     "other": false
+    }
+   },
+   "then": [],
+   "summary_in": "Multiple eligible debates use the latest agent start, even with reversed hint times",
+   "summary_out": "Only the default selection changes; placements remain estimated and no new seat or final is confirmed."
+  },
+  {
+   "id": "C145",
+   "group": "D",
+   "title": "A guide read without an orchestrator write hint does not promote a walked debate",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "User-approved J10 current selection (resume brief)",
+   "disk": {
+    "dirs": [
+     "talk/r1",
+     "talk/r2",
+     "other/r1"
+    ],
+    "files": {
+     "talk/brief.md": {
+      "mtime": 100,
+      "size": 10
+     },
+     "other/r1/A.md": {
+      "mtime": 50,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/brief.md",
+      "ts": 100,
+      "kind": "replace",
+      "evidence": "shell",
+      "ok": true,
+      "call": "t0",
+      "run": 1,
+      "proof": "exit",
+      "span": null,
+      "out": null
+     }
+    ],
+    "hints": {},
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 10,
+     "first": 10,
+     "last": 210,
+     "run": 1,
+     "run_start": 10,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 50,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 150,
+     "first": 150,
+     "last": 170,
+     "run": 1,
+     "run_start": 150,
+     "launch": null,
+     "writes": [],
+     "reads": [
+      {
+       "path": "talk/brief.md",
+       "ts": 151,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [
+    "talk"
+   ],
+   "expect": {
+    "listed": [
+     "other",
+     "talk"
+    ],
+    "hinted": [],
+    "current": "other",
+    "cells": {
+     "other|r1|A": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "no_report"
+      ],
+      "candidates": []
+     },
+     "other": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "none"
+      ],
+      "candidates": []
+     }
+    },
+    "placed": {
+     "A": null,
+     "B": {
+      "unit": "talk",
+      "topic": null,
+      "why": "guide_read",
+      "whys": [
+       "guide_read"
+      ],
+      "sure": false
+     }
+    }
+   },
+   "then": [],
+   "summary_in": "A guide read without an orchestrator write hint does not promote a walked debate",
+   "summary_out": "Only the default selection changes; placements remain estimated and no new seat or final is confirmed."
+  },
+  {
+   "id": "C146",
+   "group": "D",
+   "title": "An ambiguous guide reader does not promote either orchestrator-created debate",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "User-approved J10 current selection (resume brief)",
+   "disk": {
+    "dirs": [
+     "talk/r1",
+     "talk/r2",
+     "other/r1",
+     "new/r1"
+    ],
+    "files": {
+     "talk/brief.md": {
+      "mtime": 100,
+      "size": 10
+     },
+     "other/r1/A.md": {
+      "mtime": 50,
+      "size": 10
+     },
+     "new/brief.md": {
+      "mtime": 100,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "talk/brief.md",
+      "ts": 100,
+      "kind": "replace",
+      "evidence": "shell",
+      "ok": true,
+      "call": "t0",
+      "run": 1,
+      "proof": "exit",
+      "span": null,
+      "out": null
+     }
+    ],
+    "hints": {
+     "talk": {
+      "ts": 100.0,
+      "calls": [
+       "t0"
+      ],
+      "groups": [
+       "m0"
+      ]
+     },
+     "new": {
+      "ts": 100,
+      "calls": [],
+      "groups": []
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 10,
+     "first": 10,
+     "last": 210,
+     "run": 1,
+     "run_start": 10,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 50,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 150,
+     "first": 150,
+     "last": 170,
+     "run": 1,
+     "run_start": 150,
+     "launch": null,
+     "writes": [],
+     "reads": [
+      {
+       "path": "talk/brief.md",
+       "ts": 151,
+       "via": "tool"
+      },
+      {
+       "path": "new/brief.md",
+       "ts": 152,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "new",
+     "other",
+     "talk"
+    ],
+    "hinted": [
+     "new",
+     "talk"
+    ],
+    "current": "other",
+    "cells": {
+     "other|r1|A": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "finals": {
+     "talk": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "no_report"
+      ],
+      "candidates": []
+     },
+     "other": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "none"
+      ],
+      "candidates": []
+     },
+     "new": {
+      "confirmed": false,
+      "path": null,
+      "by": null,
+      "why": [
+       "no_report"
+      ],
+      "candidates": []
+     }
+    },
+    "placed": {
+     "A": null,
+     "B": null
+    },
+    "diag": [
+     {
+      "code": "launch_split",
+      "agent": "B",
+      "unit": null,
+      "detail": "new,talk"
+     }
+    ]
+   },
+   "then": [],
+   "summary_in": "An ambiguous guide reader does not promote either orchestrator-created debate",
+   "summary_out": "Only the default selection changes; placements remain estimated and no new seat or final is confirmed."
+  },
+  {
+   "id": "C147",
+   "group": "D",
+   "title": "An open reader of a hinted bundle topic promotes its bundle root",
+   "rows": [
+    "J9",
+    "J10",
+    "J11",
+    "J15",
+    "J16"
+   ],
+   "sol": [],
+   "limit": false,
+   "decision": "User-approved J10 current selection (resume brief)",
+   "disk": {
+    "dirs": [
+     "other/r1",
+     "bundle/topic/r1",
+     "bundle/topic/r2"
+    ],
+    "files": {
+     "other/r1/A.md": {
+      "mtime": 50,
+      "size": 10
+     },
+     "bundle/brief.md": {
+      "mtime": 90,
+      "size": 10
+     },
+     "bundle/topic/brief.md": {
+      "mtime": 100,
+      "size": 10
+     }
+    }
+   },
+   "orch": {
+    "writes": [
+     {
+      "path": "bundle/topic/brief.md",
+      "ts": 100,
+      "kind": "replace",
+      "evidence": "shell",
+      "ok": true,
+      "call": "t0",
+      "run": 1,
+      "proof": "exit",
+      "span": null,
+      "out": null
+     }
+    ],
+    "hints": {
+     "bundle/topic": {
+      "ts": 100,
+      "calls": [],
+      "groups": []
+     }
+    },
+    "windows": [],
+    "lost": null
+   },
+   "agents": [
+    {
+     "id": "A",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "done",
+     "start": 10,
+     "first": 10,
+     "last": 210,
+     "run": 1,
+     "run_start": 10,
+     "launch": null,
+     "writes": [
+      {
+       "path": "other/r1/A.md",
+       "ts": 50,
+       "kind": "create",
+       "evidence": "tool",
+       "ok": true,
+       "call": null,
+       "run": 1,
+       "proof": "tool",
+       "span": null,
+       "out": null
+      }
+     ],
+     "reads": [],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    },
+    {
+     "id": "B",
+     "provider": "claude",
+     "origin": "subagent",
+     "status": "running",
+     "start": 150,
+     "first": 150,
+     "last": 170,
+     "run": 1,
+     "run_start": 150,
+     "launch": null,
+     "writes": [],
+     "reads": [
+      {
+       "path": "bundle/topic/brief.md",
+       "ts": 151,
+       "via": "tool"
+      }
+     ],
+     "planned": [],
+     "windows": [],
+     "windows_capped": null,
+     "writes_dropped": null,
+     "lost": null,
+     "tag": null,
+     "sent_to": []
+    }
+   ],
+   "walked": [],
+   "expect": {
+    "listed": [
+     "bundle",
+     "other"
+    ],
+    "hinted": [
+     "bundle"
+    ],
+    "current": "bundle",
+    "cells": {
+     "other|r1|A": {
+      "owner": "A",
+      "agent": "A",
+      "editors": [],
+      "evidence": "tool",
+      "state": "done",
+      "previous": false,
+      "hint": null
+     }
+    },
+    "placed": {
+     "A": null,
+     "B": {
+      "unit": "bundle",
+      "topic": "bundle/topic",
+      "why": "guide_read",
+      "whys": [
+       "guide_read"
+      ],
+      "sure": false
+     }
+    },
+    "closable": {
+     "bundle/topic": false,
+     "other": false
+    }
+   },
+   "then": [],
+   "summary_in": "An open reader of a hinted bundle topic promotes its bundle root",
+   "summary_out": "Only the default selection changes; placements remain estimated and no new seat or final is confirmed."
   }
  ]
 }

@@ -201,7 +201,7 @@ def judge(s, statuses, fresh=False):
     agent_units  {agent id: {unit}} the debates where an agent owns a cell
     members      {agent id: {unit}} the debates an agent is tied to: it owns, edited or was asked to save a cell there, has its room tag, or is thought to work there
     assignments  facts.Assignment list (the cells with their owners, the evidence and the period each was held)
-    diag         {code, agent, unit, detail} dicts (alias_collision, seat_tie_held, launch_split, history_lost, listing_capped)
+    diag         {code, agent, unit, detail} dicts, with paths for cell collisions (alias_collision, seat_tie_held, launch_split, history_lost, listing_capped)
     placed       {agent id: {unit, topic, why, whys, sure}} where an agent that owns no cell is thought to work; launch {agent id: opaque text} the call it was launched by (the same text: launched together)
     cells, finals  the units.Cell and units.Final of the Judgement
     reads        what the judgment looked at on the disk with the answers (Catalog.reads): the judgment is good while Catalog.changed(reads) says no
@@ -308,7 +308,6 @@ def _debate(s, root, unit_list, jd, cells_of, readers_of, statuses):
     last_ts = jd.unit_ts.get(root, 0)
     rootfinal = jd.finals.get(root) if root not in unit_list and root not in rooms else None
     root_final = _final_dict(s, rootfinal, root) if rootfinal else None
-    cell_keys = {(c.unit, c.path): key for key, c in jd.cells.items()}
     for unit in unit_list:
         un = cat.unit_at(unit)
         tb = _head(s, cat, un.brief if un and un.brief else ((rooms[unit].guide or '') if unit in rooms else os.path.join(unit, 'brief.md')))
@@ -358,7 +357,7 @@ def _debate(s, root, unit_list, jd, cells_of, readers_of, statuses):
                 if info is None and state == 'previous':            # a file the page may not show (a link to a credential file, a secret name) is no file to show
                     state, previous = 'waiting', False
                 cells.append({'round': rnd, 'state': state, 'path': path, 'agent': agent_id, 'owner': c.owner if c else None, 'editors': list(c.editors) if c else [],
-                              'reports': [{'key': list(cell_keys[(x.unit, x.path)]), 'path': x.path, 'owner': x.owner, 'agent': x.agent,
+                              'reports': [{'key': [x.unit, *os.path.relpath(x.path, x.unit).split(os.sep)], 'path': x.path, 'owner': x.owner, 'agent': x.agent,
                                            'editors': list(x.editors), 'evidence': x.evidence, 'state': x.state, 'previous': x.previous, 'hint': x.hint} for x in here],
                               'evidence': c.evidence if c else None, 'hint': c.hint if c else None, 'previous': previous,
                               'rdir': c.rdir if c else (dirs[0] if dirs else 'r%d' % rnd), 'readers': readers,
